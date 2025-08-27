@@ -1,11 +1,18 @@
 using DecisionRules
 using Test
 using Gurobi
-import ParametricOptInterface as POI
 using JuMP
 using Zygote
 using Flux
 using Random
+
+import Pkg
+
+Pkg.add(;
+    url = "https://github.com/jump-dev/DiffOpt.jl",
+    rev = "ar/dualparameter",
+)
+
 using DiffOpt
 
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0)

@@ -6,6 +6,7 @@ version = "1.0.0-DEV"
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+DiffOpt = "930fe3bc-9c6b-11ea-2d94-6184641e85e7"
 FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
@@ -15,6 +16,7 @@ ParametricOptInterface = "0ce4ce61-57bf-432b-a095-efac525d185e"
 
 [compat]
 julia = "1"
+DiffOpt = "0.5.1"
 
 [extras]
 CUDA_Runtime_jll = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"
