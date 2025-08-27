@@ -6,10 +6,9 @@ using Gurobi
 using MosekTools
 using Ipopt, HSL_jll
 import MathOptSymbolicAD
-import ParametricOptInterface as POI
 using JLD2
 using HydroPowerModels
-
+using DiffOpt
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -40,26 +39,12 @@ HydroPowerModels.gather_useful_info!(data)
 # Build MSP
 
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
-    joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, param_type=:Var
+    joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 
 det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
 
-set_optimizer(det_equivalent, Gurobi.Optimizer)
-
-# set_optimizer(det_equivalent, Mosek.Optimizer)
-
-# set_optimizer(det_equivalent, optimizer_with_attributes(Ipopt.Optimizer, 
-#     "print_level" => 0,
-#     "hsllib" => HSL_jll.libhsl_path,
-#     "linear_solver" => "ma27"
-# ))
-
-# set_attribute(
-#     det_equivalent,
-#     MOI.AutomaticDifferentiationBackend(),
-#     MathOptSymbolicAD.DefaultBackend(),
-# )
+set_optimizer(det_equivalent, DiffOpt.diff_model(Gurobi.Optimizer))
 
 num_hydro = length(initial_state)
 

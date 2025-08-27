@@ -6,9 +6,10 @@ using JuMP
 using Zygote
 using Flux
 using Random
+using DiffOpt
 
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0)
-    subproblem = JuMP.Model(() -> POI.Optimizer(Gurobi.Optimizer()))
+    subproblem = JuMP.Model(DiffOpt.conic_diff_model(Gurobi.Optimizer))
     set_attributes(subproblem, "output_flag" => false)
     @variable(subproblem, x >= 0.0)
     @variable(subproblem, 0.0 <= y <= 8.0)
@@ -97,7 +98,7 @@ end
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
-        set_optimizer(det_equivalent, () -> POI.Optimizer(HiGHS.Optimizer()))
+        set_optimizer(det_equivalent, DiffOpt.diff_model(Gurobi.Optimizer))
         JuMP.optimize!(det_equivalent)
         obj_val = objective_value(det_equivalent)
         DecisionRules.pdual.(state_params_in[1])

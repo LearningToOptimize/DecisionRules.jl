@@ -1,33 +1,12 @@
-function variable_to_parameter(model::JuMP.Model, variable::JuMP.VariableRef; initial_value=0.0, deficit=nothing, param_type=:Param)
-    if param_type === :Param
-        parameter = @variable(model; base_name = "_" * name(variable), set=MOI.Parameter(initial_value))
-        # bind the parameter to the variable
-        if isnothing(deficit)
-            @constraint(model, variable == parameter)
-            return parameter
-        else
-            @constraint(model, variable + deficit == parameter)
-            return parameter, variable
-        end
-    elseif param_type === :Cons
-        if isnothing(deficit)
-            c = @constraint(model, variable == 0.0)
-            return c
-        else
-            c = @constraint(model, variable + deficit == 0.0)
-            return c, variable
-        end
+function variable_to_parameter(model::JuMP.Model, variable::JuMP.VariableRef; initial_value=0.0, deficit=nothing)
+    parameter = @variable(model; base_name = "_" * name(variable), set=MOI.Parameter(initial_value))
+    # bind the parameter to the variable
+    if isnothing(deficit)
+        @constraint(model, variable == parameter)
+        return parameter
     else
-        parameter = @variable(model; base_name = "_" * name(variable))
-        # fix(parameter, initial_value)
-        # bind the parameter to the variable
-        if isnothing(deficit)
-            @constraint(model, variable == parameter)
-            return parameter
-        else
-            @constraint(model, variable + deficit == parameter)
-            return parameter, variable
-        end
+        @constraint(model, variable + deficit == parameter)
+        return parameter, variable
     end
 end
 

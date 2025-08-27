@@ -5,6 +5,7 @@ using Statistics
 
 using JuMP
 import Ipopt, HSL_jll
+using DiffOpt
 # import Plots
 
 
@@ -33,11 +34,11 @@ function build_rocket_problem(;
     # solver like HiGHS.
 
     det_equivalent = Model()
-    set_optimizer(det_equivalent, optimizer_with_attributes(Ipopt.Optimizer, 
+    set_optimizer(det_equivalent, DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
         "print_level" => 0,
         "hsllib" => HSL_jll.libhsl_path,
         "linear_solver" => "ma27"
-    ))
+    )))
 
     # Next, we create our state and control variables, which are each indexed by
     # `t`. It is good practice for nonlinear programs to always provide a starting

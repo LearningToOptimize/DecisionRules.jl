@@ -1,13 +1,3 @@
-function set_parameter(subproblem, _var::VariableRef, val)
-    @assert owner_model(_var) == subproblem
-    if is_parameter(_var)
-        MOI.set(subproblem, POI.ParameterValue(), _var, val)
-    else
-        fix(_var, val)
-    end
-end
-set_parameter(subproblem, _var::ConstraintRef, val) = set_normalized_rhs(_var, val)
-
 function simulate_states(
     initial_state::Vector{Float64},
     uncertainties,
@@ -51,18 +41,18 @@ function simulate_stage(subproblem::JuMP.Model, state_param_in::Vector{Any}, sta
 ) where {T <: Real, V <: Real, Z <: Real}
     # Update state parameters
     for (i, state_var) in enumerate(state_param_in)
-        set_parameter(subproblem, state_var, state_in[i])
+        set_parameter_value(state_var, state_in[i])
     end
 
     # Update uncertainty
     for (uncertainty_param, uncertainty_value) in uncertainty
-        set_parameter(subproblem, uncertainty_param, uncertainty_value)
+        set_parameter_value(uncertainty_param, uncertainty_value)
     end
 
     # Update state parameters out
     for i in 1:length(state_param_in)
         state_var = state_param_out[i][1]
-        set_parameter(subproblem, state_var, state_out_target[i])
+        set_parameter_value(state_var, state_out_target[i])
     end
 
     # Solve subproblem
@@ -161,19 +151,19 @@ function simulate_multistage(
         # Update state parameters in
         if t == 1
             for (i, state_var) in enumerate(state_params_in[t])
-                set_parameter(det_equivalent, state_var, state[i])
+                set_parameter_value(state_var, state[i])
             end
         end
 
         # Update uncertainty
         for (uncertainty_param, uncertainty_value) in uncertainties[t]
-            set_parameter(det_equivalent, uncertainty_param, uncertainty_value)
+            set_parameter_value(uncertainty_param, uncertainty_value)
         end
 
         # Update state parameters out
         for i in 1:length(state_params_out[t])
             state_var = state_params_out[t][i][1]
-            set_parameter(det_equivalent, state_var, states[t + 1][i])
+            set_parameter_value(state_var, states[t + 1][i])
         end
     end
 

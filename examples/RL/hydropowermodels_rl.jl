@@ -58,7 +58,7 @@ end
     formulation_file = formulation * ".mof.json"
     Random.seed!(1234)
     subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
-        joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, param_type=:Var, penalty=penalty
+        joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, penalty=penalty
     )
 
     for subproblem in subproblems
