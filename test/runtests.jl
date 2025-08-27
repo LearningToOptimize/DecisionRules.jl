@@ -1,6 +1,6 @@
 using DecisionRules
 using Test
-using Gurobi
+using HiGHS
 using JuMP
 using Zygote
 using Flux
@@ -16,7 +16,7 @@ Pkg.add(;
 using DiffOpt
 
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0)
-    subproblem = JuMP.Model(DiffOpt.conic_diff_model(Gurobi.Optimizer))
+    subproblem = JuMP.Model(DiffOpt.conic_diff_model(HiGHS.Optimizer))
     set_attributes(subproblem, "output_flag" => false)
     @variable(subproblem, x >= 0.0)
     @variable(subproblem, 0.0 <= y <= 8.0)
@@ -69,7 +69,7 @@ end
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 92
     end
 
-    @test "deterministic_equivalent" begin
+    @testset "deterministic_equivalent" begin
         subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
         optimize!(subproblem2)
         objective_value(subproblem2)
@@ -82,7 +82,7 @@ end
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
-        set_optimizer(det_equivalent, DiffOpt.diff_model(Gurobi.Optimizer))
+        set_optimizer(det_equivalent, DiffOpt.diff_model(HiGHS.Optimizer))
         JuMP.optimize!(det_equivalent)
         obj_val = objective_value(det_equivalent)
         DecisionRules.pdual.(state_params_in[1])
