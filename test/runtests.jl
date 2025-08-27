@@ -46,14 +46,16 @@ end
 
     @testset "simulate_stage" begin
         inflow = 2.0
-        state_param_in = [state_in_1]
-        state_param_out = [(state_out_1, state_out_var_1)]
-        uncertainty_sample = Dict(uncertainty_1 => inflow)
+        state_param_in = Vector{Any}(undef, 1)
+        state_param_out = Vector{Tuple{Any, VariableRef}}(undef, 1)
+        state_param_in .= [state_in_1]
+        state_param_out .= [(state_out_1, state_out_var_1)]
+        uncertainty_sample = [(uncertainty_1, inflow)]
         state_in_val = [5.0]
         state_out_val = [4.0]
         # Test simulate_stage
         @test DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val) ≈ 210
-        grad = gradient(DecisionRules.simulate_stage, subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
+        grad = Zygote.gradient(DecisionRules.simulate_stage, subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
         @test grad[5] ≈ [-30.0]
         @test grad[6] ≈ [30.0]
         # Train flux DR
@@ -63,7 +65,7 @@ end
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) > 90.0
         for _ in 1:2050
             _inflow = rand(1.:5)
-            uncertainty_samp = Dict(uncertainty => _inflow)
+            uncertainty_samp = [(uncertainty_1, _inflow)]
             Flux.train!((m, inflow) -> DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m(inflow)), m, [[_inflow] for _ =1:10], Flux.Adam())
         end
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 92
@@ -80,7 +82,7 @@ end
         state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
         state_params_in .= [[state_in_1], [state_in_2]]
         state_params_out .= [[(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]]
-        uncertainty_samples = [Dict(uncertainty_1 => [2.0]), Dict(uncertainty_2 => [1.0])]
+        uncertainty_samples = [[(uncertainty_1, 2.0)], [(uncertainty_2, 1.0)]]
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(DiffOpt.diff_model(HiGHS.Optimizer), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)

@@ -77,9 +77,9 @@ function build_hydropowermodels(case_folder::AbstractString, subproblem_file::Ab
             delete(subproblems[t], con)
         end
         state_params_in[t], state_param_out, inflow = find_reservoirs_and_inflow(subproblems[t])
-    state_params_in[t] = variable_to_parameter.(subproblems[t], state_params_in[t])
-    state_params_out[t] = [variable_to_parameter(subproblems[t], state_param_out[i]; deficit=_deficit[i]) for i in 1:nHyd]
-    inflow = [(variable_to_parameter(subproblems[t], inflow[i]),  vector_inflows[i][t, :] .+ 0.0) for i in 1:nHyd]
+        state_params_in[t] = variable_to_parameter.(subproblems[t], state_params_in[t])
+        state_params_out[t] = [variable_to_parameter(subproblems[t], state_param_out[i]; deficit=_deficit[i]) for i in 1:nHyd]
+        inflow = [(variable_to_parameter(subproblems[t], inflow[i]),  vector_inflows[i][t, :] .+ 0.0) for i in 1:nHyd]
         uncertainty_samples[t] = inflow
     end
 
