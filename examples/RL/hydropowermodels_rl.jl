@@ -95,7 +95,7 @@ end
             uncertainty_sample = [(uncertainty_samples[j][i][1], rain_state[i]) for i in 1:length(rain)]
             simulate_stage(subproblems[j], state_params_in[j], state_params_out[j], uncertainty_sample, state_in, state_out)
             r = _objective_value(subproblems[j])
-            sp = DecisionRules.get_next_state(subproblems[j], state_params_out[j], state_in, state_out)
+            sp = DecisionRules.get_next_state(subproblems[j], state_params_in[j], state_params_out[j], state_in, state_out)
             @info "Stage t=$j" sum(state_in) sum(rain_state) sum(state_out) sum(sp) r
             sp = [sp; rain; j+1]
             o = sp # no hidden state
