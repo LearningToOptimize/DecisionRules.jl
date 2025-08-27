@@ -238,12 +238,12 @@ function add_child_model_exps!(model::JuMP.Model, subproblem::JuMP.Model, var_sr
 end
 
 "Create Single JuMP.Model from subproblems. rename variables to avoid conflicts by adding [t] at the end of the variable name where t is the subproblem index"
-function deterministic_equivalent(subproblems::Vector{JuMP.Model},
+function deterministic_equivalent!(model::JuMP.Model,
+    subproblems::Vector{JuMP.Model},
     state_params_in::Vector{Vector{Any}},
     state_params_out::Vector{Vector{Tuple{Any, VariableRef}}},
     initial_state::Vector{Float64},
-    uncertainties::Vector{Vector{Tuple{VariableRef, Vector}}};
-    model = JuMP.Model()
+    uncertainties::Vector{Vector{Tuple{VariableRef, Vector}}},
 )
     set_objective_sense(model, objective_sense(subproblems[1]))
     uncertainties_new = Vector{Vector{Tuple{VariableRef, Vector}}}(undef, length(uncertainties))

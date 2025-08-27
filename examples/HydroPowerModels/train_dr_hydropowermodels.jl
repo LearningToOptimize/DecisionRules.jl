@@ -56,13 +56,13 @@ subproblems, state_params_in, state_params_out, uncertainty_samples, initial_sta
     joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 
-det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples) #; model = JuMP.Model(() -> POI_cached_optimizer()))
-
-set_optimizer(det_equivalent, DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
     "print_level" => 0,
     "hsllib" => HSL_jll.libhsl_path,
     "linear_solver" => "ma27"
-)))
+))
+
+det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(det_equivalent, subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
 
 num_hydro = length(initial_state)
 # for subproblem in subproblems

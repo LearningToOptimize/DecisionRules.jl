@@ -16,8 +16,8 @@ Pkg.add(;
 using DiffOpt
 
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0)
-    subproblem = JuMP.Model(DiffOpt.conic_diff_model(HiGHS.Optimizer))
-    set_attributes(subproblem, "output_flag" => false)
+    subproblem = DiffOpt.conic_diff_model(HiGHS.Optimizer)
+    # set_attributes(subproblem, "output_flag" => false)
     @variable(subproblem, x >= 0.0)
     @variable(subproblem, 0.0 <= y <= 8.0)
     @variable(subproblem, 0.0 <= state_out_var <= 8.0)
@@ -76,13 +76,15 @@ end
         value(state_out_var_2)
 
         subproblems = [subproblem1, subproblem2]
-        state_params_in = [[state_in_1], [state_in_2]]
-        state_params_out = [[(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]]
+        state_params_in = Vector{Vector{Any}}(undef, 2)
+        state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+        state_params_in .= [[state_in_1], [state_in_2]]
+        state_params_out .= [[(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]]
         uncertainty_samples = [Dict(uncertainty_1 => [2.0]), Dict(uncertainty_2 => [1.0])]
         initial_state = [5.0]
 
-        det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
-        set_optimizer(det_equivalent, DiffOpt.diff_model(HiGHS.Optimizer))
+        det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(DiffOpt.diff_model(HiGHS.Optimizer), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
+        # set_optimizer(det_equivalent, DiffOpt.diff_model(HiGHS.Optimizer))
         JuMP.optimize!(det_equivalent)
         obj_val = objective_value(det_equivalent)
         DecisionRules.pdual.(state_params_in[1])
