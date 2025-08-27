@@ -69,29 +69,6 @@ end
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 92
     end
 
-    # @testset "get_next_state" begin # WRONG get_next_state needs DiffOpt.jl
-    #     inflow = 2.0
-    #     state_param_in = [state_in_1]
-    #     state_param_out = [(state_out_1, state_out_var_1)]
-    #     uncertainty_sample = Dict(uncertainty_1 => inflow)
-    #     state_in_val = [5.0]
-    #     state_out_val = [4.0]
-    #     DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
-    #     # Test 1st case
-    #     state_out_res1 = DecisionRules.get_next_state(subproblem1, state_param_out, max_state_out, state_out_val)
-    #     @test state_out_res1 ≈ [4.0]
-    #     jacob = jacobian(DecisionRules.get_next_state, subproblem1, state_param_out, max_state_out, state_out_val)
-    #     state_out_val = state_out_val .+ 0.0001
-    #     DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
-    #     state_out_res2 = DecisionRules.get_next_state(subproblem1, state_param_out, max_state_out, state_out_val)
-    #     @test state_out_res2 ≈ state_out_res1 .+ 0.0001* jacob[4][1,1]
-    #     # Test 2nd case
-    #     state_out_val = max_state_out .+ 1.0
-    #     DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
-    #     state_out_res3 = DecisionRules.get_next_state(subproblem1, state_param_out, max_state_out, state_out_val)
-    #     jacob = jacobian(DecisionRules.get_next_state, subproblem1, state_param_out, max_state_out, state_out_val)
-    # end
-
     @test "deterministic_equivalent" begin
         subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
         optimize!(subproblem2)
