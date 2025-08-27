@@ -15,8 +15,7 @@ Pkg.add(;
 
 using DiffOpt
 
-function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0)
-    subproblem = DiffOpt.conic_diff_model(HiGHS.Optimizer)
+function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model())
     # set_attributes(subproblem, "output_flag" => false)
     @variable(subproblem, x >= 0.0)
     @variable(subproblem, 0.0 <= y <= 8.0)
@@ -35,7 +34,7 @@ function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val
 end
 
 @testset "DecisionRules.jl" begin
-    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10)
+    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(HiGHS.Optimizer))
 
     optimize!(subproblem1)
 
@@ -72,10 +71,8 @@ end
     end
 
     @testset "deterministic_equivalent" begin
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10)
         subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
-        optimize!(subproblem2)
-        objective_value(subproblem2)
-        value(state_out_var_2)
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
@@ -92,7 +89,7 @@ end
         DecisionRules.pdual.(state_params_in[1])
         DecisionRules.pdual.(state_params_out[1][1][1])
         DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
-        grad = gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
+        grad = Zygote.gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
 
         m = Chain(Dense(1, 10), Dense(10, 1))
         obj_val = DecisionRules.simulate_multistage(
