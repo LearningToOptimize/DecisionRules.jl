@@ -243,7 +243,7 @@ function deterministic_equivalent!(model::JuMP.Model,
     state_params_in::Vector{Vector{Any}},
     state_params_out::Vector{Vector{Tuple{Any, VariableRef}}},
     initial_state::Vector{Float64},
-    uncertainties::Vector{Vector{Tuple{VariableRef, Vector}}},
+    uncertainties::Vector{Vector{Tuple{VariableRef, Vector{Float64}}}},
 )
     set_objective_sense(model, objective_sense(subproblems[1]))
     uncertainties_new = Vector{Vector{Tuple{VariableRef, Vector}}}(undef, length(uncertainties))

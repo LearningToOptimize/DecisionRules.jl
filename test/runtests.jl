@@ -82,7 +82,7 @@ end
         state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
         state_params_in .= [[state_in_1], [state_in_2]]
         state_params_out .= [[(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]]
-        uncertainty_samples = [[(uncertainty_1, 2.0)], [(uncertainty_2, 1.0)]]
+        uncertainty_samples = [[(uncertainty_1, [2.0])], [(uncertainty_2, [1.0])]]
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(DiffOpt.diff_model(HiGHS.Optimizer), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
