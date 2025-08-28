@@ -84,7 +84,7 @@ end
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 92
     end
 
-    @testset "simulate_multistage" begin
+    @testset "simulate_multistage (per-stage)" begin
         subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(SCS.Optimizer))
         subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(SCS.Optimizer))
 
@@ -96,22 +96,29 @@ end
         uncertainty_samples = [[(uncertainty_1, [2.0])], [(uncertainty_2, [1.0])]]
         initial_state = [5.0]
 
-        function simulate(params)
+        function simulate(initial_state, params)
             i = 0
             m = (ars...) -> begin i= i+1; return params[i] end
             DecisionRules.simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, sample(uncertainty_samples), m)
         end
-        grad = Zygote.gradient(simulate, [[4.0], [3.]])
-        @test grad[1][2][1] + grad[1][1][1] ≈ 30.0 atol=1.0e-2
+        grad = Zygote.gradient(simulate, initial_state, [[4.0], [3.]])
+        @test grad[2][1][1] + grad[2][2][1] ≈ 30.0 atol=1.0e-2
+
+        rand_policy = simulate([5.0], [[4.0], [3.]])
+
+        @test rand_policy ≈ 450 rtol=1.0e-1
+
+        @test simulate([9.0], [[7.], [4.000]]) ≈ 359 rtol=1.0e-1
 
         m = Chain(Dense(2, 10), Dense(10, 1))
+        train_multistage(m, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples)
         obj_val = DecisionRules.simulate_multistage(
             subproblems, state_params_in, state_params_out, 
             initial_state, sample(uncertainty_samples), 
             m
         )
 
-        train_multistage(m, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples)
+        @test obj_val < rand_policy
     end
 
     @testset "deterministic_equivalent" begin
@@ -129,10 +136,10 @@ end
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(DiffOpt.diff_model(SCS.Optimizer), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
         # set_optimizer(det_equivalent, DiffOpt.diff_model(SCS.Optimizer))
         JuMP.optimize!(det_equivalent)
-        obj_val = objective_value(det_equivalent)
+        objective_value(det_equivalent)
         DecisionRules.pdual.(state_params_in[1])
         DecisionRules.pdual.(state_params_out[1][1][1])
-        DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
+        obj_val = DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
         grad = Zygote.gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
 
         m = Chain(Dense(1, 10), Dense(10, 1))
