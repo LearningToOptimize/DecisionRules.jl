@@ -81,11 +81,12 @@ Assumptions:
 - `get_next_state(...)` updates parameter values, `optimize!`s, and returns a Vector matching the realized-state variables
 """
 function rrule(::typeof(get_next_state),
-               subproblem::JuMP.Model,
-               state_param_in::AbstractVector{JuMP.VariableRef},
-               state_param_out::AbstractVector{<:Tuple{JuMP.VariableRef,JuMP.VariableRef}},
-               state_in::AbstractVector,
-               state_out_target::AbstractVector)
+    subproblem::JuMP.Model,
+    state_param_in::AbstractVector{JuMP.VariableRef},
+    state_param_out::AbstractVector{<:Tuple{JuMP.VariableRef,JuMP.VariableRef}},
+    state_in::AbstractVector,
+    state_out_target::AbstractVector
+)
 
     # Forward pass: run the solver via the user's function
     y = get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out_target)
