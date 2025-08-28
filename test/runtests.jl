@@ -34,6 +34,13 @@ function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val
 end
 
 @testset "DecisionRules.jl" begin
+    @testset "pdual at infeasibility" begin
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(HiGHS.Optimizer), state_out_val=9.0)
+        optimize!(subproblem1)
+        @test DecisionRules.pdual(state_in_1) ≈ -1.0e7
+        @test DecisionRules.pdual(state_out_1) ≈ 1.0e7
+    end
+
     subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(HiGHS.Optimizer))
 
     optimize!(subproblem1)
@@ -57,22 +64,29 @@ end
         grad = Zygote.gradient(DecisionRules.simulate_stage, subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
         @test grad[5] ≈ [-30.0]
         @test grad[6] ≈ [30.0]
+        # Test get next state
+        jac = Zygote.jacobian(DecisionRules.get_next_state, subproblem1, state_param_in, state_param_out, state_in_val, state_out_val)
+        @test jac[3][1] ≈ 0.0 # ∂next_state/∂state_in
+        @test jac[4][1] ≈ 1.0 # ∂next_state/∂state_out
+
         # Train flux DR
         subproblem = subproblem1
         Random.seed!(222)
         m = Chain(Dense(1, 10), Dense(10, 1))
+        # 90 is what we expect after training, so we start above that for a random policy
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) > 90.0
         for _ in 1:2050
             _inflow = rand(1.:5)
             uncertainty_samp = [(uncertainty_1, _inflow)]
             Flux.train!((m, inflow) -> DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m(inflow)), m, [[_inflow] for _ =1:10], Flux.Adam())
         end
+        # since we trained towards 90, we should be close to it now
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 92
     end
 
     @testset "simulate_multistage" begin
         subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(HiGHS.Optimizer))
-        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0, subproblem=DiffOpt.conic_diff_model(HiGHS.Optimizer))
+        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(HiGHS.Optimizer))
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
@@ -87,7 +101,7 @@ end
             m = (ars...) -> begin i= i+1; return params[i] end
             DecisionRules.simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, sample(uncertainty_samples), m)
         end
-        grad = Zygote.gradient(simulate, [[9.0], [7.], [4.0]])
+        grad = Zygote.gradient(simulate, [[4.0], [3.]])
 
         m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val = DecisionRules.simulate_multistage(

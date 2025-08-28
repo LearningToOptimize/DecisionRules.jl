@@ -101,7 +101,7 @@ function rrule(::typeof(get_next_state),
         @inbounds for i in eachindex(state_param_out)
             realized_var = state_param_out[i][2]
             # J' * Δ: set reverse seed on variable primal
-            MOI.set(subproblem, DiffOpt.ReverseVariablePrimal(), realized_var, Δy[i])
+            DiffOpt.set_reverse_variable(subproblem, realized_var, Δy[i])
         end
 
         # 2) Reverse differentiate
@@ -111,17 +111,14 @@ function rrule(::typeof(get_next_state),
         #    These are vector-Jacobian products dL/d(param) = (∂y/∂param)^T * Δy
         d_state_in = similar(state_in, promote_type(eltype(state_in), eltype(Δy)))
         @inbounds for i in eachindex(state_param_in)
-            pin = state_param_in[i]  # JuMP.Parameter variable
-            # DiffOpt returns an MOI.Parameter object for the sensitivity of this ParameterRef
-            sens = MOI.get(subproblem, DiffOpt.ReverseConstraintSet(), JuMP.ParameterRef(pin))
-            d_state_in[i] = sens isa MOI.Parameter ? sens.value : zero(eltype(d_state_in))
+            pin = state_param_in[i]  # JuMP.Parameter variable            
+            d_state_in[i] = DiffOpt.get_reverse_parameter(subproblem, pin)
         end
 
         d_state_out_target = similar(state_out_target, promote_type(eltype(state_out_target), eltype(Δy)))
         @inbounds for i in eachindex(state_param_out)
             pout = state_param_out[i][1]  # target Parameter variable
-            sens = MOI.get(subproblem, DiffOpt.ReverseConstraintSet(), JuMP.ParameterRef(pout))
-            d_state_out_target[i] = sens isa MOI.Parameter ? sens.value : zero(eltype(d_state_out_target))
+            d_state_out_target[i] = DiffOpt.get_reverse_parameter(subproblem, pout)
         end
 
         # Optional: clear seeds so they don't accumulate between calls
