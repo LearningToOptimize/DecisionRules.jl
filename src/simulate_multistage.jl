@@ -155,11 +155,11 @@ function rrule(::typeof(get_objective_no_target_deficit), subproblem; norm_defic
     return objective_val, _pullback
 end
 
-function apply_rule(stage::Int, decision_rule::Function, uncertainty, state_in)
+function apply_rule(::Int, decision_rule::T, uncertainty, state_in) where {T}
     return decision_rule(uncertainty, state_in)
 end
 
-function apply_rule(stage::Int, decision_rules::Vector{Function}, uncertainty, state_in)
+function apply_rule(stage::Int, decision_rules::Vector{T}, uncertainty, state_in) where {T}
     decision_rule = decision_rules[stage]
     return decision_rule(uncertainty, state_in)
 end
@@ -170,8 +170,7 @@ function simulate_multistage(
     state_params_out::Vector{Vector{Tuple{U, VariableRef}}},
     initial_state::Vector{T},
     uncertainties,
-    decision_rules;
-    _objective_value=objective_value
+    decision_rules
 ) where {T <: Real, U}
     Flux.reset!.(decision_rules)
     
@@ -184,8 +183,7 @@ function simulate_multistage(
         state_param_out = state_params_out[stage]
         uncertainty = uncertainties[stage]
         state_out = apply_rule(stage, decision_rules, uncertainty, state_in)
-        simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
-        objective_value += _objective_value(subproblem)
+        objective_value += simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
         state_in = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out)
     end
     
@@ -198,8 +196,7 @@ function simulate_multistage(
     state_params_in::Vector{Vector{Z}},
     state_params_out::Vector{Vector{Tuple{Z, VariableRef}}},
     uncertainties,
-    states;
-    _objective_value = objective_value #get_objective_no_target_deficit
+    states
     ) where {Z}
     
     for t in  1:length(state_params_in)
@@ -226,7 +223,7 @@ function simulate_multistage(
     # Solve det_equivalent
     optimize!(det_equivalent)
 
-    return _objective_value(det_equivalent)
+    return objective_value(det_equivalent)
 end
 
 function simulate_multistage(
@@ -235,12 +232,11 @@ function simulate_multistage(
     state_params_out::Vector{Vector{Tuple{U, VariableRef}}},
     initial_state::Vector{T},
     uncertainties,
-    decision_rules;
-    _objective_value=objective_value
+    decision_rules
 ) where {T <: Real, U}
     Flux.reset!.(decision_rules)
     states = simulate_states(initial_state, uncertainties, decision_rules)
-    return simulate_multistage(subproblems, state_params_in, state_params_out, uncertainties, states; _objective_value=_objective_value)
+    return simulate_multistage(subproblems, state_params_in, state_params_out, uncertainties, states)
 end
 
 function pdual(v::VariableRef)
@@ -268,7 +264,7 @@ function rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param
 end
 
 # Define rrule of simulate_multistage
-function rrule(::typeof(simulate_multistage), det_equivalent, state_params_in, state_params_out, uncertainties, states)
+function rrule(::typeof(simulate_multistage), det_equivalent::JuMP.Model, state_params_in, state_params_out, uncertainties, states)
     y = simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainties, states)
     function _pullback(Δy)
         Δ_states = similar(states)
@@ -281,8 +277,7 @@ function rrule(::typeof(simulate_multistage), det_equivalent, state_params_in, s
     return y, _pullback
 end
 
-function sample(uncertainty_samples::Vector{Tuple{VariableRef, Vector}})
-    T = eltype(uncertainty_samples[1][2])
+function sample(uncertainty_samples::Vector{Tuple{VariableRef, Vector{T}}}) where {T<:Real}
     uncertainty_sample = Vector{Tuple{VariableRef,T}}(undef, length(uncertainty_samples))
     for i in 1:length(uncertainty_samples)
         uncertainty_sample[i] = (uncertainty_samples[i][1], rand(uncertainty_samples[i][2]))
@@ -290,7 +285,9 @@ function sample(uncertainty_samples::Vector{Tuple{VariableRef, Vector}})
     return uncertainty_sample
 end
 
-sample(uncertainty_samples::Vector{Vector{Tuple{VariableRef, Vector}}}) = [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
+function sample(uncertainty_samples::Vector{Vector{Tuple{VariableRef, Vector{T}}}}) where {T<:Real}
+    [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
+end
 
 function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model}, 
     state_params_in, state_params_out, uncertainty_sampler; 
