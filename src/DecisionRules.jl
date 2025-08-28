@@ -4,6 +4,7 @@ using JuMP
 import ParametricOptInterface as POI
 using Flux
 using JLD2
+using ChainRules: @ignore_derivatives
 using ChainRulesCore
 import ChainRulesCore.rrule
 using DiffOpt

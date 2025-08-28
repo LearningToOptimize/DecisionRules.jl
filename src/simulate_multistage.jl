@@ -146,6 +146,14 @@ function get_objective_no_target_deficit(subproblem::JuMP.Model; norm_deficit::A
     return objective_val
 end
 
+function get_objective_no_target_deficit(subproblems::Vector{JuMP.Model}; norm_deficit::AbstractString="norm_deficit")
+    total_objective = 0.0
+    for subproblem in subproblems
+        total_objective += get_objective_no_target_deficit(subproblem, norm_deficit=norm_deficit)
+    end
+    return total_objective
+end
+
 # define rrule of get_objective_no_target_deficit
 function rrule(::typeof(get_objective_no_target_deficit), subproblem; norm_deficit="norm_deficit")
     objective_val = get_objective_no_target_deficit(subproblem, norm_deficit=norm_deficit)
@@ -156,12 +164,11 @@ function rrule(::typeof(get_objective_no_target_deficit), subproblem; norm_defic
 end
 
 function apply_rule(::Int, decision_rule::T, uncertainty, state_in) where {T}
-    return decision_rule(uncertainty, state_in)
+    return decision_rule(vcat([uncertainty[i][2] for i in 1:length(uncertainty)], state_in))
 end
 
 function apply_rule(stage::Int, decision_rules::Vector{T}, uncertainty, state_in) where {T}
-    decision_rule = decision_rules[stage]
-    return decision_rule(uncertainty, state_in)
+    return apply_rule(stage, decision_rules[stage], uncertainty, state_in)
 end
 
 function simulate_multistage(
@@ -172,7 +179,7 @@ function simulate_multistage(
     uncertainties,
     decision_rules
 ) where {T <: Real, U}
-    Flux.reset!.(decision_rules)
+    @ignore_derivatives Flux.reset!.(decision_rules)
     
     # Loop over stages
     objective_value = 0.0
@@ -311,7 +318,7 @@ function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
             for s in 1:num_train_per_batch
                 Flux.reset!(m)
                 objective += simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples[s], m)
-                eval_loss += get_objective_no_target_deficit(det_equivalent)
+                eval_loss += get_objective_no_target_deficit(subproblems)
             end
             objective /= num_train_per_batch
             eval_loss /= num_train_per_batch
