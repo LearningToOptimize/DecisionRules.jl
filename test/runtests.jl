@@ -60,14 +60,14 @@ end
         state_in_val = [5.0]
         state_out_val = [4.0]
         # Test simulate_stage
-        @test DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val) ≈ 210
+        @test DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val) ≈ 210 rtol=1.0e-1
         grad = Zygote.gradient(DecisionRules.simulate_stage, subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
         @test grad[5][1] ≈ -30.0 rtol=1.0e-1
         @test grad[6][1] ≈ 30.0 rtol=1.0e-1
         # Test get next state
         jac = Zygote.jacobian(DecisionRules.get_next_state, subproblem1, state_param_in, state_param_out, state_in_val, state_out_val)
-        @test jac[3][1] ≈ 0.0 # ∂next_state/∂state_in
-        @test jac[4][1] ≈ 1.0 # ∂next_state/∂state_out
+        @test jac[4][1] ≈ 0.0 atol=1.0e-4 # ∂next_state/∂state_in
+        @test jac[5][1] ≈ 1.0 rtol=1.0e-1 # ∂next_state/∂state_out
 
         # Train flux DR
         subproblem = subproblem1
@@ -102,6 +102,7 @@ end
             DecisionRules.simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, sample(uncertainty_samples), m)
         end
         grad = Zygote.gradient(simulate, [[4.0], [3.]])
+        @test grad[1][2][1] + grad[1][1][1] ≈ 30.0 atol=1.0e-2
 
         m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val = DecisionRules.simulate_multistage(

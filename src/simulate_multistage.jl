@@ -66,7 +66,7 @@ function get_next_state(subproblem::JuMP.Model, state_param_in::Vector{Any}, sta
 end
 
 """
-    rrule(get_next_state, subproblem, state_param_in, state_param_out, state_in, state_out_target)
+    ChainRulesCore.rrule(get_next_state, subproblem, state_param_in, state_param_out, state_in, state_out_target)
 
 Correct reverse-mode rule using DiffOpt:
 - Seeds reverse on realized output variables with Δstate_out
@@ -80,16 +80,16 @@ Assumptions:
     (target-Parameter variable, realized-state Variable) per component
 - `get_next_state(...)` updates parameter values, `optimize!`s, and returns a Vector matching the realized-state variables
 """
-function rrule(::typeof(get_next_state),
+function ChainRulesCore.rrule(::typeof(get_next_state),
     subproblem::JuMP.Model,
-    state_param_in::AbstractVector{JuMP.VariableRef},
-    state_param_out::AbstractVector{<:Tuple{JuMP.VariableRef,JuMP.VariableRef}},
-    state_in::AbstractVector,
-    state_out_target::AbstractVector
+    state_param_in,
+    state_param_out,
+    state_in,
+    state_out_target
 )
 
     # Forward pass: run the solver via the user's function
-    y = get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out_target)
+    y = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out_target)
 
     function pullback(Δy)
         Δy = collect(Δy)  # ensure indexable, concrete element type
@@ -152,8 +152,8 @@ function get_objective_no_target_deficit(subproblems::Vector{JuMP.Model}; norm_d
     return total_objective
 end
 
-# define rrule of get_objective_no_target_deficit
-function rrule(::typeof(get_objective_no_target_deficit), subproblem; norm_deficit="norm_deficit")
+# define ChainRulesCore.rrule of get_objective_no_target_deficit
+function ChainRulesCore.rrule(::typeof(get_objective_no_target_deficit), subproblem; norm_deficit="norm_deficit")
     objective_val = get_objective_no_target_deficit(subproblem, norm_deficit=norm_deficit)
     function _pullback(Δobjective_val)
         return (NoTangent(), NoTangent())
@@ -260,7 +260,7 @@ end
 
 pdual(vs::Vector) = [pdual(v) for v in vs]
 
-function rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
+function ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
     y = simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
     function _pullback(Δy)
         return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), pdual.(state_param_in) * Δy, pdual.([s[1] for s in state_param_out]) * Δy)
@@ -268,8 +268,8 @@ function rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param
     return y, _pullback
 end
 
-# Define rrule of simulate_multistage
-function rrule(::typeof(simulate_multistage), det_equivalent::JuMP.Model, state_params_in, state_params_out, uncertainties, states)
+# Define ChainRulesCore.rrule of simulate_multistage
+function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuMP.Model, state_params_in, state_params_out, uncertainties, states)
     y = simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainties, states)
     function _pullback(Δy)
         Δ_states = similar(states)
