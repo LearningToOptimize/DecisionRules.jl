@@ -140,6 +140,7 @@ end
         DecisionRules.pdual.(state_params_in[1])
         DecisionRules.pdual.(state_params_out[1][1][1])
         obj_val = DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
+        @test obj_val ≈ 450 rtol=1.0e-1
         grad = Zygote.gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
 
         m = Chain(Dense(1, 10), Dense(10, 1))
