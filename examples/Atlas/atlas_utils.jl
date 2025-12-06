@@ -96,7 +96,7 @@ function dynamics(model::Atlas, x::AbstractVector{T1}, u::AbstractVector{T2}) wh
     T = promote_type(T1, T2)
     state = model.statecache[T]
     dyn_result = model.dynrescache[T]
-    println("dyn_result.M: ", dyn_result.massmatrix)
+    #println("dyn_result.M: ", dyn_result.massmatrix)
 
     # Set the mechanism state
     copyto!(state, x)

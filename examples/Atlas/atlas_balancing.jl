@@ -2,6 +2,7 @@ using Revise
 using JLD2
 using SparseArrays
 using MathOptInterface.Nonlinear.SymbolicAD
+import MathOptInterface as MOI
 using JuMP, Ipopt, HSL_jll
 
 # include(joinpath(@__DIR__, "../mpc_utils.jl"))
@@ -149,7 +150,8 @@ end
 function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::Vector{Float64}, N::Int; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
         # "print_level" => 0,
         "hsllib" => HSL_jll.libhsl_path,
-        "linear_solver" => "MA27"
+        "linear_solver" => "MA27",
+        "max_iter" => 20,
     )
 )
     model = Model()
@@ -167,23 +169,54 @@ function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::
 
     # Build the memoized function array for the multi-output dynamics
     # so we can call the i-th dimension of next state individually
-    dyn_ops = memoize_dynamics_and_jacobian(atlas_dynamics,
-                                            atlas_obj.nx + atlas_obj.nu,
-                                            atlas_obj.nx)
+    #dyn_ops = memoize_dynamics_and_jacobian(atlas_dynamics,
+    #                                        atlas_obj.nx + atlas_obj.nu,
+    #                                        atlas_obj.nx)
+
+    VNO_dim = 2*atlas_obj.nx + atlas_obj.nu
+    # The input variable to this function:
+    # [ x[t+1,:], x[t,:], u[t,:] ]
+    jacobian_structure = Tuple{Int,Int}[]
+    append!(jacobian_structure, map(i -> (i,i), 1:atlas_obj.nx))
+    for i in 1:atlas_obj.nx, j in 1:(atlas_obj.nx + atlas_obj.nu)
+        push!(jacobian_structure, (i, j + atlas_obj.nx))
+    end
+    VNO = MOI.VectorNonlinearOracle(;
+        dimension = VNO_dim,
+        l = zeros(atlas_obj.nx),
+        u = zeros(atlas_obj.nx),
+        eval_f = (ret, x) -> begin
+            ret .= x[1:atlas_obj.nx] - atlas_dynamics(x[atlas_obj.nx + 1:VNO_dim]...)
+            return
+        end,
+        jacobian_structure,
+        eval_jacobian = (ret, x) -> begin
+            dyn_jac = ForwardDiff.jacobian(x -> atlas_dynamics(x...), x[atlas_obj.nx + 1:VNO_dim])
+            jnnz = length(jacobian_structure)
+            ret[1:atlas_obj.nx] .= ones(atlas_obj.nx)
+            nx = atlas_obj.nx; nu = atlas_obj.nu
+            ret[atlas_obj.nx+1:jnnz] .= reshape(dyn_jac', nx * (nx + nu))
+            return
+        end,
+    )
+    for t in 1:(N-1)
+        vars = vcat(x[t+1,:], x[t, :], u[t, :])
+        JuMP.@constraint(model, vars in VNO)
+    end
 
     # Add constraints: x[t+1] = f(x[t], u[t]) for t=1 to N-1
-    for t in 1:(N-1), i in 1:atlas_obj.nx
-        scalar_fun, grad_fun! = dyn_ops[i]
-        op = add_nonlinear_operator(
-            model,
-            atlas_obj.nx + atlas_obj.nu,  # number of inputs
-            scalar_fun,                   # f_i
-            grad_fun!,                    # gradient callback
-            name = Symbol("dyn_$(t)_$(i)")
-        )
-        # Bind the operator to the constraint x[t+1, i] == f_i( [x[t,:]; u[t,:]]... )
-        @constraint(model, x[t+1,i] == op( [x[t, :]; u[t, :]]... ))
-    end
+    #for t in 1:(N-1), i in 1:atlas_obj.nx
+    #    scalar_fun, grad_fun! = dyn_ops[i]
+    #    op = add_nonlinear_operator(
+    #        model,
+    #        atlas_obj.nx + atlas_obj.nu,  # number of inputs
+    #        scalar_fun,                   # f_i
+    #        grad_fun!,                    # gradient callback
+    #        name = Symbol("dyn_$(t)_$(i)")
+    #    )
+    #    # Bind the operator to the constraint x[t+1, i] == f_i( [x[t,:]; u[t,:]]... )
+    #    @constraint(model, x[t+1,i] == op( [x[t, :]; u[t, :]]... ))
+    #end
 
     # Possibly set an initial condition constraint: x[1, :] = x_ref
     @constraint(model, [j in 1:atlas_obj.nx], x[1,j] == X_start[j])
@@ -200,8 +233,9 @@ model, X_solve, U_solve = build_and_solve_mpc(atlas, x_ref, X_start, N; optimize
         # "print_level" => 0,
         "linear_solver" => "ma97",
         "hessian_approximation" => "limited-memory",
-        "max_iter" => 300,
+        #"max_iter" => 20,
         "mu_target" => 1e-8,
+        "print_user_options" => "yes",
     )
 )
 termination_status(model)
@@ -269,7 +303,9 @@ error = sum( norm(X_solve[t,:] .- X[t]) for t in 1:N )
     # global X[k + 1] = rk4(atlas, X[k], clamp.(u_ref + U[k], -atlas.torque_limits, atlas.torque_limits), h)
 # end
 
-X = [value.(x[t,:]) for t=1:N]
+#X = [value.(x[t,:]) for t=1:N]
+X = [X_solve[t, :] for t=1:N]
+
 animate!(atlas, mvis, X, Δt=h);
 readline()
 
@@ -296,37 +332,37 @@ function atlas_dynamics(x, u)
     return rk4(atlas, x, u, h)
 end
 
-function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::Vector{Float64}, N::Int; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
-        # "print_level" => 0,
-        "hsllib" => HSL_jll.libhsl_path,
-        "linear_solver" => "MA27"
-    )
-)
-    model = Model()
-    set_optimizer(model, optimizer)
-
-    # For demonstration, let's define:
-    #   x[t=1:N, 1:atlas.nx]
-    #   u[t=1:N-1, 1:atlas.nu]
-    @variable(model, x[1:N, 1:atlas_obj.nx])
-    @variable(model, -atlas_obj.torque_limits[i] <= u[t=1:N-1,i=1:atlas.nu] <= atlas_obj.torque_limits[i])
-    # ^ adapt the indexing if torque_limits is an array of length nu, etc.
-
-    # Objective: sum of squared error from x_ref
-    @objective(model, Min, sum( (x[t,j] - x_ref[j])^2 for t in 2:N for j in 1:atlas_obj.nx ) )
-
-    for t in 1:(N-1)
-        # Bindconstraint x[t+1, i] == f_i( [x[t,:]; u[t,:]]... )
-        @constraint(model, x[t+1, :] == atlas_dynamics( convert.(NonlinearExpr, x[t, :]), convert.(NonlinearExpr,u[t, :])))
-    end
-
-    # Possibly set an initial condition constraint: x[1, :] = x_ref
-    @constraint(model, [j in 1:atlas_obj.nx], x[1,j] == X_start[j])
-
-    # Solve
-    optimize!(model)
-    return model, value.(x), value.(u)
-end
+#function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::Vector{Float64}, N::Int; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
+#        # "print_level" => 0,
+#        "hsllib" => HSL_jll.libhsl_path,
+#        "linear_solver" => "MA27"
+#    )
+#)
+#    model = Model()
+#    set_optimizer(model, optimizer)
+#
+#    # For demonstration, let's define:
+#    #   x[t=1:N, 1:atlas.nx]
+#    #   u[t=1:N-1, 1:atlas.nu]
+#    @variable(model, x[1:N, 1:atlas_obj.nx])
+#    @variable(model, -atlas_obj.torque_limits[i] <= u[t=1:N-1,i=1:atlas.nu] <= atlas_obj.torque_limits[i])
+#    # ^ adapt the indexing if torque_limits is an array of length nu, etc.
+#
+#    # Objective: sum of squared error from x_ref
+#    @objective(model, Min, sum( (x[t,j] - x_ref[j])^2 for t in 2:N for j in 1:atlas_obj.nx ) )
+#
+#    for t in 1:(N-1)
+#        # Bindconstraint x[t+1, i] == f_i( [x[t,:]; u[t,:]]... )
+#        @constraint(model, x[t+1, :] == atlas_dynamics( convert.(NonlinearExpr, x[t, :]), convert.(NonlinearExpr,u[t, :])))
+#    end
+#
+#    # Possibly set an initial condition constraint: x[1, :] = x_ref
+#    @constraint(model, [j in 1:atlas_obj.nx], x[1,j] == X_start[j])
+#
+#    # Solve
+#    optimize!(model)
+#    return model, value.(x), value.(u)
+#end
 
 N = 2
 X_start = deepcopy(x_ref)
@@ -337,6 +373,7 @@ model, X_solve, U_solve = build_and_solve_mpc(atlas, x_ref, X_start, N; optimize
         "hessian_approximation" => "limited-memory",
         "max_iter" => 300,
         "mu_target" => 1e-8,
+        "print_info_string" => "yes",
     )
 )
 termination_status(model)
