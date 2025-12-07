@@ -107,6 +107,10 @@ function dynamics(model::Atlas, x::AbstractVector{T1}, u::AbstractVector{T2}) wh
     return [dyn_result.q̇; dyn_result.v̇]
 end
 
+function explicit_euler(model::Atlas, x, u, h)
+    return x + h * dynamics(model, x, u)
+end
+
 function rk4(model::Atlas, x, u, h)
     k1 = dynamics(model, x, u)
     k2 = dynamics(model, x + h/2*k1, u)

@@ -4,6 +4,7 @@ using SparseArrays
 using MathOptInterface.Nonlinear.SymbolicAD
 import MathOptInterface as MOI
 using JuMP, Ipopt, HSL_jll
+using LinearAlgebra
 
 # include(joinpath(@__DIR__, "../mpc_utils.jl"))
 include(joinpath(@__DIR__, "atlas_utils.jl"))
@@ -139,7 +140,8 @@ function atlas_dynamics(xu::T...) where {T<:Real}
     h = 0.01
     x = collect(xu[1:atlas.nx])
     u = collect(xu[atlas.nx+1:end])
-    return rk4(atlas, x, u, h)
+    #return rk4(atlas, x, u, h)
+    return explicit_euler(atlas, x, u, h)
 end
 
 # Lets define a jump model that solves the MPC problem
@@ -181,12 +183,17 @@ function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::
     for i in 1:atlas_obj.nx, j in 1:(atlas_obj.nx + atlas_obj.nu)
         push!(jacobian_structure, (i, j + atlas_obj.nx))
     end
+    hessian_lagrangian_structure = [
+        (i, j)
+        for i in atlas_obj.nx+1:VNO_dim
+        for j in atlas_obj.nx+1:VNO_dim
+    ]
     VNO = MOI.VectorNonlinearOracle(;
         dimension = VNO_dim,
         l = zeros(atlas_obj.nx),
         u = zeros(atlas_obj.nx),
         eval_f = (ret, x) -> begin
-            ret .= x[1:atlas_obj.nx] - atlas_dynamics(x[atlas_obj.nx + 1:VNO_dim]...)
+            ret[1:atlas_obj.nx] .= x[1:atlas_obj.nx] - atlas_dynamics(x[atlas_obj.nx + 1:VNO_dim]...)
             return
         end,
         jacobian_structure,
@@ -195,9 +202,16 @@ function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::
             jnnz = length(jacobian_structure)
             ret[1:atlas_obj.nx] .= ones(atlas_obj.nx)
             nx = atlas_obj.nx; nu = atlas_obj.nu
-            ret[atlas_obj.nx+1:jnnz] .= reshape(dyn_jac', nx * (nx + nu))
+            ret[atlas_obj.nx+1:jnnz] .= - reshape(dyn_jac', nx * (nx + nu))
             return
         end,
+        hessian_lagrangian_structure,
+        eval_hessian_lagrangian = (ret, x, λ) -> begin
+            hess = ForwardDiff.hessian(x -> dot(λ, atlas_dynamics(x...)), x[atlas_obj.nx + 1:VNO_dim])
+            hnnz = length(hessian_lagrangian_structure)
+            ret[1:hnnz] .= - reshape(hess, hnnz)
+            return
+        end
     )
     for t in 1:(N-1)
         vars = vcat(x[t+1,:], x[t, :], u[t, :])
@@ -226,13 +240,13 @@ function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::
     return model, value.(x), value.(u)
 end
 
-N = 100
+N = 10
 X_start = deepcopy(x_ref)
 X_start[atlas.nq + 5] = 1.3
 model, X_solve, U_solve = build_and_solve_mpc(atlas, x_ref, X_start, N; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
         # "print_level" => 0,
         "linear_solver" => "ma97",
-        "hessian_approximation" => "limited-memory",
+        #"hessian_approximation" => "limited-memory",
         #"max_iter" => 20,
         "mu_target" => 1e-8,
         "print_user_options" => "yes",
@@ -304,94 +318,94 @@ error = sum( norm(X_solve[t,:] .- X[t]) for t in 1:N )
 # end
 
 #X = [value.(x[t,:]) for t=1:N]
-X = [X_solve[t, :] for t=1:N]
-
-animate!(atlas, mvis, X, Δt=h);
-readline()
-
-
-###############
-include(joinpath(@__DIR__, "rigidbodyutils.jl"))
-include(joinpath(@__DIR__, "atlas_utils.jl"))
-
-model = Model()
-optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
-    # "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "MA27"
-)
-set_optimizer(model, optimizer)
-
-@variable(model, x[1:N, 1:atlas.nx])
-@variable(model, -atlas.torque_limits[i] <= u[t=1:N-1,i=1:atlas.nu] <= atlas.torque_limits[i])
-
-dyn_result = dynamics(atlas, convert.(NonlinearExpr, x[1, :]), convert.(NonlinearExpr,u[1, :]))
-
-function atlas_dynamics(x, u)
-    h = 0.01
-    return rk4(atlas, x, u, h)
-end
-
-#function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::Vector{Float64}, N::Int; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
+#X = [X_solve[t, :] for t=1:N]
+#
+#animate!(atlas, mvis, X, Δt=h);
+#readline()
+#
+#
+################
+#include(joinpath(@__DIR__, "rigidbodyutils.jl"))
+#include(joinpath(@__DIR__, "atlas_utils.jl"))
+#
+#model = Model()
+#optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
+#    # "print_level" => 0,
+#    "hsllib" => HSL_jll.libhsl_path,
+#    "linear_solver" => "MA27"
+#)
+#set_optimizer(model, optimizer)
+#
+#@variable(model, x[1:N, 1:atlas.nx])
+#@variable(model, -atlas.torque_limits[i] <= u[t=1:N-1,i=1:atlas.nu] <= atlas.torque_limits[i])
+#
+#dyn_result = dynamics(atlas, convert.(NonlinearExpr, x[1, :]), convert.(NonlinearExpr,u[1, :]))
+#
+#function atlas_dynamics(x, u)
+#    h = 0.01
+#    return rk4(atlas, x, u, h)
+#end
+#
+##function build_and_solve_mpc(atlas_obj::Atlas, x_ref::Vector{Float64}, X_start::Vector{Float64}, N::Int; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
+##        # "print_level" => 0,
+##        "hsllib" => HSL_jll.libhsl_path,
+##        "linear_solver" => "MA27"
+##    )
+##)
+##    model = Model()
+##    set_optimizer(model, optimizer)
+##
+##    # For demonstration, let's define:
+##    #   x[t=1:N, 1:atlas.nx]
+##    #   u[t=1:N-1, 1:atlas.nu]
+##    @variable(model, x[1:N, 1:atlas_obj.nx])
+##    @variable(model, -atlas_obj.torque_limits[i] <= u[t=1:N-1,i=1:atlas.nu] <= atlas_obj.torque_limits[i])
+##    # ^ adapt the indexing if torque_limits is an array of length nu, etc.
+##
+##    # Objective: sum of squared error from x_ref
+##    @objective(model, Min, sum( (x[t,j] - x_ref[j])^2 for t in 2:N for j in 1:atlas_obj.nx ) )
+##
+##    for t in 1:(N-1)
+##        # Bindconstraint x[t+1, i] == f_i( [x[t,:]; u[t,:]]... )
+##        @constraint(model, x[t+1, :] == atlas_dynamics( convert.(NonlinearExpr, x[t, :]), convert.(NonlinearExpr,u[t, :])))
+##    end
+##
+##    # Possibly set an initial condition constraint: x[1, :] = x_ref
+##    @constraint(model, [j in 1:atlas_obj.nx], x[1,j] == X_start[j])
+##
+##    # Solve
+##    optimize!(model)
+##    return model, value.(x), value.(u)
+##end
+#
+#N = 2
+#X_start = deepcopy(x_ref)
+#X_start[atlas.nq + 5] = 1.3
+#model, X_solve, U_solve = build_and_solve_mpc(atlas, x_ref, X_start, N; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
 #        # "print_level" => 0,
-#        "hsllib" => HSL_jll.libhsl_path,
-#        "linear_solver" => "MA27"
+#        "linear_solver" => "ma97",
+#        "hessian_approximation" => "limited-memory",
+#        "max_iter" => 300,
+#        "mu_target" => 1e-8,
+#        "print_info_string" => "yes",
 #    )
 #)
-#    model = Model()
-#    set_optimizer(model, optimizer)
+#termination_status(model)
 #
-#    # For demonstration, let's define:
-#    #   x[t=1:N, 1:atlas.nx]
-#    #   u[t=1:N-1, 1:atlas.nu]
-#    @variable(model, x[1:N, 1:atlas_obj.nx])
-#    @variable(model, -atlas_obj.torque_limits[i] <= u[t=1:N-1,i=1:atlas.nu] <= atlas_obj.torque_limits[i])
-#    # ^ adapt the indexing if torque_limits is an array of length nu, etc.
+## Now we can simulate the system with the controls U_solve
+#X = [zeros(atlas.nx) for _ = 1:N];
+#X[1] = deepcopy(x_ref);
+#X[1][atlas.nq + 5] = 1.3; # Perturb i.c.
 #
-#    # Objective: sum of squared error from x_ref
-#    @objective(model, Min, sum( (x[t,j] - x_ref[j])^2 for t in 2:N for j in 1:atlas_obj.nx ) )
-#
-#    for t in 1:(N-1)
-#        # Bindconstraint x[t+1, i] == f_i( [x[t,:]; u[t,:]]... )
-#        @constraint(model, x[t+1, :] == atlas_dynamics( convert.(NonlinearExpr, x[t, :]), convert.(NonlinearExpr,u[t, :])))
-#    end
-#
-#    # Possibly set an initial condition constraint: x[1, :] = x_ref
-#    @constraint(model, [j in 1:atlas_obj.nx], x[1,j] == X_start[j])
-#
-#    # Solve
-#    optimize!(model)
-#    return model, value.(x), value.(u)
+#for k = 1:N - 1
+#    X[k + 1] = rk4(atlas, X[k], U_solve[k, :], h)
 #end
-
-N = 2
-X_start = deepcopy(x_ref)
-X_start[atlas.nq + 5] = 1.3
-model, X_solve, U_solve = build_and_solve_mpc(atlas, x_ref, X_start, N; optimizer=optimizer_with_attributes(Ipopt.Optimizer, 
-        # "print_level" => 0,
-        "linear_solver" => "ma97",
-        "hessian_approximation" => "limited-memory",
-        "max_iter" => 300,
-        "mu_target" => 1e-8,
-        "print_info_string" => "yes",
-    )
-)
-termination_status(model)
-
-# Now we can simulate the system with the controls U_solve
-X = [zeros(atlas.nx) for _ = 1:N];
-X[1] = deepcopy(x_ref);
-X[1][atlas.nq + 5] = 1.3; # Perturb i.c.
-
-for k = 1:N - 1
-    X[k + 1] = rk4(atlas, X[k], U_solve[k, :], h)
-end
-
-animate!(atlas, mvis, X, Δt=h);
-
-error = sum( norm(X_solve[t,:] .- X[t]) for t in 1:N )
-
-
-function foo!(q::AbstractVector{T}) where {T}
-    q .= zero(T)
-end
+#
+#animate!(atlas, mvis, X, Δt=h);
+#
+#error = sum( norm(X_solve[t,:] .- X[t]) for t in 1:N )
+#
+#
+#function foo!(q::AbstractVector{T}) where {T}
+#    q .= zero(T)
+#end
