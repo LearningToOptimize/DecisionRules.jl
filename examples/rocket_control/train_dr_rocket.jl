@@ -11,7 +11,7 @@ include("./examples/rocket_control/build_rocket_problem.jl")
 det_equivalent, state_params_in, state_params_out, final_state, uncertainty_samples, x_v, x_h, x_m, u_t_max = build_rocket_problem(; penalty=1e-5)
 
 # Create ML policy to solve the problem
-models = Chain(Dense(1, 32, sigmoid), LSTM(32, 32), Dense(32, 1, (x) -> sigmoid(x) .* u_t_max))
+models = Chain(Dense(1, 32, sigmoid), Flux.LSTM(32 => 32), Dense(32, 1, (x) -> sigmoid(x) .* u_t_max))
 
 # Pre-train
 
@@ -46,27 +46,43 @@ train_multistage(models, final_state, det_equivalent, state_params_in, state_par
     end,
 )
 
+Random.seed!(8788)
+objective_values = [simulate_multistage(
+    det_equivalent, state_params_in, state_params_out, 
+    final_state, sample(uncertainty_samples), 
+    models;
+) for _ in 1:2]
+best_obj = mean(objective_values)-
+
 
 #####################################################################
 
 
 # Finally, we plot the solution:
 
-# function plot_trajectory(y; kwargs...)
-#     return Plots.plot(
-#         (1:T) * Δt,
-#         value.(y);
-#         xlabel = "Time (s)",
-#         legend = false,
-#         kwargs...,
-#     )
-# end
+using Plots
+using CSV
+using DataFrames
+dr_dir = joinpath(example_dir, "dr_results")
+mkpath(dr_dir)
 
-# Plots.plot(
-#     plot_trajectory(x_h; ylabel = "Altitude"),
-#     plot_trajectory(x_m; ylabel = "Mass"),
-#     plot_trajectory(x_v; ylabel = "Velocity"),
-#     plot_trajectory(u_t; ylabel = "Thrust");
-#     layout = (2, 2),
-# )
+num_scenarios = 10
 
+objective_values = Array{Float64}(undef, num_scenarios)
+trajectories_h = Array{Float64}(undef, num_scenarios, length(x_h))
+
+for s = 1:num_scenarios
+    wind_sample = sample(uncertainty_samples)
+    objective_values[s] = simulate_multistage(
+        det_equivalent, state_params_in, state_params_out, 
+        final_state, sample(uncertainty_samples), 
+        models
+    )
+    
+    trajectories_h[s, :] = value.(x_h)
+end
+
+plt = Plots.plot(; xlabel="Time", ylabel="Height", legend=false);
+for s = 1:num_scenarios
+    Plots.plot!(1:1000, trajectories_h[s, :], color=:red);
+end

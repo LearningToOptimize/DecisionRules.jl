@@ -1,34 +1,34 @@
 function simulate_states(
-    initial_state::Vector{Float64},
+    initial_state::Vector{T},
     uncertainties,
     decision_rule::F;
-) where {F}
+) where {F, T}
     num_stages = length(uncertainties)
-    states = Vector{Vector{Float64}}(undef, num_stages + 1)
+    states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
     for stage in 1:num_stages
         uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
         if stage == 1
             uncertainties_stage = initial_state .+ uncertainties_stage
         end
-        states[stage + 1] = decision_rule(uncertainties_stage)
+        states[stage + 1] = decision_rule(reshape(uncertainties_stage, :, 1))[ :, 1]
     end
     return states
 end
 
 function simulate_states(
-    initial_state::Vector{Float64},
+    initial_state::Vector{T},
     uncertainties,
     decision_rules::Vector{F};
-) where {F}
+) where {F, T}
     num_stages = length(uncertainties)
-    states = Vector{Vector{Float64}}(undef, num_stages + 1)
+    states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
     for stage in 1:num_stages
         uncertainties_stage_vec = vcat(initial_state, [[uncertainties[j][i][2] for i in 1:length(uncertainties[j])] for j in 1:stage]...)
         uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
         decision_rule = decision_rules[stage]
-        states[stage + 1] = decision_rule(uncertainties_stage_vec)
+        states[stage + 1] = decision_rule(reshape(uncertainties_stage_vec, :, 1))[:, 1]
     end
     return states
 end
@@ -162,7 +162,7 @@ function ChainRulesCore.rrule(::typeof(get_objective_no_target_deficit), subprob
 end
 
 function apply_rule(::Int, decision_rule::T, uncertainty, state_in) where {T}
-    return decision_rule(vcat([uncertainty[i][2] for i in 1:length(uncertainty)], state_in))
+    return decision_rule(reshape(vcat([uncertainty[i][2] for i in 1:length(uncertainty)], state_in), :, 1))
 end
 
 function apply_rule(stage::Int, decision_rules::Vector{T}, uncertainty, state_in) where {T}
@@ -187,7 +187,7 @@ function simulate_multistage(
         state_param_in = state_params_in[stage]
         state_param_out = state_params_out[stage]
         uncertainty = uncertainties[stage]
-        state_out = apply_rule(stage, decision_rules, uncertainty, state_in)
+        state_out = apply_rule(stage, decision_rules, uncertainty, state_in)[ :, 1]
         objective_value += simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
         state_in = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out)
     end
@@ -362,7 +362,7 @@ function sim_states(t, m, initial_state, uncertainty_sample_vec)
     if t == 1
         return Float32.(initial_state)
     else
-        return m(uncertainty_sample_vec[t - 1])
+        return m(reshape(uncertainty_sample_vec[t - 1], :, 1))[:, 1]
     end
 end
 

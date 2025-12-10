@@ -46,17 +46,18 @@ function build_rocket_problem(;
     @variable(det_equivalent, x_v[1:T], start = v_0)           # Velocity
     @variable(det_equivalent, x_h[1:T] >= 0, start = h_0)           # Height
     @variable(det_equivalent, x_m[1:T] >= m_T, start = m_0)         # Mass
-    @variable(det_equivalent, 0 <= u_t[1:T] <= u_t_max, start = 0); # Thrust
-    @variable(det_equivalent, target[1:T-1], start = 0);           # Thrust target
+    @variable(det_equivalent, 0 <= u_t[1:T-1] <= u_t_max, start = 0); # Thrust
+    @variable(det_equivalent, target[1:T-1] ∈ MOI.Parameter.(0.0)); # Target thrust
     @variable(det_equivalent, w[1:T-1] ∈ MOI.Parameter.(1.0));      # Wind
     @variable(det_equivalent, norm_deficit >= 0);                   # Wind
+    @variable(det_equivalent, u_T ∈ MOI.Parameter(final_u_state));    # Final thrust target
 
     # We implement boundary conditions by fixing variables to values.
 
     fix(x_v[1], v_0; force = true)
     fix(x_h[1], h_0; force = true)
     fix(x_m[1], m_0; force = true)
-    fix(u_t[T], final_u_state; force = true)
+    # fix(u_T, final_u_state; force = true)
 
     # The objective is to maximize altitude at end of time of flight.
     @constraint(det_equivalent, [norm_deficit; (target.-u_t[1:T-1])] in MOI.NormOneCone(T))
@@ -81,14 +82,16 @@ function build_rocket_problem(;
     @constraint(det_equivalent, [t in 2:T], ddt(x_m, t) == -u_t[t-1] / c)
 
     # uncertainty
-    uncertainty_samples = Vector{Dict{Any, Vector{Float64}}}(undef, T-1)
+    uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, T-1)
+    # uncertainty_samples = Vector{Dict{Any, Vector{Float64}}}(undef, T-1)
     for t in 1:T-1
-        uncertainty_dict = Dict{Any, Vector{Float64}}()
-        uncertainty_dict[w[t]] = randn(num_scenarios)
-        uncertainty_samples[t] = uncertainty_dict
+        # uncertainty_dict = Dict{Any, Vector{Float64}}()
+        # uncertainty_dict[w[t]] = randn(num_scenarios)
+        # uncertainty_samples[t] = uncertainty_dict
+        uncertainty_samples[t] = [(w[t], randn(num_scenarios))]
     end
 
-    return det_equivalent, vcat([VariableRef[u_t[T]]], [VariableRef[i] for i in u_t[1:T-2]]), [[(target[t], u_t[t])] for t in 1:T-1], [final_u_state], uncertainty_samples, x_v, x_h, x_m, u_t_max
+    return det_equivalent, vcat([VariableRef[u_T]], [VariableRef[i] for i in u_t[1:T-2]]), [[(target[t], u_t[t])] for t in 1:T-1], [final_u_state], uncertainty_samples, x_v, x_h, x_m, u_t_max
 end
 
 
