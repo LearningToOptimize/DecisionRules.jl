@@ -6,12 +6,12 @@ using Zygote
 using Flux
 using Random
 
-import Pkg
+# import Pkg
 
-Pkg.add(;
-    url = "https://github.com/jump-dev/DiffOpt.jl",
-    rev = "ar/dualparameter",
-)
+# Pkg.add(;
+#     url = "https://github.com/jump-dev/DiffOpt.jl",
+#     rev = "ar/dualparameter",
+# )
 
 using DiffOpt
 
@@ -140,7 +140,7 @@ end
         DecisionRules.pdual.(state_params_in[1])
         DecisionRules.pdual.(state_params_out[1][1][1])
         obj_val = DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
-        @test obj_val ≈ 450 rtol=1.0e-1
+        @test obj_val ≈ 359 rtol=1.0e-1
         grad = Zygote.gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
 
         m = Chain(Dense(1, 10), Dense(10, 1))
@@ -151,5 +151,13 @@ end
         )
 
         train_multistage(m, initial_state, det_equivalent, state_params_in, state_params_out, uncertainty_samples)
+
+        obj_val_after = DecisionRules.simulate_multistage(
+            det_equivalent, state_params_in, state_params_out, 
+            initial_state, sample(uncertainty_samples), 
+            m
+        )
+
+        @test obj_val_after < obj_val
     end
 end

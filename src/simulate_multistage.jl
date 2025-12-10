@@ -246,13 +246,8 @@ end
 
 function pdual(v::VariableRef)
     if is_parameter(v)
-        # Prefer objective sensitivity via dual(v) when available (DiffOpt >= objective-sensitivity API)
-        try
-            return dual(v)
-        catch
-            # Fallback to POI's ParameterDual for older setups
-            return MOI.get(JuMP.owner_model(v), POI.ParameterDual(), v)
-        end
+        # using Dual of parameter if available
+        MOI.get(JuMP.owner_model(v), POI.ParameterDual(), v)
     else
         error("Variable is not a parameter")
     end
@@ -263,7 +258,22 @@ pdual(vs::Vector) = [pdual(v) for v in vs]
 function ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
     y = simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
     function _pullback(Δy)
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), pdual.(state_param_in) * Δy, pdual.([s[1] for s in state_param_out]) * Δy)
+        try 
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), pdual.(state_param_in) * Δy, pdual.([s[1] for s in state_param_out]) * Δy)
+        catch
+            DiffOpt.empty_input_sensitivities!(subproblem)
+            MOI.set(
+                subproblem,
+                DiffOpt.ReverseObjectiveSensitivity(),
+                Δy,
+            )
+            DiffOpt.reverse_differentiate!(subproblem)
+
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), 
+                DiffOpt.get_reverse_parameter.(subproblem, state_param_in), 
+                DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out])
+            )
+        end
     end
     return y, _pullback
 end
@@ -273,11 +283,26 @@ function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuM
     y = simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainties, states)
     function _pullback(Δy)
         Δ_states = similar(states)
-        Δ_states[1] = pdual.(state_params_in[1])
-        for t in 1:length(state_params_out)
-            Δ_states[t + 1] = pdual.([s[1] for s in state_params_out[t]])
+        try
+            Δ_states[1] = pdual.(state_params_in[1])
+            for t in 1:length(state_params_out)
+                Δ_states[t + 1] = pdual.([s[1] for s in state_params_out[t]])
+            end
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states * Δy)
+        catch
+            DiffOpt.empty_input_sensitivities!(det_equivalent)
+            MOI.set(
+                det_equivalent,
+                DiffOpt.ReverseObjectiveSensitivity(),
+                Δy,
+            )
+            DiffOpt.reverse_differentiate!(det_equivalent)
+            Δ_states[1] = DiffOpt.get_reverse_parameter.(det_equivalent, state_params_in[1])
+            for t in 1:length(state_params_out)
+                Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(det_equivalent, [s[1] for s in state_params_out[t]])
+            end
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
         end
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states * Δy)
     end
     return y, _pullback
 end
