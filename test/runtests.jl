@@ -142,8 +142,9 @@ end
         @test grad[5][1][1] ≈ -30.0 rtol=1.0e-1
         @test grad[5][3][1] ≈ 30.0 rtol=1.0e-1
 
+        Random.seed!(222)
         uncertainty_sample = sample(uncertainty_samples)
-
+        
         m = Chain(Dense(1, 10), Dense(10, 1))
         obj_val_before = DecisionRules.simulate_multistage(
             det_equivalent, state_params_in, state_params_out, 
@@ -151,7 +152,7 @@ end
             m
         )
 
-        train_multistage(m, initial_state, det_equivalent, state_params_in, state_params_out, uncertainty_samples)
+        train_multistage(m, initial_state, det_equivalent, state_params_in, state_params_out, uncertainty_samples, num_batches=200)
 
         obj_val_after = DecisionRules.simulate_multistage(
             det_equivalent, state_params_in, state_params_out, 
