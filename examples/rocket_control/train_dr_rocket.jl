@@ -11,7 +11,12 @@ include("./examples/rocket_control/build_rocket_problem.jl")
 det_equivalent, state_params_in, state_params_out, final_state, uncertainty_samples, x_v, x_h, x_m, u_t_max = build_rocket_problem(; penalty=1e-5)
 
 # Create ML policy to solve the problem
-models = Chain(Dense(1, 32, sigmoid), Flux.LSTM(32 => 32), Dense(32, 1, (x) -> sigmoid(x) .* u_t_max))
+models = Chain(Dense(1, 32, sigmoid), 
+    x -> reshape(x, :, 1), 
+    Flux.LSTM(32 => 32), 
+    x -> x[:, end],
+    Dense(32, 1, (x) -> sigmoid(x) .* u_t_max)
+)
 
 # Pre-train
 

@@ -64,15 +64,15 @@ function build_rocket_problem(;
 
     @objective(det_equivalent, Min, -x_h[T] + penalty * norm_deficit)
 
-
     # Forces are defined as functions:
-
     D(x_h, x_v) = D_c * x_v^2 * exp(-h_c * (x_h - h_0) / h_0)
     g(x_h) = g_0 * (h_0 / x_h)^2
 
-    # The dynamical equations are implemented as constraints.
-
+    # Discretization of derivatives
     ddt(x::Vector, t::Int) = (x[t] - x[t-1]) / Δt
+
+
+    # The dynamical equations are implemented as constraints.
     @constraint(det_equivalent, [t in 2:T], ddt(x_h, t) == x_v[t-1])
     @constraint(
         det_equivalent,
@@ -83,7 +83,6 @@ function build_rocket_problem(;
 
     # uncertainty
     uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, T-1)
-    # uncertainty_samples = Vector{Dict{Any, Vector{Float64}}}(undef, T-1)
     for t in 1:T-1
         # uncertainty_dict = Dict{Any, Vector{Float64}}()
         # uncertainty_dict[w[t]] = randn(num_scenarios)
@@ -92,6 +91,40 @@ function build_rocket_problem(;
     end
 
     return det_equivalent, vcat([VariableRef[u_T]], [VariableRef[i] for i in u_t[1:T-2]]), [[(target[t], u_t[t])] for t in 1:T-1], [final_u_state], uncertainty_samples, x_v, x_h, x_m, u_t_max
+end
+
+function build_rocket_subproblems(
+    h_0 = 1,                      # Initial height
+    v_0 = 0,                      # Initial velocity
+    m_0 = 1.0,                    # Initial mass
+    m_T = 0.6,                    # Final mass
+    g_0 = 1,                      # Gravity at the surface
+    h_c = 500,                    # Used for drag
+    c = 0.5 * sqrt(g_0 * h_0),    # Thrust-to-fuel mass
+    D_c = 0.5 * 620 * m_0 / g_0,  # Drag scaling
+    u_t_max = 3.5 * g_0 * m_0,    # Maximum thrust
+    T = 1_000,                    # Number of time steps
+    Δt = 0.2 / T,                 # Time per discretized step
+    penalty = 10,                 # Penalty for violating target
+    final_u_state = 0.0,          # Final state of the control
+    num_scenarios = 10,           # Number of samples
+)
+    subproblems = Vector{JuMP.Model}(undef, T-1)
+    state_params_in = Vector{Vector{Any}}(undef, T-1)
+    state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, T-1)
+
+    for t in 1:T-1
+        subproblems[t] = JuMP.read_from_file(joinpath(@__DIR__, "rocket_subproblem.jl"))
+        # delete fix constraints
+        for con in JuMP.all_constraints(subproblems[t], VariableRef, MOI.EqualTo{Float64})
+            delete(subproblems[t], con)
+        end
+        state_params_in[t], state_param_out = find_rocket_states(subproblems[t])
+        state_params_in[t] = variable_to_parameter.(subproblems[t], state_params_in[t])
+        state_params_out[t] = [variable_to_parameter(subproblems[t], state_param_out[i]) for i in 1:2]
+    end
+
+    return subproblems, state_params_in, state_params_out
 end
 
 

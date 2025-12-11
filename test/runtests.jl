@@ -5,14 +5,6 @@ using JuMP
 using Zygote
 using Flux
 using Random
-
-# import Pkg
-
-# Pkg.add(;
-#     url = "https://github.com/jump-dev/DiffOpt.jl",
-#     rev = "ar/dualparameter",
-# )
-
 using DiffOpt
 
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model())
@@ -111,6 +103,11 @@ end
         @test simulate([9.0], [[7.], [4.000]]) ≈ 359 rtol=1.0e-1
 
         m = Chain(Dense(2, 10), Dense(10, 1))
+        obj_val_prev = DecisionRules.simulate_multistage(
+            subproblems, state_params_in, state_params_out, 
+            initial_state, sample(uncertainty_samples), 
+            m
+        )
         train_multistage(m, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples)
         obj_val = DecisionRules.simulate_multistage(
             subproblems, state_params_in, state_params_out, 
@@ -119,6 +116,7 @@ end
         )
 
         @test obj_val < rand_policy
+        @test obj_val < obj_val_prev
     end
 
     @testset "deterministic_equivalent" begin
@@ -135,18 +133,22 @@ end
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(DiffOpt.diff_model(SCS.Optimizer), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
         # set_optimizer(det_equivalent, DiffOpt.diff_model(SCS.Optimizer))
-        JuMP.optimize!(det_equivalent)
-        objective_value(det_equivalent)
-        DecisionRules.pdual.(state_params_in[1])
-        DecisionRules.pdual.(state_params_out[1][1][1])
+        # JuMP.optimize!(det_equivalent)
+        # objective_value(det_equivalent)
+        # DecisionRules.pdual.(state_params_in[1])
+        # DecisionRules.pdual.(state_params_out[1][1][1])
         obj_val = DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
         @test obj_val ≈ 359 rtol=1.0e-1
         grad = Zygote.gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
+        @test grad[5][1][1] ≈ -30.0 rtol=1.0e-1
+        @test grad[5][3][1] ≈ 30.0 rtol=1.0e-1
+
+        uncertainty_sample = sample(uncertainty_samples)
 
         m = Chain(Dense(1, 10), Dense(10, 1))
-        obj_val = DecisionRules.simulate_multistage(
+        obj_val_before = DecisionRules.simulate_multistage(
             det_equivalent, state_params_in, state_params_out, 
-            initial_state, sample(uncertainty_samples), 
+            initial_state, uncertainty_sample, 
             m
         )
 
@@ -154,10 +156,10 @@ end
 
         obj_val_after = DecisionRules.simulate_multistage(
             det_equivalent, state_params_in, state_params_out, 
-            initial_state, sample(uncertainty_samples), 
+            initial_state, uncertainty_sample, 
             m
         )
 
-        @test obj_val_after < obj_val
+        @test obj_val_after < obj_val_before
     end
 end

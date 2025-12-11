@@ -2,7 +2,7 @@ function simulate_states(
     initial_state::Vector{T},
     uncertainties,
     decision_rule::F;
-) where {F, T}
+) where {F, T <: Real}
     num_stages = length(uncertainties)
     states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
@@ -11,7 +11,7 @@ function simulate_states(
         if stage == 1
             uncertainties_stage = initial_state .+ uncertainties_stage
         end
-        states[stage + 1] = decision_rule(reshape(uncertainties_stage, :, 1))[ :, 1]
+        states[stage + 1] = decision_rule(uncertainties_stage)
     end
     return states
 end
@@ -20,7 +20,7 @@ function simulate_states(
     initial_state::Vector{T},
     uncertainties,
     decision_rules::Vector{F};
-) where {F, T}
+) where {F, T <: Real}
     num_stages = length(uncertainties)
     states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
@@ -28,7 +28,7 @@ function simulate_states(
         uncertainties_stage_vec = vcat(initial_state, [[uncertainties[j][i][2] for i in 1:length(uncertainties[j])] for j in 1:stage]...)
         uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
         decision_rule = decision_rules[stage]
-        states[stage + 1] = decision_rule(reshape(uncertainties_stage_vec, :, 1))[:, 1]
+        states[stage + 1] = decision_rule(uncertainties_stage)
     end
     return states
 end
@@ -162,7 +162,7 @@ function ChainRulesCore.rrule(::typeof(get_objective_no_target_deficit), subprob
 end
 
 function apply_rule(::Int, decision_rule::T, uncertainty, state_in) where {T}
-    return decision_rule(reshape(vcat([uncertainty[i][2] for i in 1:length(uncertainty)], state_in), :, 1))
+    return decision_rule(vcat([uncertainty[i][2] for i in 1:length(uncertainty)], state_in))
 end
 
 function apply_rule(stage::Int, decision_rules::Vector{T}, uncertainty, state_in) where {T}
@@ -362,7 +362,7 @@ function sim_states(t, m, initial_state, uncertainty_sample_vec)
     if t == 1
         return Float32.(initial_state)
     else
-        return m(reshape(uncertainty_sample_vec[t - 1], :, 1))[:, 1]
+        return m(uncertainty_sample_vec[t - 1])
     end
 end
 
