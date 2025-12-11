@@ -361,6 +361,8 @@ end
 function sim_states(t, m, initial_state, uncertainty_sample_vec)
     if t == 1
         return Float32.(initial_state)
+    elseif t == 2
+        return m(uncertainty_sample_vec[1] + initial_state)
     else
         return m(uncertainty_sample_vec[t - 1])
     end

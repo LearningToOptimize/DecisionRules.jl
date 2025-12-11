@@ -131,7 +131,11 @@ end
         uncertainty_samples = [[(uncertainty_1, [2.0])], [(uncertainty_2, [1.0])]]
         initial_state = [5.0]
 
-        det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(DiffOpt.diff_model(SCS.Optimizer), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
+        det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
+            DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)),
+            subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples
+        )
+
         # set_optimizer(det_equivalent, DiffOpt.diff_model(SCS.Optimizer))
         # JuMP.optimize!(det_equivalent)
         # objective_value(det_equivalent)
