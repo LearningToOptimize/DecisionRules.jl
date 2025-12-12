@@ -4,7 +4,6 @@ authors = ["Andrew <arosemberg3@gatech.edu> and contributors"]
 version = "1.0.0-DEV"
 
 [deps]
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 DiffOpt = "930fe3bc-9c6b-11ea-2d94-6184641e85e7"
