@@ -96,7 +96,7 @@ function dynamics(model::Atlas, x::AbstractVector{T1}, u::AbstractVector{T2}) wh
     T = promote_type(T1, T2)
     state = model.statecache[T]
     dyn_result = model.dynrescache[T]
-    println("dyn_result.M: ", dyn_result.massmatrix)
+    #println("dyn_result.M: ", dyn_result.massmatrix)
 
     # Set the mechanism state
     copyto!(state, x)
@@ -105,6 +105,10 @@ function dynamics(model::Atlas, x::AbstractVector{T1}, u::AbstractVector{T2}) wh
     dynamics!(dyn_result, state, u)
 
     return [dyn_result.q̇; dyn_result.v̇]
+end
+
+function explicit_euler(model::Atlas, x, u, h)
+    return x + h * dynamics(model, x, u)
 end
 
 function rk4(model::Atlas, x, u, h)
