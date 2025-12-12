@@ -129,7 +129,9 @@ function build_rocket_subproblems(;
         @variable(subproblems[t], x_h >= 0, start = h_0)           # Height
         @variable(subproblems[t], x_m >= m_T, start = m_0)         # Mass
         @variable(subproblems[t], 0 <= u_t <= u_t_max, start = 0); # Thrust
-        @variable(subproblems[t], target ∈ MOI.Parameter(0.0)) # Target thrust
+        @variable(subproblems[t], target_v ∈ MOI.Parameter(0.0)) # Target Velocity
+        @variable(subproblems[t], target_h ∈ MOI.Parameter(0.0)) # Target Height
+        @variable(subproblems[t], target_m ∈ MOI.Parameter(0.0)) # Target Mass
         @variable(subproblems[t], w ∈ MOI.Parameter(1.0))      # Wind
         @variable(subproblems[t], norm_deficit >= 0)                   # Wind
 
@@ -138,7 +140,8 @@ function build_rocket_subproblems(;
         @variable(subproblems[t], x_h_prev ∈ MOI.Parameter(h_0))
         @variable(subproblems[t], x_m_prev ∈ MOI.Parameter(m_0))
         
-        @constraint(subproblems[t], [norm_deficit; (target - u_t)] in MOI.NormOneCone(2))
+        # @constraint(subproblems[t], [norm_deficit; (target - u_t)] in MOI.NormOneCone(2))
+        @constraint(subproblems[t], [norm_deficit; target_v - x_v; target_h - x_h; target_m - x_m] in MOI.NormOneCone(4))
         @objective(subproblems[t], Min, -x_h + penalty * norm_deficit)
 
         # Forces are defined as functions:
@@ -158,7 +161,8 @@ function build_rocket_subproblems(;
         uncertainty_samples[t] = [(w, randn(num_scenarios))]
 
         state_params_in[t] = [x_v_prev, x_h_prev, x_m_prev]
-        state_params_out[t] = [(target, u_t)]
+        # state_params_out[t] = [(target, u_t)]
+        state_params_out[t] = [(target_v, x_v), (target_h, x_h), (target_m, x_m)]
         heights[t] = x_h
         masses[t] = x_m
         velocities[t] = x_v

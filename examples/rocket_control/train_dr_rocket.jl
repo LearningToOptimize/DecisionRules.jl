@@ -67,7 +67,7 @@ model_per_stage = Chain(Dense(4, 32, sigmoid),
     x -> reshape(x, :, 1), 
     Flux.LSTM(32 => 32), 
     x -> x[:, end],
-    Dense(32, 1, (x) -> sigmoid(x) .* u_t_max)
+    Dense(32, 3)
 )
 
 Random.seed!(8788)
@@ -77,6 +77,12 @@ objective_values = [simulate_multistage(
     model_per_stage;
 ) for _ in 1:2]
 best_obj = mean(objective_values)
+# save_control = SaveBest(best_obj, model_path, 0.003)
+train_multistage(model_per_stage, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples; 
+    num_batches=10,
+    num_train_per_batch=1,
+    optimizer=Flux.Adam(),
+)
 
 #####################################################################
 
@@ -86,26 +92,27 @@ best_obj = mean(objective_values)
 using Plots
 using CSV
 using DataFrames
-dr_dir = joinpath(example_dir, "dr_results")
-mkpath(dr_dir)
+# dr_dir = joinpath(example_dir, "dr_results")
+# mkpath(dr_dir)
 
 num_scenarios = 10
 
 objective_values = Array{Float64}(undef, num_scenarios)
-trajectories_h = Array{Float64}(undef, num_scenarios, length(x_h))
+trajectories_h = Array{Float64}(undef, num_scenarios, length(heights))
 
 for s = 1:num_scenarios
     wind_sample = sample(uncertainty_samples)
     objective_values[s] = simulate_multistage(
-        det_equivalent, state_params_in, state_params_out, 
-        final_state, sample(uncertainty_samples), 
-        models
+        subproblems, state_params_in, state_params_out, 
+        initial_state, sample(uncertainty_samples), 
+        model_per_stage
     )
     
-    trajectories_h[s, :] = value.(x_h)
+    trajectories_h[s, :] = value.(heights)
 end
 
 plt = Plots.plot(; xlabel="Time", ylabel="Height", legend=false);
 for s = 1:num_scenarios
-    Plots.plot!(1:1000, trajectories_h[s, :], color=:red);
+    Plots.plot!(1:999, trajectories_h[s, :], color=:red);
 end
+plt
