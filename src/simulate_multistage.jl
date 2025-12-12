@@ -187,7 +187,7 @@ function simulate_multistage(
         state_param_in = state_params_in[stage]
         state_param_out = state_params_out[stage]
         uncertainty = uncertainties[stage]
-        state_out = apply_rule(stage, decision_rules, uncertainty, state_in)[ :, 1]
+        state_out = apply_rule(stage, decision_rules, uncertainty, state_in)
         objective_value += simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
         state_in = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out)
     end
