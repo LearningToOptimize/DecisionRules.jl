@@ -57,7 +57,7 @@ function read_inflow(file::String, nHyd::Int; num_stages=nothing)
     return vector_inflows, nCen, num_stages
 end
 
-function build_hydropowermodels(case_folder::AbstractString, subproblem_file::AbstractString; num_stages=nothing, param_type=:Var, penalty=nothing) # :Param, :Cons, :Var
+function build_hydropowermodels(case_folder::AbstractString, subproblem_file::AbstractString; num_stages=nothing, penalty=nothing)
     hydro_file = JSON.parsefile(joinpath(case_folder, "hydro.json"))["Hydrogenerators"]
     nHyd = length(hydro_file)
     vector_inflows, nCen, num_stages = read_inflow(joinpath(case_folder, "inflows.csv"), nHyd; num_stages=num_stages)
@@ -77,9 +77,9 @@ function build_hydropowermodels(case_folder::AbstractString, subproblem_file::Ab
             delete(subproblems[t], con)
         end
         state_params_in[t], state_param_out, inflow = find_reservoirs_and_inflow(subproblems[t])
-        state_params_in[t] = variable_to_parameter.(subproblems[t], state_params_in[t], param_type=param_type)
-        state_params_out[t] = [variable_to_parameter(subproblems[t], state_param_out[i]; deficit=_deficit[i], param_type=param_type) for i in 1:nHyd]
-        inflow = [(variable_to_parameter(subproblems[t], inflow[i]; param_type=param_type),  vector_inflows[i][t, :] .+ 0.0) for i in 1:nHyd]
+        state_params_in[t] = variable_to_parameter.(subproblems[t], state_params_in[t])
+        state_params_out[t] = [variable_to_parameter(subproblems[t], state_param_out[i]; deficit=_deficit[i]) for i in 1:nHyd]
+        inflow = [(variable_to_parameter(subproblems[t], inflow[i]),  vector_inflows[i][t, :] .+ 0.0) for i in 1:nHyd]
         uncertainty_samples[t] = inflow
     end
 

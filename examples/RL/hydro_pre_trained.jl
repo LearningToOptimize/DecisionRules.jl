@@ -56,7 +56,7 @@ end
     formulation_file = formulation * ".mof.json"
     Random.seed!(1234)
     subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
-        joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, param_type=:Var, penalty=penalty
+        joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, penalty=penalty
     )
 
     for subproblem in subproblems
@@ -88,7 +88,7 @@ end
             uncertainty_sample = [(uncertainty_samples[j][i][1], rain_state[i]) for i in 1:length(rain)]
             simulate_stage(subproblems[j], state_params_in[j], state_params_out[j], uncertainty_sample, state_in, state_out)
             r = _objective_value(subproblems[j])
-            next_volume = DecisionRules.get_next_state(subproblems[j], state_params_out[j], state_in, state_out)
+            next_volume = DecisionRules.get_next_state(subproblems[j], state_params_in[j], state_params_out[j], state_in, state_out)
             @info "Stage t=$j" sum(state_in) sum(rain_state) sum(state_out) sum(next_volume) r
             sp = [next_volume; rain; j+1]
             o = rain #+ next_volume - state_out

@@ -6,10 +6,9 @@ using Gurobi
 using MosekTools
 using Ipopt, HSL_jll
 import MathOptSymbolicAD
-import ParametricOptInterface as POI
 using JLD2
 using HydroPowerModels
-
+using DiffOpt
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -40,26 +39,16 @@ HydroPowerModels.gather_useful_info!(data)
 # Build MSP
 
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
-    joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, param_type=:Var
+    joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 
-det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
+det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+    "print_level" => 0,
+    "hsllib" => HSL_jll.libhsl_path,
+    "linear_solver" => "ma27"
+))
 
-set_optimizer(det_equivalent, Gurobi.Optimizer)
-
-# set_optimizer(det_equivalent, Mosek.Optimizer)
-
-# set_optimizer(det_equivalent, optimizer_with_attributes(Ipopt.Optimizer, 
-#     "print_level" => 0,
-#     "hsllib" => HSL_jll.libhsl_path,
-#     "linear_solver" => "ma27"
-# ))
-
-# set_attribute(
-#     det_equivalent,
-#     MOI.AutomaticDifferentiationBackend(),
-#     MathOptSymbolicAD.DefaultBackend(),
-# )
+det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(det_equivalent, subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
 
 num_hydro = length(initial_state)
 
@@ -103,13 +92,13 @@ for i in 1:num_samples
         inflow_var = inflow_var[findfirst(x -> occursin("_inflow[$j]", JuMP.name(x)), inflow_var)]
         inflows[i, j, t] = uncertainty_s[t][inflow_var]
     end
-    objective_values[i] = simulate_multistage(
+    simulate_multistage(
         det_equivalent, state_params_in, state_params_out, 
         initial_state, uncertainty_s, 
         models;
-        ensure_feasibility=(x_out, x_in, _sa) -> ensure_feasibility(x_out, x_in, _sa, max_volume),
-        _objective_value = DecisionRules.get_objective_no_target_deficit,
+        ensure_feasibility=(x_out, x_in, _sa) -> ensure_feasibility(x_out, x_in, _sa, max_volume)
     )
+    objective_values[i] = DecisionRules.get_objective_no_target_deficit(det_equivalent)
     for _var in record_variables_names
         num_vars = length(find_variables(det_equivalent, [_var; r"#1$"]))
         for j in 1:num_vars, t in 1:num_stages

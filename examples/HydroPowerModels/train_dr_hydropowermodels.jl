@@ -20,6 +20,7 @@ using Ipopt, HSL_jll # Gurobi, MosekTools, Ipopt, MadNLP
 # import ParametricOptInterface as POI
 using Wandb, Dates, Logging
 using JLD2
+using DiffOpt
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -52,41 +53,16 @@ pre_trained_model = nothing #joinpath(HydroPowerModels_dir, case_name, formulati
 # Build MSP
 
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
-    joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages, param_type=:Var
+    joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 
-det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples) #; model = JuMP.Model(() -> POI_cached_optimizer()))
-
-set_optimizer(det_equivalent, optimizer_with_attributes(Ipopt.Optimizer, 
+det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
     "print_level" => 0,
     "hsllib" => HSL_jll.libhsl_path,
     "linear_solver" => "ma27"
 ))
 
-# set_optimizer(det_equivalent, Gurobi.Optimizer)
-
-# set_optimizer(det_equivalent, Mosek.Optimizer)
-
-# ipopt = Ipopt.Optimizer()
-# MOI.set(ipopt, MOI.RawOptimizerAttribute("print_level"), 0)
-# MOI.set(ipopt, MOI.RawOptimizerAttribute("hsllib"), HSL_jll.libhsl_path)
-# MOI.set(ipopt, MOI.RawOptimizerAttribute("linear_solver"), "ma97")
-# cached =
-#     () -> MOI.Bridges.full_bridge_optimizer(
-#         MOI.Utilities.CachingOptimizer(
-#             MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}()),
-#             ipopt,
-#         ),
-#         Float64,
-# )
-# POI_cached_optimizer() = POI.Optimizer(cached())
-
-# set_optimizer(det_equivalent, () -> POI.Optimizer(Ipopt.Optimizer()))
-
-# set_optimizer(det_equivalent, () -> POI_cached_optimizer())
-# set_optimizer(det_equivalent, () -> Mosek.Optimizer())
-# set_attribute(det_equivalent, "QUIET", true)
-# set_attributes(det_equivalent, "OutputFlag" => 0)
+det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(det_equivalent, subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
 
 num_hydro = length(initial_state)
 # for subproblem in subproblems

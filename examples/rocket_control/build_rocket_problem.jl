@@ -5,6 +5,7 @@ using Statistics
 
 using JuMP
 import Ipopt, HSL_jll
+using DiffOpt
 # import Plots
 
 
@@ -32,8 +33,7 @@ function build_rocket_problem(;
     # program, we need to use a nonlinear solver like Ipopt. We cannot use a linear
     # solver like HiGHS.
 
-    det_equivalent = Model()
-    set_optimizer(det_equivalent, optimizer_with_attributes(Ipopt.Optimizer, 
+    det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
         "print_level" => 0,
         "hsllib" => HSL_jll.libhsl_path,
         "linear_solver" => "ma27"
@@ -46,32 +46,33 @@ function build_rocket_problem(;
     @variable(det_equivalent, x_v[1:T], start = v_0)           # Velocity
     @variable(det_equivalent, x_h[1:T] >= 0, start = h_0)           # Height
     @variable(det_equivalent, x_m[1:T] >= m_T, start = m_0)         # Mass
-    @variable(det_equivalent, 0 <= u_t[1:T] <= u_t_max, start = 0); # Thrust
-    @variable(det_equivalent, target[1:T-1], start = 0);           # Thrust target
+    @variable(det_equivalent, 0 <= u_t[1:T-1] <= u_t_max, start = 0); # Thrust
+    @variable(det_equivalent, target[1:T-1] ∈ MOI.Parameter.(0.0)); # Target thrust
     @variable(det_equivalent, w[1:T-1] ∈ MOI.Parameter.(1.0));      # Wind
     @variable(det_equivalent, norm_deficit >= 0);                   # Wind
+    @variable(det_equivalent, u_T ∈ MOI.Parameter(final_u_state));    # Final thrust target
 
     # We implement boundary conditions by fixing variables to values.
 
     fix(x_v[1], v_0; force = true)
     fix(x_h[1], h_0; force = true)
     fix(x_m[1], m_0; force = true)
-    fix(u_t[T], final_u_state; force = true)
+    # fix(u_T, final_u_state; force = true)
 
     # The objective is to maximize altitude at end of time of flight.
     @constraint(det_equivalent, [norm_deficit; (target.-u_t[1:T-1])] in MOI.NormOneCone(T))
 
     @objective(det_equivalent, Min, -x_h[T] + penalty * norm_deficit)
 
-
     # Forces are defined as functions:
-
     D(x_h, x_v) = D_c * x_v^2 * exp(-h_c * (x_h - h_0) / h_0)
     g(x_h) = g_0 * (h_0 / x_h)^2
 
-    # The dynamical equations are implemented as constraints.
-
+    # Discretization of derivatives
     ddt(x::Vector, t::Int) = (x[t] - x[t-1]) / Δt
+
+
+    # The dynamical equations are implemented as constraints.
     @constraint(det_equivalent, [t in 2:T], ddt(x_h, t) == x_v[t-1])
     @constraint(
         det_equivalent,
@@ -81,14 +82,94 @@ function build_rocket_problem(;
     @constraint(det_equivalent, [t in 2:T], ddt(x_m, t) == -u_t[t-1] / c)
 
     # uncertainty
-    uncertainty_samples = Vector{Dict{Any, Vector{Float64}}}(undef, T-1)
+    uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, T-1)
     for t in 1:T-1
-        uncertainty_dict = Dict{Any, Vector{Float64}}()
-        uncertainty_dict[w[t]] = randn(num_scenarios)
-        uncertainty_samples[t] = uncertainty_dict
+        # uncertainty_dict = Dict{Any, Vector{Float64}}()
+        # uncertainty_dict[w[t]] = randn(num_scenarios)
+        # uncertainty_samples[t] = uncertainty_dict
+        uncertainty_samples[t] = [(w[t], randn(num_scenarios))]
     end
 
-    return det_equivalent, vcat([VariableRef[u_t[T]]], [VariableRef[i] for i in u_t[1:T-2]]), [[(target[t], u_t[t])] for t in 1:T-1], [final_u_state], uncertainty_samples, x_v, x_h, x_m, u_t_max
+    return det_equivalent, vcat([VariableRef[u_T]], [VariableRef[i] for i in u_t[1:T-2]]), [[(target[t], u_t[t])] for t in 1:T-1], [final_u_state], uncertainty_samples, x_v, x_h, x_m, u_t_max
+end
+
+function build_rocket_subproblems(;
+    h_0 = 1,                      # Initial height
+    v_0 = 0,                      # Initial velocity
+    m_0 = 1.0,                    # Initial mass
+    m_T = 0.6,                    # Final mass
+    g_0 = 1,                      # Gravity at the surface
+    h_c = 500,                    # Used for drag
+    c = 0.5 * sqrt(g_0 * h_0),    # Thrust-to-fuel mass
+    D_c = 0.5 * 620 * m_0 / g_0,  # Drag scaling
+    u_t_max = 3.5 * g_0 * m_0,    # Maximum thrust
+    T = 1_000,                    # Number of time steps
+    Δt = 0.2 / T,                 # Time per discretized step
+    penalty = 10,                 # Penalty for violating target
+    final_u_state = 0.0,          # Final state of the control
+    num_scenarios = 10,           # Number of samples
+)
+    subproblems = Vector{JuMP.Model}(undef, T-1)
+    state_params_in = Vector{Vector{Any}}(undef, T-1)
+    state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, T-1)
+    uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, T-1)
+    heights = Vector{VariableRef}(undef, T-1)
+    masses = Vector{VariableRef}(undef, T-1)
+    velocities = Vector{VariableRef}(undef, T-1)
+    thrusts = Vector{VariableRef}(undef, T-1)
+    initial_state = [v_0, h_0, m_0]
+
+    for t in 1:T-1
+        subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+            "print_level" => 0,
+            "hsllib" => HSL_jll.libhsl_path,
+            "linear_solver" => "ma27"
+        ))
+        @variable(subproblems[t], x_v, start = v_0)           # Velocity
+        @variable(subproblems[t], x_h >= 0, start = h_0)           # Height
+        @variable(subproblems[t], x_m >= m_T, start = m_0)         # Mass
+        @variable(subproblems[t], 0 <= u_t <= u_t_max, start = 0); # Thrust
+        @variable(subproblems[t], target_v ∈ MOI.Parameter(0.0)) # Target Velocity
+        @variable(subproblems[t], target_h ∈ MOI.Parameter(0.0)) # Target Height
+        @variable(subproblems[t], target_m ∈ MOI.Parameter(0.0)) # Target Mass
+        @variable(subproblems[t], w ∈ MOI.Parameter(1.0))      # Wind
+        @variable(subproblems[t], norm_deficit >= 0)                   # Wind
+
+        # initial state parameters
+        @variable(subproblems[t], x_v_prev ∈ MOI.Parameter(v_0))
+        @variable(subproblems[t], x_h_prev ∈ MOI.Parameter(h_0))
+        @variable(subproblems[t], x_m_prev ∈ MOI.Parameter(m_0))
+        
+        # @constraint(subproblems[t], [norm_deficit; (target - u_t)] in MOI.NormOneCone(2))
+        @constraint(subproblems[t], [norm_deficit; target_v - x_v; target_h - x_h; target_m - x_m] in MOI.NormOneCone(4))
+        @objective(subproblems[t], Min, -x_h + penalty * norm_deficit)
+
+        # Forces are defined as functions:
+        D(x_h, x_v) = D_c * x_v^2 * exp(-h_c * (x_h - h_0) / h_0)
+        g(x_h) = g_0 * (h_0 / x_h)^2
+        # Discretization of derivatives
+        ddt(x_curr, x_prev) = (x_curr - x_prev) / Δt
+        # The dynamical equations are implemented as constraints.
+        @constraint(subproblems[t], ddt(x_h, x_h_prev) == x_v_prev)
+        @constraint(
+            subproblems[t],
+            ddt(x_v, x_v_prev) == (u_t - D(x_h_prev, x_v_prev)) / x_m_prev - g(x_h_prev) - w,
+        )
+        @constraint(subproblems[t], ddt(x_m, x_m_prev) == -u_t / c)
+        
+        # uncertainty
+        uncertainty_samples[t] = [(w, randn(num_scenarios))]
+
+        state_params_in[t] = [x_v_prev, x_h_prev, x_m_prev]
+        # state_params_out[t] = [(target, u_t)]
+        state_params_out[t] = [(target_v, x_v), (target_h, x_h), (target_m, x_m)]
+        heights[t] = x_h
+        masses[t] = x_m
+        velocities[t] = x_v
+        thrusts[t] = u_t
+    end
+
+    return subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples, velocities, heights, masses, u_t_max
 end
 
 

@@ -21,7 +21,7 @@ subproblems, state_params_in, state_params_out, uncertainty_samples, initial_sta
     joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 
-det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
+det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(JuMP.Model(), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
 
 # Remove state imposing constraints
 
