@@ -57,8 +57,26 @@ objective_values = [simulate_multistage(
     final_state, sample(uncertainty_samples), 
     models;
 ) for _ in 1:2]
-best_obj = mean(objective_values)-
+best_obj = mean(objective_values)
 
+#####################################################################
+
+subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples, velocities, heights, masses, u_t_max = build_rocket_subproblems(; penalty=1e-5)
+
+model_per_stage = Chain(Dense(4, 32, sigmoid), 
+    x -> reshape(x, :, 1), 
+    Flux.LSTM(32 => 32), 
+    x -> x[:, end],
+    Dense(32, 1, (x) -> sigmoid(x) .* u_t_max)
+)
+
+Random.seed!(8788)
+objective_values = [simulate_multistage(
+    subproblems, state_params_in, state_params_out, 
+    initial_state, sample(uncertainty_samples), 
+    model_per_stage;
+) for _ in 1:2]
+best_obj = mean(objective_values)
 
 #####################################################################
 

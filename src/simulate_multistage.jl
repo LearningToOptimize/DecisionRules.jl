@@ -46,7 +46,7 @@ function simulate_stage(subproblem::JuMP.Model, state_param_in::Vector{Any}, sta
     end
 
     # Update state parameters out
-    for i in 1:length(state_param_in)
+    for i in 1:length(state_param_out)
         state_var = state_param_out[i][1]
         set_parameter_value(state_var, state_out_target[i])
     end

@@ -77,8 +77,8 @@ end
     end
 
     @testset "simulate_multistage (per-stage)" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(SCS.Optimizer))
-        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(SCS.Optimizer))
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)))
+        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)))
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
@@ -102,6 +102,7 @@ end
 
         @test simulate([9.0], [[7.], [4.000]]) ≈ 359 rtol=1.0e-1
 
+        Random.seed!(222)
         m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val_prev = DecisionRules.simulate_multistage(
             subproblems, state_params_in, state_params_out, 
