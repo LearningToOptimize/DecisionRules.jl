@@ -42,98 +42,98 @@ end
 animate!(atlas, mvis, X, Δt=h);
 
 
-"""
-    memoize_dynamics_and_jacobian(foo, n_in, n_out)
+# """
+#     memoize_dynamics_and_jacobian(foo, n_in, n_out)
 
-Returns an array of length `n_out`, where each element is a tuple 
-`(scalar_fun, grad_fun!)`.
+# Returns an array of length `n_out`, where each element is a tuple 
+# `(scalar_fun, grad_fun!)`.
 
-- `scalar_fun(x...)` returns the i-th component of `foo(x...)` in normal calls (Float64). 
-- In Dual/AD mode, it returns the i-th component but triggers a single Jacobian evaluation and caches it.
+# - `scalar_fun(x...)` returns the i-th component of `foo(x...)` in normal calls (Float64). 
+# - In Dual/AD mode, it returns the i-th component but triggers a single Jacobian evaluation and caches it.
 
-- `grad_fun!(g, x...)` writes into `g` the partial derivatives of that i-th component w.r.t. x.
+# - `grad_fun!(g, x...)` writes into `g` the partial derivatives of that i-th component w.r.t. x.
 
-All `n_out` scalar functions share the same cached value of the *entire* vector `foo(x...)`
-and the *entire* Jacobian for the last input `x...`.
-"""
-function memoize_dynamics_and_jacobian(foo::Function, n_in::Int, n_out::Int)
-    # Cache for normal (Float64) evaluation
-    last_x_f   = nothing
-    last_f     = nothing  # Vector{Float64} from foo(x)
+# All `n_out` scalar functions share the same cached value of the *entire* vector `foo(x...)`
+# and the *entire* Jacobian for the last input `x...`.
+# """
+# function memoize_dynamics_and_jacobian(foo::Function, n_in::Int, n_out::Int)
+#     # Cache for normal (Float64) evaluation
+#     last_x_f   = nothing
+#     last_f     = nothing  # Vector{Float64} from foo(x)
 
-    # Cache for AD (Dual) evaluation
-    last_x_J   = nothing
-    last_f_J   = nothing  # Vector{Dual} from foo(x)
-    last_J     = nothing  # Matrix of partials (size n_out x n_in)
+#     # Cache for AD (Dual) evaluation
+#     last_x_J   = nothing
+#     last_f_J   = nothing  # Vector{Dual} from foo(x)
+#     last_J     = nothing  # Matrix of partials (size n_out x n_in)
 
-    # Optional: pre-make a JacobianConfig if you like:
-    # x0 = zeros(n_in)
-    # jac_cfg = ForwardDiff.JacobianConfig(foo, x0)
+#     # Optional: pre-make a JacobianConfig if you like:
+#     # x0 = zeros(n_in)
+#     # jac_cfg = ForwardDiff.JacobianConfig(foo, x0)
 
-    # This local function returns the i-th scalar output for the given x...
-    # In normal Float64 calls, it returns last_f[i].
-    # In AD calls (Dual etc.), it ensures last_J is computed and returns last_f_J[i].
-    function f_i(i, x::Vararg{T}) where {T<:Real}
-        if T == Float64
-            # Normal evaluation mode
-            if x !== last_x_f
-                last_x_f = x
-                last_f   = foo(x...)
-            end
-            return last_f[i]
-        else
-            # Dual/AD evaluation mode
-            if x !== last_x_J
-                last_x_J = x
-                # Evaluate all outputs
-                local x_vec = collect(x)
-                last_f_J    = foo(x_vec...)
+#     # This local function returns the i-th scalar output for the given x...
+#     # In normal Float64 calls, it returns last_f[i].
+#     # In AD calls (Dual etc.), it ensures last_J is computed and returns last_f_J[i].
+#     function f_i(i, x::Vararg{T}) where {T<:Real}
+#         if T == Float64
+#             # Normal evaluation mode
+#             if x !== last_x_f
+#                 last_x_f = x
+#                 last_f   = foo(x...)
+#             end
+#             return last_f[i]
+#         else
+#             # Dual/AD evaluation mode
+#             if x !== last_x_J
+#                 last_x_J = x
+#                 # Evaluate all outputs
+#                 local x_vec = collect(x)
+#                 last_f_J    = foo(x_vec...)
 
-                # Evaluate the entire Jacobian in one pass
-                # last_J = ForwardDiff.jacobian(z -> foo(z...), x_vec, jac_cfg)
-                last_J = ForwardDiff.jacobian(z -> foo(z...), x_vec)
-            end
-            # Return the i-th output (primal part).
-            return last_f_J[i]
-        end
-    end
+#                 # Evaluate the entire Jacobian in one pass
+#                 # last_J = ForwardDiff.jacobian(z -> foo(z...), x_vec, jac_cfg)
+#                 last_J = ForwardDiff.jacobian(z -> foo(z...), x_vec)
+#             end
+#             # Return the i-th output (primal part).
+#             return last_f_J[i]
+#         end
+#     end
 
-    # Now build an array of (scalar_fun, gradient_callback!) for each output dimension
-    result = Vector{Tuple{Function, Function}}(undef, n_out)
-    for i in 1:n_out
-        # 1) The scalar function to pass to JuMP
-        scalar_fun = (args...) -> f_i(i, args...)
+#     # Now build an array of (scalar_fun, gradient_callback!) for each output dimension
+#     result = Vector{Tuple{Function, Function}}(undef, n_out)
+#     for i in 1:n_out
+#         # 1) The scalar function to pass to JuMP
+#         scalar_fun = (args...) -> f_i(i, args...)
 
-        # 2) The gradient callback that JuMP/Ipopt calls: we fill `g` with partial derivatives
-        # grad_fun! = (g, args...) -> begin
-        #     # Make sure last_J is up to date for this x...
-        #     _ = f_i(i, args...)  # triggers AD if needed
-        #     # Now fill g with row i of last_J
-        #     @inbounds for col in 1:length(args)
-        #         g[col] = last_J[i, col]
-        #     end
-        #     return
-        # end
-        grad_fun! = (g, args...) -> begin
-        if last_J === nothing
-            # We haven't computed the Jacobian yet, or we are in reverse mode.
-            # Manually call ForwardDiff now with `args` to get it:
-            xvec = collect(args)
-            # Evaluate the function for the primal:
-            last_f_J = foo(xvec...)  # store if needed
-            last_J   = ForwardDiff.jacobian(z -> foo(z...), xvec)
-        end
-        # Now fill g with row i of last_J
-        @inbounds for col in 1:length(args)
-            g[col] = last_J[i, col]
-        end
-        return
-    end
+#         # 2) The gradient callback that JuMP/Ipopt calls: we fill `g` with partial derivatives
+#         # grad_fun! = (g, args...) -> begin
+#         #     # Make sure last_J is up to date for this x...
+#         #     _ = f_i(i, args...)  # triggers AD if needed
+#         #     # Now fill g with row i of last_J
+#         #     @inbounds for col in 1:length(args)
+#         #         g[col] = last_J[i, col]
+#         #     end
+#         #     return
+#         # end
+#         grad_fun! = (g, args...) -> begin
+#         if last_J === nothing
+#             # We haven't computed the Jacobian yet, or we are in reverse mode.
+#             # Manually call ForwardDiff now with `args` to get it:
+#             xvec = collect(args)
+#             # Evaluate the function for the primal:
+#             last_f_J = foo(xvec...)  # store if needed
+#             last_J   = ForwardDiff.jacobian(z -> foo(z...), xvec)
+#         end
+#         # Now fill g with row i of last_J
+#         @inbounds for col in 1:length(args)
+#             g[col] = last_J[i, col]
+#         end
+#         return
+#     end
 
-        result[i] = (scalar_fun, grad_fun!)
-    end
-    return result
-end
+#         result[i] = (scalar_fun, grad_fun!)
+#     end
+#     return result
+# end
 
 
 function atlas_dynamics(xu::T...) where {T<:Real}
