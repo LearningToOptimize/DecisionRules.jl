@@ -29,11 +29,11 @@ using DojoEnvironments
 # ------------------------------------------------------------------------------------------
 # Knobs
 # ------------------------------------------------------------------------------------------
-const N  = 21
+const N  = 21  # number of knot points (N-1 steps); adjust as needed for your task/horizon
 const dt = 0.02
 
-# Start with LBFGS; you can enable exact Hessians later (expensive).
-const USE_EXACT_HESSIAN = false
+# # Start with LBFGS; you can enable exact Hessians later (expensive).
+# const USE_EXACT_HESSIAN = false
 
 # Indices into minimal state for base position (often 1:3, but model-dependent).
 const BASE_X_IDX = 1
@@ -44,17 +44,17 @@ const x_target = 0.50
 const u_max_abs = 40.0
 
 const w_track_xy = 50.0
-const w_track_z  = 10.0
+const w_track_z  = 100.0
 const w_terminal = 200.0
 const w_u        = 1e-2
 const w_du       = 1e-2
 
 # Dojo solver options for each step/linearization (tune as needed)
 const DOJO_OPTS = Dojo.SolverOptions{Float64}(;
-    rtol = 1e-6,
-    btol = 1e-4,
-    max_iter = 50,
-    max_ls = 10,
+    rtol = 1e-4,
+    btol = 1e-3,
+    max_iter = 20,
+    max_ls = 8,
     verbose = false
 )
 
@@ -232,6 +232,29 @@ function QuadrupedDynamicsOracle(mech, x0::Vector{Float64}, u0::Vector{Float64};
     return QuadrupedDynamicsOracle(mechs, caches, N, dt, n, m, xk, uk, xnext, A, B, xu, H, jac_struct, hess_struct)
 end
 
+function ensure_fx_and_AB!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
+    c = O.caches[k]
+    if (c.have_fx && c.have_AB && x == c.x && u == c.u)
+        return
+    end
+    copyto!(c.x, x); copyto!(c.u, u)
+
+    mech = O.mechs[k]
+    Dojo.set_minimal_state!(mech, c.x)
+    Dojo.set_input!(mech, c.u)
+
+    # gradients call (Dojo simulates internally)
+    A2, B2 = Dojo.get_minimal_gradients!(mech, c.x, c.u; opts=DOJO_OPTS)
+    copyto!(c.A, A2); copyto!(c.B, B2)
+
+    # grab the resulting next state from mechanism
+    xn = Dojo.get_minimal_state(mech)
+    copyto!(c.fx, xn)
+
+    c.have_AB = true
+    c.have_fx = true
+end
+
 function ensure_fx!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
     c = O.caches[k]
     if cache_matches_fx(c, x, u)
@@ -282,7 +305,7 @@ function eval_jacobian!(O::QuadrupedDynamicsOracle, ret::AbstractVector, z::Abst
         for i in 1:n; x[i] = z[idx_x(n,k,i)]; end
         for j in 1:m; u[j] = z[idx_u(n,N,m,k,j)]; end
 
-        ensure_AB!(O, k, x, u)
+        ensure_fx_and_AB!(O, k, x, u)
         c = O.caches[k]
 
         # Must match build_jacobian_structure order
@@ -355,15 +378,11 @@ p = n*(N-1)               # defects dimension
 model = Model(optimizer_with_attributes(Ipopt.Optimizer, 
         # "print_level" => 0,
         "linear_solver" => "ma97",
-        #"hessian_approximation" => "limited-memory",
-        #"max_iter" => 20,
+        "hessian_approximation" => "limited-memory",
+        # "max_iter" => 20,
         "mu_target" => 1e-8,
         "print_user_options" => "yes",
 ))
-
-if !USE_EXACT_HESSIAN
-    set_optimizer_attribute(model, "hessian_approximation", "limited-memory")
-end
 
 @variable(model, X[1:n, 1:N])
 @variable(model, U[1:m, 1:(N-1)])
@@ -374,16 +393,34 @@ end
 # Reference “path”: straight-line base x
 x_path = range(x0[BASE_X_IDX], x0[BASE_X_IDX] + x_target, length=N)
 y_path = fill(x0[BASE_Y_IDX], N)
-z_nom  = x0[BASE_Z_IDX]
+z_nom  = x0[BASE_Z_IDX] * 0.8
 
+Kdrop = 5    # ignore tracking for first 5 steps
+Kramp = 10   # ramp up over next 10 steps
+
+w_track = zeros(Float64, N)
+for k in 1:N
+    if k <= Kdrop
+        w_track[k] = 0.0
+    elseif k < Kdrop + Kramp
+        w_track[k] = (k - Kdrop) / Kramp
+    else
+        w_track[k] = 1.0
+    end
+end
+
+# Use w_track[k] to gate the tracking cost
 @expression(model, stage_track[k=1:N-1],
-    w_track_xy * ((X[BASE_X_IDX,k] - x_path[k])^2 + (X[BASE_Y_IDX,k] - y_path[k])^2) +
-    w_track_z  * (X[BASE_Z_IDX,k] - z_nom)^2
+    w_track[k] * (
+        w_track_xy * ((X[BASE_X_IDX,k] - x_path[k])^2 + (X[BASE_Y_IDX,k] - y_path[k])^2) +
+        w_track_z  * (X[BASE_Z_IDX,k] - z_nom)^2
+    )
 )
+
 @expression(model, stage_u[k=1:N-1], w_u * sum(U[:,k].^2))
 @expression(model, stage_du[k=2:N-1], w_du * sum((U[:,k] - U[:,k-1]).^2))
 @expression(model, terminal_cost,
-    w_terminal * (
+    w_track[N] * w_terminal * (
         (X[BASE_X_IDX,N] - x_path[N])^2 +
         (X[BASE_Y_IDX,N] - y_path[N])^2 +
         (X[BASE_Z_IDX,N] - z_nom)^2
@@ -391,11 +428,24 @@ z_nom  = x0[BASE_Z_IDX]
 )
 @objective(model, Min, sum(stage_track) + sum(stage_u) + sum(stage_du) + terminal_cost)
 
-# Warm start
-for k in 1:N
-    set_start_value.(X[:,k], x0)
+# Rollout a consistent initial trajectory under some U guess
+U_guess = [zeros(m) for _ in 1:(N-1)]
+X_guess = Vector{Vector{Float64}}(undef, N)
+X_guess[1] = copy(x0)
+
+tmp_mech = deepcopy(mech)
+for k in 1:(N-1)
+    xnext = similar(x0)
+    dojo_step!(xnext, tmp_mech, X_guess[k], U_guess[k]; opts=DOJO_OPTS)
+    X_guess[k+1] = xnext
 end
-set_start_value.(U, 0.0)
+
+for k in 1:N
+    set_start_value.(X[:,k], X_guess[k])
+end
+for k in 1:(N-1)
+    set_start_value.(U[:,k], 0.0)
+end
 
 # VectorNonlinearOracle constraint: zvars in oracle_set
 zvars = vcat(vec(X), vec(U))
