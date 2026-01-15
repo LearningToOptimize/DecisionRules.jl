@@ -32,8 +32,8 @@ using DojoEnvironments
 # ------------------------------------------------------------------------------------------
 const N_TRAJ = 21               # trajectory length (must match optimization)
 const dt = 0.02              # time step (must match optimization)
-const N_epochs = 100           # number of training epochs; adjust as needed for convergence
-const batch_size = 10
+const N_epochs = 10           # number of training epochs; adjust as needed for convergence
+const batch_size = 32
 const learning_rate = 1e-3
 
 # Loss weights (from optimization)

@@ -8,7 +8,7 @@ using LinearAlgebra
 # ### Parameters
 rng = MersenneTwister(1)
 N = 2000 # number of steps per rollout; adjust as needed for your task/horizon
-M = 20 # number of rollouts for learning; adjust as needed for convergence
+M = 60 # number of rollouts for learning; adjust as needed for convergence
 paramcontainer = [[0.1; 0; 1; 0; -1.5]] # result: [[0.3604389380437305, 0.15854285262309512, 0.9575825661369068, -0.325769852046206, -1.4824537456751052]]
 paramstorage = [[0.1; 0; 1; 0; -1.5]]
 bias = zeros(5)
@@ -19,13 +19,32 @@ distancestorage = zeros(M)
 # ### Path Following Parameters
 # Define target path as waypoints [x, y]
 # User can modify this to any curved path
+# line
+# path_waypoints = [
+#     [0.0, 0.0],
+#     [0.3, 0.1],
+#     [0.6, 0.2],
+#     [0.9, 0.3],
+#     [1.2, 0.4],
+#     [1.5, 0.5]
+# ]
+# curve
+# path_waypoints = [
+#     [0.0, 0.00],
+#     [0.3, 0.04],  # 0.4 * (0.3^2)
+#     [0.6, 0.14],  # 0.4 * (0.6^2)
+#     [0.9, 0.32],  # 0.4 * (0.9^2)
+#     [1.2, 0.58],  # 0.4 * (1.2^2)
+#     [1.5, 0.90]   # 0.4 * (1.5^2)
+# ]
+# circle
 path_waypoints = [
     [0.0, 0.0],
-    [0.3, 0.1],
-    [0.6, 0.2],
-    [0.9, 0.3],
-    [1.2, 0.4],
-    [1.5, 0.5]
+    [0.3, 0.2],
+    [0.6, 0.3],
+    [0.9, 0.2],
+    [1.2, 0.0],
+    [1.5, -0.2]
 ]
 # using Plots
 # plot(getindex.(path_waypoints, 1), getindex.(path_waypoints, 2), marker=:circle, label="Waypoints", xlabel="X", ylabel="Y", title="Target Path")
@@ -103,26 +122,18 @@ function get_next_waypoint(x_pos, y_pos)
 end
 
 function rollout(env; record=false)
-    waypoints_reached = 0
-    
     for k=1:N
         x = get_state(env)
         if x[3] < 0 || !all(isfinite.(x)) || abs(x[1]) > 1000 # upsidedown || failed || "exploding"
             println("  failed")
-            return -1, waypoints_reached
+            return 1
         end
-        
-        # Get next waypoint to follow
-        next_wp = get_next_waypoint(x[1], x[2])
         
         u = controller!(x, k)
         step!(env, x, u; k, record)
-        
-        # Track waypoints reached
-        waypoints_reached = current_waypoint_idx - 1
     end
     
-    return 0, waypoints_reached
+    return 0
 end
 
 # ### Learning routine
@@ -142,42 +153,71 @@ for i=1:M
     x0 = DojoEnvironments.get_state(env)[1]
 
     res = 0
-    waypoints_reached = 0
     try
-        res, waypoints_reached = rollout(env)
+        res = rollout(env)
     catch
-        res = -1
+        res = 1
     end
-    if res == -1
+    if res == 1
         println("  errored")
     end
 
     new_state = DojoEnvironments.get_state(env)
     
-    # Compute path following score: combination of waypoints reached and distance to final waypoint
-    final_waypoint = path_waypoints[end]
-    dist_to_final = sqrt((new_state[1] - final_waypoint[1])^2 + (new_state[2] - final_waypoint[2])^2)
-    path_score = waypoints_reached * 10.0 - dist_to_final  # Reward waypoints, penalize distance
+    # Primary metric: forward distance traveled (x-direction)
+    distancenew = new_state[1] - x0
     
-    distancenew = new_state[1] - x0  # Keep original distance metric too
-
-    if res == -1 || (waypoints_reached < best_waypoints_reached) || (waypoints_reached == best_waypoints_reached && path_score <= path_following_score)
+    # Secondary metric: how close to the path (deviation in y-direction)
+    x_pos = new_state[1]
+    y_pos = new_state[2]
+    
+    # Compute target y from waypoints: linear interpolation
+    # Find where x_pos falls on the path
+    target_y = 0.0
+    if x_pos <= path_waypoints[1][1]
+        target_y = path_waypoints[1][2]
+    elseif x_pos >= path_waypoints[end][1]
+        target_y = path_waypoints[end][2]
+    else
+        # Linear interpolation between waypoints
+        for j in 1:(length(path_waypoints)-1)
+            if path_waypoints[j][1] <= x_pos <= path_waypoints[j+1][1]
+                # Interpolate
+                x1, y1 = path_waypoints[j]
+                x2, y2 = path_waypoints[j+1]
+                t = (x_pos - x1) / (x2 - x1)
+                target_y = y1 + t * (y2 - y1)
+                break
+            end
+        end
+    end
+    
+    y_deviation = abs(y_pos - target_y)
+    
+    # Success criterion: must make forward progress AND stay reasonably close to path
+    # Only accept if y-deviation is not too large (tunable parameter)
+    max_y_deviation = 0.3  # Maximum allowed deviation from path
+    path_is_good = y_deviation < max_y_deviation
+    
+    # Modified success: forward progress + staying on path
+    if res == 1 || distancenew <= distance || !path_is_good
         println("  unsuccessful")
         !all(isfinite.(new_state)) && println("  nans")
+        if !path_is_good
+            println("  off path (y-deviation: $(round(y_deviation, digits=3)))")
+        end
         paramcontainer[1] = paramstorage[end]
         bias = zeros(5)
         explore_factor *= 0.9
     else
         println("  successful")
         distance = distancenew
-        best_waypoints_reached = waypoints_reached
-        path_following_score = path_score
         push!(paramstorage,paramcontainer[1])
         bias = paramstorage[end]-paramstorage[end-1]
         explore_factor = 0.1
     end
 
-    println("  distance: $distancenew | waypoints reached: $waypoints_reached/$(length(path_waypoints)) | score: $(round(path_score, digits=3))")
+    println("  distance: $(round(distancenew, digits=3)) | y-target: $(round(target_y, digits=3)) | y-actual: $(round(y_pos, digits=3)) | y-dev: $(round(y_deviation, digits=3))")
     distancestorage[i] = distance
 end
 
