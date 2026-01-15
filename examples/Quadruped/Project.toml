@@ -1,4 +1,6 @@
 [deps]
+DecisionRules = "47937410-f832-486f-8300-12c95b225dfc"
+DiffOpt = "930fe3bc-9c6b-11ea-2d94-6184641e85e7"
 Dojo = "ac60b53e-8d92-4c83-b960-e78698fa1916"
 DojoEnvironments = "8728bab7-e8ae-46fd-a1b6-a8c4d00f608e"
 HSL_jll = "017b0a0e-03f4-516a-9b91-836bbd1904dd"
