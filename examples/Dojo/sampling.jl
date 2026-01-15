@@ -235,3 +235,106 @@ reset_state!(env)
 simulate!(env, environment_controller!; record=true)
 vis = visualize(env)
 render(vis)
+
+## train flux policy from actual previous state to next state.
+using Flux
+
+println("\n=== Collecting training data from best policy ===")
+reset_state!(env)
+
+visited_states = Vector{Vector{Float64}}()
+visited_actions = Vector{Vector{Float64}}()
+
+for k=1:N
+    x = get_state(env)
+    push!(visited_states, copy(x))
+    
+    u = controller!(x, k)
+    push!(visited_actions, copy(u))
+    
+    step!(env, x, u; k, record=false)
+end
+
+# Add final state
+x_final = get_state(env)
+push!(visited_states, copy(x_final))
+
+println("Collected $(length(visited_states)) states and $(length(visited_actions)) actions")
+
+# ### Prepare training data: state -> next_state
+n_state = length(visited_states[1])
+n_train = length(visited_actions)
+
+X_train = hcat([visited_states[i] for i in 1:n_train]...)  # (n_state, n_train)
+Y_train = hcat([visited_states[i+1] for i in 1:n_train]...)  # (n_state, n_train)
+
+println("Training data shape: X=$(size(X_train)), Y=$(size(Y_train))")
+
+# ### Build neural network: state -> next_state
+hidden = 128
+model = Chain(
+    Dense(n_state, hidden, relu),
+    Dense(hidden, hidden, relu),
+    Dense(hidden, n_state)
+)
+
+# ### Training loop
+opt_state = Flux.setup(Flux.Adam(1e-3), model)
+
+println("\n=== Training neural network ===")
+n_epochs = 100
+batch_size = 64
+
+for epoch in 1:n_epochs
+    # Shuffle and batch
+    indices = randperm(n_train)
+    epoch_loss = 0.0
+    n_batches = 0
+    
+    for batch_start in 1:batch_size:n_train
+        batch_end = min(batch_start + batch_size - 1, n_train)
+        batch_idx = indices[batch_start:batch_end]
+        
+        X_batch = X_train[:, batch_idx]
+        Y_batch = Y_train[:, batch_idx]
+        
+        loss, grads = Flux.withgradient(model) do m
+            Y_pred = m(X_batch)
+            Flux.mse(Y_pred, Y_batch)
+        end
+        
+        Flux.update!(opt_state, model, grads[1])
+        
+        epoch_loss += loss
+        n_batches += 1
+    end
+    
+    avg_loss = epoch_loss / n_batches
+    if epoch % 10 == 0 || epoch == 1
+        println("Epoch $epoch: Avg Loss = $(round(avg_loss, digits=6))")
+    end
+end
+
+# ### Test the trained model
+println("\n=== Testing trained model ===")
+test_idx = rand(1:n_train)
+x_test = visited_states[test_idx]
+x_next_actual = visited_states[test_idx + 1]
+x_next_pred = model(x_test)
+
+println("Sample prediction (state dim 1-3):")
+println("  Actual:    $(x_next_actual[1:3])")
+println("  Predicted: $(x_next_pred[1:3])")
+println("  Error:     $(norm(x_next_actual - x_next_pred))")
+
+# ### Save the trained model
+using BSON: @save
+model_path = joinpath(@__DIR__, "quadruped_warmstart_model.bson")
+@save model_path model
+println("\nModel saved to: $model_path")
+
+println("\n=== Model ready for warm-starting quadruped optimization ===")
+println("To use in train_dr_quadruped.jl:")
+println("  using BSON: @load")
+println("  @load \"$model_path\" model")
+

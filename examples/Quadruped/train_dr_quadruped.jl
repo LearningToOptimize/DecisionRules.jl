@@ -11,7 +11,14 @@ include(joinpath(@__DIR__, "build_quadruped_subproblems.jl"))
 
 # Build stage-wise subproblems and data
 subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples =
-    build_quadruped_subproblems()
+    build_quadruped_subproblems(;N=5,
+    solver = optimizer_with_attributes(Ipopt.Optimizer,
+        # "print_level" => 0,
+        "linear_solver" => "ma97",
+        "hessian_approximation" => "limited-memory",
+        "mu_target" => 1e-8,
+    )
+)
 
 n = length(initial_state)
 
@@ -38,7 +45,7 @@ println("Initial mean objective: $best_obj")
 
 # Train with DecisionRules helper (differentiates through DiffOpt subproblems)
 train_multistage(model, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples;
-    num_batches = 20,
+    num_batches = 5,
     num_train_per_batch = 2,
     optimizer = Flux.Adam(),
     record_loss = (iter, model, loss, tag) -> begin

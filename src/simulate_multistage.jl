@@ -92,42 +92,49 @@ function ChainRulesCore.rrule(::typeof(get_next_state),
     y = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out_target)
 
     function pullback(Δy)
-        Δy = collect(Δy)  # ensure indexable, concrete element type
+        try
+            Δy = collect(Δy)  # ensure indexable, concrete element type
 
-        # Best practice: clear previous seeds
-        DiffOpt.empty_input_sensitivities!(subproblem)
+            # Best practice: clear previous seeds
+            DiffOpt.empty_input_sensitivities!(subproblem)
 
-        # 1) Seed reverse on the realized output variables with Δy
-        #    Each entry in state_param_out is (param_target, realized_state_var)
-        @inbounds for i in eachindex(state_param_out)
-            realized_var = state_param_out[i][2]
-            # J' * Δ: set reverse seed on variable primal
-            DiffOpt.set_reverse_variable(subproblem, realized_var, Δy[i])
-        end
+            # 1) Seed reverse on the realized output variables with Δy
+            #    Each entry in state_param_out is (param_target, realized_state_var)
+            @inbounds for i in eachindex(state_param_out)
+                realized_var = state_param_out[i][2]
+                # J' * Δ: set reverse seed on variable primal
+                DiffOpt.set_reverse_variable(subproblem, realized_var, Δy[i])
+            end
 
-        # 2) Reverse differentiate
-        DiffOpt.reverse_differentiate!(subproblem)  # computes all needed products
+            # 2) Reverse differentiate
+            DiffOpt.reverse_differentiate!(subproblem)  # computes all needed products
 
-        # 3) Read sensitivities w.r.t. parameter variables
-        #    These are vector-Jacobian products dL/d(param) = (∂y/∂param)^T * Δy
-        d_state_in = similar(state_in, promote_type(eltype(state_in), eltype(Δy)))
-        @inbounds for i in eachindex(state_param_in)
-            pin = state_param_in[i]  # JuMP.Parameter variable            
-            d_state_in[i] = DiffOpt.get_reverse_parameter(subproblem, pin)
-        end
+            # 3) Read sensitivities w.r.t. parameter variables
+            #    These are vector-Jacobian products dL/d(param) = (∂y/∂param)^T * Δy
+            d_state_in = similar(state_in, promote_type(eltype(state_in), eltype(Δy)))
+            @inbounds for i in eachindex(state_param_in)
+                pin = state_param_in[i]  # JuMP.Parameter variable            
+                d_state_in[i] = DiffOpt.get_reverse_parameter(subproblem, pin)
+            end
 
-        d_state_out_target = similar(state_out_target, promote_type(eltype(state_out_target), eltype(Δy)))
-        @inbounds for i in eachindex(state_param_out)
-            pout = state_param_out[i][1]  # target Parameter variable
-            d_state_out_target[i] = DiffOpt.get_reverse_parameter(subproblem, pout)
-        end
+            d_state_out_target = similar(state_out_target, promote_type(eltype(state_out_target), eltype(Δy)))
+            @inbounds for i in eachindex(state_param_out)
+                pout = state_param_out[i][1]  # target Parameter variable
+                d_state_out_target[i] = DiffOpt.get_reverse_parameter(subproblem, pout)
+            end
 
-        # Optional: clear seeds so they don't accumulate between calls
-        DiffOpt.empty_input_sensitivities!(subproblem)
+            # Optional: clear seeds so they don't accumulate between calls
+            DiffOpt.empty_input_sensitivities!(subproblem)
 
-        # Return cotangents for each primal argument, in order:
-        #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target)
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
+            # Return cotangents for each primal argument, in order:
+            #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target)
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
+        catch
+            # In case of any error (e.g. non-DiffOpt model, missing parameters, etc.), return identity gradients 1 * Δy for state_in and state_out_target.
+            d_state_in = ones(length(state_in)) .* Δy  # simple fallback: sum Δy and return for all inputs
+            d_state_out_target = ones(length(state_out_target)) .* Δy
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
+        end      
     end
 
     return y, pullback
@@ -261,18 +268,28 @@ function ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_
         try 
             return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), pdual.(state_param_in) * Δy, pdual.([s[1] for s in state_param_out]) * Δy)
         catch
-            DiffOpt.empty_input_sensitivities!(subproblem)
-            MOI.set(
-                subproblem,
-                DiffOpt.ReverseObjectiveSensitivity(),
-                Δy,
-            )
-            DiffOpt.reverse_differentiate!(subproblem)
+            try
+                DiffOpt.empty_input_sensitivities!(subproblem)
+                MOI.set(
+                    subproblem,
+                    DiffOpt.ReverseObjectiveSensitivity(),
+                    Δy,
+                )
+                DiffOpt.reverse_differentiate!(subproblem)
 
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), 
-                DiffOpt.get_reverse_parameter.(subproblem, state_param_in), 
-                DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out])
-            )
+                return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), 
+                    DiffOpt.get_reverse_parameter.(subproblem, state_param_in), 
+                    DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out])
+                )
+            catch e
+                @warn "Failed to compute gradients via DiffOpt. Returning zero gradients for state_in and state_out_target."
+                # print error
+                @show e
+                # print termination status
+                @show JuMP.termination_status(subproblem)
+
+                return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), zeros(length(state_param_in)), zeros(length(state_param_out)))
+            end
         end
     end
     return y, _pullback

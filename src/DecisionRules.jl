@@ -8,6 +8,7 @@ using ChainRules: @ignore_derivatives
 using ChainRulesCore
 import ChainRulesCore.rrule
 using DiffOpt
+using Logging
 
 export simulate_multistage, sample, train_multistage, simulate_states, simulate_stage, dense_multilayer_nn, variable_to_parameter, create_deficit!, 
     SaveBest, find_variables, identity
