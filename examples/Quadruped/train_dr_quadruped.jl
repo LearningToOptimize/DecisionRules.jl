@@ -24,14 +24,30 @@ n = length(initial_state)
 
 # Policy: maps (state) -> desired next state (same dimension)
 # Ensure LSTM input dim matches the preceding Dense output (64)
-hidden = 64
+hidden = 128
 model = Chain(
     Dense(n, hidden, relu),
-    x -> reshape(x, :, 1),            # (hidden, 1)
-    Flux.LSTM(hidden => hidden),      # input dim = hidden
-    x -> x[:, end],
+    Dense(hidden, hidden, relu),
     Dense(hidden, n),
 )
+
+# Try to load warm-start weights from sampling script
+using JLD2
+warmstart_path = joinpath(dirname(@__DIR__), "Dojo", "quadruped_warmstart_model.jld2")
+if isfile(warmstart_path)
+    println("Loading warm-start model from: $warmstart_path")
+    try
+        model_state = JLD2.load(warmstart_path, "model_state")
+        Flux.loadmodel!(model, model_state)
+        println("✓ Warm-start weights loaded successfully!")
+    catch e
+        println("⚠ Failed to load warm-start: $e")
+        println("  Continuing with random initialization")
+    end
+else
+    println("No warm-start model found at: $warmstart_path")
+    println("Using random initialization (run sampling.jl first to create warm-start)")
+end
 
 # Quick baseline evaluation
 Random.seed!(42)

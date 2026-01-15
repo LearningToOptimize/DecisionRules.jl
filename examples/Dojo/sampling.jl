@@ -282,7 +282,7 @@ model = Chain(
 opt_state = Flux.setup(Flux.Adam(1e-3), model)
 
 println("\n=== Training neural network ===")
-n_epochs = 100
+n_epochs = 1000
 batch_size = 64
 
 for epoch in 1:n_epochs
@@ -328,13 +328,16 @@ println("  Predicted: $(x_next_pred[1:3])")
 println("  Error:     $(norm(x_next_actual - x_next_pred))")
 
 # ### Save the trained model
-using BSON: @save
-model_path = joinpath(@__DIR__, "quadruped_warmstart_model.bson")
-@save model_path model
+using JLD2
+
+model_path = joinpath(@__DIR__, "quadruped_warmstart_model.jld2")
+model_state = Flux.state(model)
+jldsave(model_path; model_state=model_state)
 println("\nModel saved to: $model_path")
 
 println("\n=== Model ready for warm-starting quadruped optimization ===")
 println("To use in train_dr_quadruped.jl:")
-println("  using BSON: @load")
-println("  @load \"$model_path\" model")
+println("  using JLD2")
+println("  model_state = JLD2.load(\"$model_path\", \"model_state\")")
+println("  Flux.loadmodel!(model, model_state)")
 
