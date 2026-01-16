@@ -4,9 +4,10 @@
 # ### Setup
 using Crux
 using POMDPs
+using POMDPTools: Deterministic
 using Random
 using Flux
-using Optimisers
+# using Optimisers
 using Flux: glorot_uniform
 using StableRNGs: StableRNG
 using Dojo
@@ -225,6 +226,13 @@ function (env::QuadrupedEnv)(a::Int)
 
         DojoEnvironments.step!(env.dojo_env, env.state, u; k=env.t, record=env.record)
         env.state = DojoEnvironments.get_state(env.dojo_env)
+        
+        # Safety check: ensure state is still the right size
+        if length(env.state) != 36
+            println("ERROR: env.state corrupted! Length = $(length(env.state))")
+            println("  env.state = $(env.state)")
+            error("State dimension mismatch after step!")
+        end
 
         x_pos = env.state[1]
         z_pos = env.state[3]
@@ -246,7 +254,7 @@ end
 # -----------------------------
 # ### POMDPs MDP wrapper for Crux
 # -----------------------------
-mutable struct QuadrupedMDP{T} <: MDP{Vector{T}, Int}
+mutable struct QuadrupedMDP{T} <: MDP{Vector{Float32}, Int}
     env::QuadrupedEnv{T}
     S
     A::Vector{Int}
@@ -264,14 +272,26 @@ POMDPs.discount(m::QuadrupedMDP) = m.γ
 POMDPs.actions(m::QuadrupedMDP) = m.A
 POMDPs.isterminal(m::QuadrupedMDP, s) = is_terminated(m.env)
 
-function POMDPs.initialstate(m::QuadrupedMDP, rng::AbstractRNG)
-    reset!(m.env)
-    s = state(m.env)
-    return Vector{Float64}(s)
-end
+# function POMDPs.initialstate(m::QuadrupedMDP, rng::AbstractRNG)
+#     reset!(m.env)
+#     s = copy(state(m.env))
+#     # Ensure we return the full state vector
+#     if length(s) != 36
+#         println("WARNING: initialstate returned wrong dimension: $(length(s))")
+#         println("  state value: $s")
+#     end
+#     @assert length(s) == 36 "initialstate returned wrong dimension: $(length(s))"
+#     return Float32.(s)
+# end
 
-# Fallback for when no RNG is provided (needed by Crux)
-POMDPs.initialstate(m::QuadrupedMDP) = initialstate(m, Random.GLOBAL_RNG)
+POMDPs.initialstate(m::QuadrupedMDP, rng::AbstractRNG) = rand(rng, POMDPs.initialstate(m))
+
+function POMDPs.initialstate(m::QuadrupedMDP)
+    reset!(m.env)
+    s0 = Float32.(copy(state(m.env)))
+    @assert length(s0) == 36
+    return Deterministic(s0)
+end
 
 # Define state_space for Crux (needed for proper sampling)
 function Crux.state_space(m::QuadrupedMDP; μ=0f0, σ=1f0)
@@ -281,15 +301,34 @@ end
 function POMDPs.gen(m::QuadrupedMDP, s, a::Int, rng::AbstractRNG)
     # NOTE: The environment maintains its own state trajectory
     # The 's' parameter is used by Crux for tracking but we use m.env.state
-    
+
+    # Check if terminal from previous step - if so, reset
+    if is_terminated(m.env)
+        reset!(m.env)
+    end
+
     # Take action in the environment
     m.env(a)
-    
+
     # Get next state and reward
-    sp = Vector{Float64}(state(m.env))
-    r  = Float64(reward(m.env))
-    
-    return (sp=sp, r=r)
+    sp = copy(state(m.env))
+    if length(sp) != 36
+        println("ERROR in gen: state has wrong dimension: $(length(sp))")
+        if s isa AbstractVector
+            println("  s input length: $(length(s))")
+        else
+            println("  s input is not a vector: $(typeof(s))")
+        end
+        println("  sp value: $sp")
+        println("  m.env.state: $(m.env.state)")
+    end
+    @assert length(sp) == 36 "gen returned state with wrong dimension: $(length(sp))"
+
+    r = Float32(reward(m.env))
+    terminal = is_terminated(m.env)
+
+    # Return NamedTuple expected by POMDPs/Crux
+    return (sp=Float32.(sp), r=r, terminal=terminal)
 end
 
 # -----------------------------
@@ -329,7 +368,7 @@ solver = DQN(;
     max_steps = max_decisions_per_ep,
     buffer_size = 10_000,
     buffer_init = 500,
-    c_opt = (; optimizer = Optimisers.Adam(1f-3), batch_size = 32),
+    c_opt = (; optimizer = Flux.Adam(1f-3), batch_size = 32),
 )
 
 println("\nStarting Crux DQN training...")
