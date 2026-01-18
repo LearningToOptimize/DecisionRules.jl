@@ -255,28 +255,28 @@ function ensure_fx_and_AB!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64
     c.have_fx = true
 end
 
-function ensure_fx!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
-    c = O.caches[k]
-    if cache_matches_fx(c, x, u)
-        return
-    end
-    copyto!(c.x, x); copyto!(c.u, u)
-    dojo_step!(c.fx, O.mechs[k], c.x, c.u; opts=DOJO_OPTS)
-    c.have_fx = true
-    # fx does not imply AB is valid
-    return
-end
+# function ensure_fx!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
+#     c = O.caches[k]
+#     if cache_matches_fx(c, x, u)
+#         return
+#     end
+#     copyto!(c.x, x); copyto!(c.u, u)
+#     dojo_step!(c.fx, O.mechs[k], c.x, c.u; opts=DOJO_OPTS)
+#     c.have_fx = true
+#     # fx does not imply AB is valid
+#     return
+# end
 
-function ensure_AB!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
-    c = O.caches[k]
-    if cache_matches_AB(c, x, u)
-        return
-    end
-    copyto!(c.x, x); copyto!(c.u, u)
-    dojo_linearize!(c.A, c.B, O.mechs[k], c.x, c.u; opts=DOJO_OPTS)
-    c.have_AB = true
-    return
-end
+# function ensure_AB!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
+#     c = O.caches[k]
+#     if cache_matches_AB(c, x, u)
+#         return
+#     end
+#     copyto!(c.x, x); copyto!(c.u, u)
+#     dojo_linearize!(c.A, c.B, O.mechs[k], c.x, c.u; opts=DOJO_OPTS)
+#     c.have_AB = true
+#     return
+# end
 
 function eval_f!(O::QuadrupedDynamicsOracle, ret::AbstractVector, z::AbstractVector)
     n, m, N = O.n, O.m, O.N
@@ -287,6 +287,7 @@ function eval_f!(O::QuadrupedDynamicsOracle, ret::AbstractVector, z::AbstractVec
         for j in 1:m; u[j] = z[idx_u(n,N,m,k,j)]; end
 
         ensure_fx!(O, k, x, u)
+        # ensure_fx_and_AB!(O, k, x, u)
         row0 = (k-1)*n
         c = O.caches[k]
         for i in 1:n
@@ -305,6 +306,7 @@ function eval_jacobian!(O::QuadrupedDynamicsOracle, ret::AbstractVector, z::Abst
         for i in 1:n; x[i] = z[idx_x(n,k,i)]; end
         for j in 1:m; u[j] = z[idx_u(n,N,m,k,j)]; end
 
+        # ensure_AB!
         ensure_fx_and_AB!(O, k, x, u)
         c = O.caches[k]
 
@@ -380,7 +382,7 @@ model = Model(optimizer_with_attributes(Ipopt.Optimizer,
         "linear_solver" => "ma97",
         "hessian_approximation" => "limited-memory",
         # "max_iter" => 20,
-        "mu_target" => 1e-8,
+        # "mu_target" => 1e-8,
         "print_user_options" => "yes",
 ))
 
