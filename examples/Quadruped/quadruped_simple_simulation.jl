@@ -255,17 +255,17 @@ function ensure_fx_and_AB!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64
     c.have_fx = true
 end
 
-# function ensure_fx!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
-#     c = O.caches[k]
-#     if cache_matches_fx(c, x, u)
-#         return
-#     end
-#     copyto!(c.x, x); copyto!(c.u, u)
-#     dojo_step!(c.fx, O.mechs[k], c.x, c.u; opts=DOJO_OPTS)
-#     c.have_fx = true
-#     # fx does not imply AB is valid
-#     return
-# end
+function ensure_fx!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
+    c = O.caches[k]
+    if cache_matches_fx(c, x, u)
+        return
+    end
+    copyto!(c.x, x); copyto!(c.u, u)
+    dojo_step!(c.fx, O.mechs[k], c.x, c.u; opts=DOJO_OPTS)
+    c.have_fx = true
+    # fx does not imply AB is valid
+    return
+end
 
 # function ensure_AB!(O::QuadrupedDynamicsOracle, k::Int, x::Vector{Float64}, u::Vector{Float64})
 #     c = O.caches[k]

@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# quadruped_trajopt_single_shooting_corrected.jl
+# quadruped_trajopt_single_shooting.jl
 #
 # Single-shooting trajectory optimization:
 #   - Decision vars: U[:,1:N-1] only
@@ -61,24 +61,23 @@ mutable struct ShootingEvaluator
     n::Int
     m::Int
 
-    # tracking path/weights
     x_path::Vector{Float64}
     y_path::Vector{Float64}
     z_nom::Float64
     w_track::Vector{Float64}
 
-    # cache key (exact match)
     last_u::Vector{Float64}
     have_last::Bool
 
-    # rollout storage
     X::Matrix{Float64}          # n × N
     A::Array{Float64,3}         # n × n × (N-1)
     B::Array{Float64,3}         # n × m × (N-1)
 
-    # scratch buffers (IMPORTANT: real Vectors, not views)
+    # IMPORTANT: scratch as true Vector{Float64} (no SubArray)
     xk::Vector{Float64}
     uk::Vector{Float64}
+
+    # scratch for adjoint
     dldx::Vector{Float64}
     λnext::Vector{Float64}
 end
@@ -86,12 +85,10 @@ end
 function ShootingEvaluator(mech, x0::Vector{Float64}, m::Int; N::Int)
     n = length(x0)
 
-    # Reference path: straight-line in base x
     x_path = collect(range(x0[BASE_X_IDX], x0[BASE_X_IDX] + x_target, length=N))
     y_path = fill(x0[BASE_Y_IDX], N)
     z_nom  = x0[BASE_Z_IDX] * 0.8
 
-    # Gate tracking
     Kdrop, Kramp = 5, 10
     w_track = zeros(Float64, N)
     for k in 1:N
@@ -119,7 +116,6 @@ end
         all(@inbounds(E.last_u[i] == u[i]) for i in eachindex(u))
 end
 
-# Rollout from x0 and store X, A, B using get_minimal_gradients!
 function ensure_rollout!(E::ShootingEvaluator, u::Vector{Float64})
     if u_matches(E, u)
         return
@@ -130,19 +126,17 @@ function ensure_rollout!(E::ShootingEvaluator, u::Vector{Float64})
     n, m, N = E.n, E.m, E.N
     mech = E.mech
 
-    # X[:,1] = x0
     @inbounds for i in 1:n
         E.X[i,1] = E.x0[i]
     end
 
-    # Forward rollout
     @inbounds for k in 1:(N-1)
         off = (k-1) * m
         for j in 1:m
             E.uk[j] = u[off + j]
         end
 
-        # IMPORTANT: xk must be a real Vector{Float64} (not a view/SubArray)
+        # xk must be Vector{Float64}
         for i in 1:n
             E.xk[i] = E.X[i,k]
         end
@@ -150,7 +144,6 @@ function ensure_rollout!(E::ShootingEvaluator, u::Vector{Float64})
         Dojo.set_minimal_state!(mech, E.xk)
         Dojo.set_input!(mech, E.uk)
 
-        # Dojo returns Jacobians; also performs internal step needed for gradients
         A2, B2 = Dojo.get_minimal_gradients!(mech, E.xk, E.uk; opts=DOJO_OPTS)
 
         for i in 1:n, j in 1:n
@@ -167,12 +160,10 @@ function ensure_rollout!(E::ShootingEvaluator, u::Vector{Float64})
     end
 end
 
-# Objective value from rollout + u
 function cost_from_rollout(E::ShootingEvaluator, u::Vector{Float64})
     n, m, N = E.n, E.m, E.N
     J = 0.0
 
-    # stage costs
     @inbounds for k in 1:(N-1)
         wx = E.w_track[k]
         if wx != 0.0
@@ -191,7 +182,6 @@ function cost_from_rollout(E::ShootingEvaluator, u::Vector{Float64})
         J += w_u * s
     end
 
-    # du smoothness
     @inbounds for k in 2:(N-1)
         off  = (k-1)*m
         offp = (k-2)*m
@@ -203,7 +193,6 @@ function cost_from_rollout(E::ShootingEvaluator, u::Vector{Float64})
         J += w_du * s
     end
 
-    # terminal
     @inbounds begin
         wx = E.w_track[N]
         dx = E.X[BASE_X_IDX,N] - E.x_path[N]
@@ -215,7 +204,6 @@ function cost_from_rollout(E::ShootingEvaluator, u::Vector{Float64})
     return J
 end
 
-# Add ∂ℓ/∂x_k (only base xyz terms here) into dldx buffer
 function add_dldx!(E::ShootingEvaluator, k::Int; terminal::Bool)
     fill!(E.dldx, 0.0)
     wx = E.w_track[k]
@@ -238,27 +226,23 @@ function add_dldx!(E::ShootingEvaluator, k::Int; terminal::Bool)
     end
 end
 
-# Exact gradient via adjoint
-function grad_from_rollout!(E::ShootingEvaluator, g::Vector{Float64}, u::Vector{Float64})
+# NOTE: g can be an MOI _UnsafeVectorView, so accept AbstractVector
+function grad_from_rollout!(E::ShootingEvaluator, g::AbstractVector{Float64}, u::Vector{Float64})
     fill!(g, 0.0)
     n, m, N = E.n, E.m, E.N
 
-    # terminal costate λ_N = ∂ℓ_N/∂x_N
     add_dldx!(E, N; terminal=true)
     @inbounds for i in 1:n
         E.λnext[i] = E.dldx[i]
     end
 
-    # backward pass
     @inbounds for k in (N-1):-1:1
         off = (k-1)*m
 
-        # ∂/∂u_k of w_u ||u_k||^2
         for j in 1:m
             g[off + j] += 2.0 * w_u * u[off + j]
         end
 
-        # du terms: contribute to both neighbors
         if k >= 2
             offp = (k-2)*m
             for j in 1:m
@@ -272,7 +256,6 @@ function grad_from_rollout!(E::ShootingEvaluator, g::Vector{Float64}, u::Vector{
             end
         end
 
-        # + B_k' * λ_{k+1}
         for j in 1:m
             s = 0.0
             for i in 1:n
@@ -281,7 +264,6 @@ function grad_from_rollout!(E::ShootingEvaluator, g::Vector{Float64}, u::Vector{
             g[off + j] += s
         end
 
-        # λ_k = ∂ℓ_k/∂x_k + A_k' * λ_{k+1}
         add_dldx!(E, k; terminal=false)
         λk = similar(E.λnext)
         for i in 1:n
@@ -308,7 +290,8 @@ function traj_cost(args...)
     return cost_from_rollout(EVAL, u)
 end
 
-function traj_cost_grad(g_out::Vector{Float64}, args...)
+# IMPORTANT: accept AbstractVector for g_out (MOI passes a view)
+function traj_cost_grad(g_out::AbstractVector{Float64}, args...)
     u = collect(Float64, args)
     ensure_rollout!(EVAL, u)
     grad_from_rollout!(EVAL, g_out, u)
@@ -327,13 +310,11 @@ model = Model(optimizer_with_attributes(Ipopt.Optimizer,
 @variable(model, U[1:m, 1:(N-1)])
 @constraint(model, [i in 1:m, k in 1:(N-1)], -u_max_abs <= U[i,k] <= u_max_abs)
 
-# Register custom nonlinear objective: takes dU scalar inputs
 JuMP.register(model, :traj_cost, dU, traj_cost, traj_cost_grad)
 
 uvars = vec(U)
 @NLobjective(model, Min, traj_cost(uvars...))
 
-# start from zeros
 for k in 1:(N-1)
     set_start_value.(U[:,k], 0.0)
 end
@@ -350,6 +331,7 @@ Uopt = value.(U)
 # Playback
 # -----------------------------
 Dojo.set_minimal_state!(mech, x0)
+
 function controller_replay!(mechanism, k)
     if 1 <= k <= size(Uopt, 2)
         Dojo.set_input!(mechanism, Uopt[:, k])
