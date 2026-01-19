@@ -1,5 +1,8 @@
 # Quadruped DQN Reinforcement Learning (Crux.jl)
 # Adapted from Dojo.jl cartpole_dqn.jl style, but trained with Crux DQN via POMDPs.jl
+#
+# NOTE: Dojo.jl physics simulation runs on CPU only. 
+# GPU acceleration is used for neural network training (Q-network) only.
 
 # ### Setup
 using Crux
@@ -11,7 +14,17 @@ using StableRNGs: StableRNG
 using POMDPs
 using POMDPTools: Deterministic
 using CUDA
-device(x) = CUDA.functional() ? gpu(x) : cpu(x)
+
+# Check GPU availability and set device
+const USE_GPU = CUDA.functional()
+device(x) = USE_GPU ? gpu(x) : cpu(x)
+
+if USE_GPU
+    println("✓ GPU available - using CUDA for neural network training")
+    println("  Device: ", CUDA.name(CUDA.device()))
+else
+    println("✗ GPU not available - using CPU for neural network training")
+end
 
 # Load the shared environment definition
 include("quadruped_env.jl")
@@ -117,7 +130,7 @@ Q() = DiscreteNetwork(
         Dense(dim(S)..., 128, relu; init=glorot_uniform(rng)),
         Dense(128, 128, relu; init=glorot_uniform(rng)),
         Dense(128, length(as); init=glorot_uniform(rng)),
-    ),# |> cpu,
+    ) |> device,  # Move network to GPU if available
     as,
 )
 
@@ -137,7 +150,15 @@ solver = DQN(;
 )
 
 println("\nStarting Crux DQN training...")
+if USE_GPU
+    println("GPU memory before training: $(CUDA.memory_status())")
+end
+
 policy = solve(solver, mdp)
+
+if USE_GPU
+    println("\nGPU memory after training: $(CUDA.memory_status())")
+end
 println("Training complete.")
 
 # -----------------------------
