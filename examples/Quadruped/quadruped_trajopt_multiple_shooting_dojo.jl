@@ -36,7 +36,7 @@ const dt = 0.02
 
 # Total knots N = (N-1)+1, where N-1 is total steps.
 # Multiple shooting parameters:
-const L = 5             # steps per segment
+const L = 2             # steps per segment
 const M = 4             # number of segments
 const N = M*L + 1       # total knot points (for reference path / playback)
 

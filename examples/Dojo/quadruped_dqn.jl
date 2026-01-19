@@ -10,6 +10,8 @@ using Flux: glorot_uniform
 using StableRNGs: StableRNG
 using POMDPs
 using POMDPTools: Deterministic
+using CUDA
+device(x) = CUDA.functional() ? gpu(x) : cpu(x)
 
 # Load the shared environment definition
 include("quadruped_env.jl")
@@ -115,12 +117,12 @@ Q() = DiscreteNetwork(
         Dense(dim(S)..., 128, relu; init=glorot_uniform(rng)),
         Dense(128, 128, relu; init=glorot_uniform(rng)),
         Dense(128, length(as); init=glorot_uniform(rng)),
-    ) |> cpu,
+    ),# |> cpu,
     as,
 )
 
 # NOTE: N counts *decisions* (your env holds each decision for steps_per_action sim steps)
-N_train = 500 #50_000
+N_train = 50_000
 max_decisions_per_ep = cld(env.params.max_steps, 100)  # ~ 2000/100 = 20
 
 solver = DQN(;
@@ -130,7 +132,7 @@ solver = DQN(;
     ΔN = 4,
     max_steps = max_decisions_per_ep,
     buffer_size = 10_000,
-    buffer_init = 200, #500,
+    buffer_init = 500,
     c_opt = (; optimizer = Flux.Adam(1f-3), batch_size = 32),
 )
 
