@@ -1,277 +1,194 @@
 #!/usr/bin/env julia
-# ==============================================================================
-# Heuristic open-loop gait generator for Dojo quadruped
-#
-# - Input: a scripted sequence like [1,2,1,1,...]
-# - Output: `actions` (nu x N) containing all control inputs
-# - Then simulates and renders using Dojo's visualize()/render() pipeline
-#
-# Requires:
-#   ] add Dojo DojoEnvironments
-#
-# Notes:
-#   - This is a *simple* torque-impulse gait heuristic (open-loop CPG-ish).
-#   - It does NOT try to be dynamically consistent; it’s meant as a warm-start
-#     seed generator / data generator.
-# ==============================================================================
-
 using Dojo
 using DojoEnvironments
 using LinearAlgebra
-using Random
 
-# ----------------------------
-# Command encoding
-# ----------------------------
-const CMD_FWD        = 1
-const CMD_BWD        = 2
-const CMD_RIGHT      = 3
-const CMD_LEFT       = 4
-const CMD_TURN_RIGHT = 5
-const CMD_TURN_LEFT  = 6
-const CMD_STOP       = 7
+# ============================
+# User config
+# ============================
+# 1 = forward, 2 = backward, 3 = turn right, 4 = turn left, 5 = stop/stand
+sequence = [3,3,3,3,3,3] # fill(1, 20) #[1,1,1,1,3,1,1,4,1,1,5,1,1]
 
-"""
-Map an integer command to a (vx, vy, yawrate) "intent".
-Units are arbitrary (they just scale the gait).
-"""
-function cmd_to_intent(cmd::Int)
-    # Forward is +vx, right is +vy, turn right is -yawrate (RH yaw)
-    if cmd == CMD_FWD
-        return ( 1.0,  0.0,  0.0)
-    elseif cmd == CMD_BWD
-        return (-1.0,  0.0,  0.0)
-    elseif cmd == CMD_RIGHT
-        return ( 0.0,  1.0,  0.0)
-    elseif cmd == CMD_LEFT
-        return ( 0.0, -1.0,  0.0)
-    elseif cmd == CMD_TURN_RIGHT
-        return ( 0.3,  0.0, -1.0)
-    elseif cmd == CMD_TURN_LEFT
-        return ( 0.3,  0.0,  1.0)
-    elseif cmd == CMD_STOP
-        return ( 0.0,  0.0,  0.0)
-    else
-        # unknown -> stop
-        return (0.0, 0.0, 0.0)
-    end
-end
+cmd_duration = 0.6
+dt = 0.001
 
-# ----------------------------
-# Quadruped mechanism selection
-# ----------------------------
-"""
-Try a few common DojoEnvironments names for quadrupeds.
-You can hard-set `mech_name` below if you already know it.
-"""
-function get_quadruped_mechanism(; timestep::Float64)
-    candidates = (
-        :quadruped,
-        :anymal,
-        :go1,
-        :aliengo,
-        :spot,
-        :mini_cheetah,
-        :quadruped_min,
-    )
-    last_err = nothing
-    for sym in candidates
-        try
-            mech = get_mechanism(sym; timestep=timestep)
-            return mech, sym
-        catch err
-            last_err = err
-        end
-    end
-    error("Could not load a quadruped mechanism from DojoEnvironments. Last error:\n$last_err")
-end
+# Learned params from your Dojo demo run:
+# [freq, thigh_amp, thigh_offset, calf_amp, calf_offset]
+p_best = [0.26525665033578044,
+          0.04331492786316298,
+          0.8633149317316002,
+         -0.3418982967378247,
+         -1.3331979248705708]
 
-# ----------------------------
-# Heuristic gait (open-loop torque impulses)
-# ----------------------------
-"""
-Trot-like phase offsets for 4 legs:
-  - FR & RL in phase
-  - FL & RR in opposite phase
-Leg order assumed [FL, FR, RL, RR] for *our internal generator*.
+Kp = [100.0, 80.0, 60.0]
+Kd = [  5.0,  4.0,  3.0]
 
-We will map to joint inputs in blocks of 3 per leg if possible:
-  [hip_ab/ad, hip_pitch, knee] per leg  => 12 inputs total
-If the mechanism has a different input_dimension, we:
-  - fill the first min(nu,12) with our pattern
-  - leave the rest as 0.0
-"""
-function gait_u12(t::Float64, intent, params)
-    vx, vy, wz = intent
-    # Normalize intent a bit
-    vmag = clamp(sqrt(vx^2 + vy^2), 0.0, 1.5)
-    vx_n = clamp(vx, -1.5, 1.5)
-    vy_n = clamp(vy, -1.5, 1.5)
-    wz_n = clamp(wz, -2.0, 2.0)
+TURN_SCALE_INNER = 0.85
+TURN_SCALE_OUTER = 1.15
+HIP_STEER_BIAS   = 0.06
+SMOOTH_TAU       = 0.08
 
-    # Base oscillator
-    ω = 2π * params.gait_hz
-    ϕ = ω * t
+U_MAX = 250.0
+FAILSAFE_STAND = true
 
-    # Trot phasing (FL, FR, RL, RR)
-    #   FR & RL: phase 0
-    #   FL & RR: phase π
-    leg_phase = (π, 0.0, 0.0, π)
+# ============================
+# Environment
+# ============================
+N_per_cmd = Int(round(cmd_duration / dt))
+N_total = N_per_cmd * length(sequence)
 
-    # Amplitudes (impulse-torque-ish)
-    Ahip   = params.Ahip_base   + params.Ahip_vel * abs(vx_n) + params.Ahip_lat * abs(vy_n)
-    Aknee  = params.Aknee_base  + params.Aknee_vel * vmag
-    Aabd   = params.Aabd_base   + params.Aabd_lat * abs(vy_n) + params.Aabd_yaw * abs(wz_n)
-
-    # Bias terms to steer/turn (small offsets)
-    hip_bias_pitch = params.hip_bias_pitch * vx_n
-    hip_bias_abd   = params.hip_bias_abd   * vy_n
-    yaw_bias_abd   = params.yaw_bias_abd   * wz_n
-
-    # Build u (12)
-    u = zeros(12)
-
-    # Signs to make lateral & yaw do something different per leg
-    # (very heuristic): left legs vs right legs
-    # leg index: 1 FL, 2 FR, 3 RL, 4 RR
-    side_sign = ( +1.0, -1.0, +1.0, -1.0 )  # left:+, right:-
-    front_sign = ( +1.0, +1.0, -1.0, -1.0 ) # front:+, rear:-
-
-    for i in 1:4
-        ϕi = ϕ + leg_phase[i]
-
-        # A simple stance/swing waveform
-        s = sin(ϕi)
-        c = cos(ϕi)
-
-        # Hip pitch: drive swing forward/back; add bias for forward/back commands
-        τ_hip_pitch =  Ahip * s + hip_bias_pitch
-
-        # Knee: bend more during "swing" (use phase shift)
-        τ_knee = Aknee * sin(ϕi + π/2)
-
-        # Hip ab/ad: lateral + yaw coupling
-        #  - lateral: push legs outward/inward depending on side
-        #  - yaw: front vs rear get opposite sign to create turning moment
-        τ_abd = Aabd * c * side_sign[i] + hip_bias_abd * side_sign[i] + yaw_bias_abd * front_sign[i] * side_sign[i]
-
-        # Map into u: [abd, pitch, knee] for each leg block
-        base = 3*(i-1)
-        u[base + 1] = τ_abd
-        u[base + 2] = τ_hip_pitch
-        u[base + 3] = τ_knee
-    end
-
-    return u
-end
-
-# ----------------------------
-# Main script parameters
-# ----------------------------
-struct GaitParams
-    gait_hz::Float64
-
-    Ahip_base::Float64
-    Ahip_vel::Float64
-    Ahip_lat::Float64
-
-    Aknee_base::Float64
-    Aknee_vel::Float64
-
-    Aabd_base::Float64
-    Aabd_lat::Float64
-    Aabd_yaw::Float64
-
-    hip_bias_pitch::Float64
-    hip_bias_abd::Float64
-    yaw_bias_abd::Float64
-end
-
-# ----------------------------
-# User-config section
-# ----------------------------
-dt = 0.02                         # simulation timestep
-cmd_duration = 1.0                # seconds per discrete command
-sequence = [1, 1, 1, 5, 1, 3, 1]   # <--- EDIT ME (1=fwd, 2=bwd, 3=right, 4=left, 5=turnR, 6=turnL, 7=stop)
-
-# Gait tuning (start conservative; increase if it barely moves)
-params = GaitParams(
-    2.0,     # gait_hz
-    0.25,    # Ahip_base
-    0.35,    # Ahip_vel
-    0.20,    # Ahip_lat
-    0.35,    # Aknee_base
-    0.45,    # Aknee_vel
-    0.12,    # Aabd_base
-    0.18,    # Aabd_lat
-    0.10,    # Aabd_yaw
-    0.05,    # hip_bias_pitch
-    0.03,    # hip_bias_abd
-    0.03,    # yaw_bias_abd
+env = get_environment(
+    :quadruped_sampling;
+    horizon=N_total,
+    timestep=dt,
+    joint_limits=Dict(),
+    gravity=-9.81,
+    contact_body=false
 )
 
-# ----------------------------
-# Build mechanism + initialize
-# ----------------------------
-mechanism, mech_name = get_quadruped_mechanism(; timestep=dt)
+# ============================
+# Helpers
+# ============================
+legmovement(k, a, b, c, offset) = a * cos(k*b*0.01*2*pi + offset) + c
 
-# Try to initialize with a standard initializer if one exists for that mechanism name.
-# (Dojo's docs show initialize!(mechanism, :name; kwargs...) usage.)  [oai_citation:0‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/dev/creating_simulation/define_controller.html)
-try
-    initialize!(mechanism, mech_name)
-catch
-    # Fallback: at least zero things out
-    try
-        zero_coordinates!(mechanism)
-        zero_velocities!(mechanism)
-    catch
-        # If even that fails, we'll proceed (simulate! may still run).
+# If turning goes the wrong way, swap these sets.
+const LEFT_LEGS  = (2, 4)
+const RIGHT_LEGS = (1, 3)
+
+function cmd_to_gait(cmd::Int)
+    if cmd == 1
+        return (1.0, 1.0, 0.0, 0.0, 0.0, true)          # forward
+    elseif cmd == 2
+        return (1.0, 1.0, 0.0, 0.0, pi,  true)          # backward
+    elseif cmd == 3
+        return (TURN_SCALE_OUTER, TURN_SCALE_INNER, +HIP_STEER_BIAS, -HIP_STEER_BIAS, 0.0, true)
+    elseif cmd == 4
+        return (TURN_SCALE_INNER, TURN_SCALE_OUTER, -HIP_STEER_BIAS, +HIP_STEER_BIAS, 0.0, true)
+    else
+        return (1.0, 1.0, 0.0, 0.0, 0.0, false)         # stop
     end
 end
 
-# ----------------------------
-# Precompute full action trajectory
-# ----------------------------
-total_time = cmd_duration * length(sequence)
-N = Int(round(total_time / dt))
-nu = input_dimension(mechanism)   # number of inputs for the mechanism  [oai_citation:1‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/stable/api.html)
+function reset_state!(env, p)
+    _, _, Cth, _, Ccf = p
+    initialize!(env, :quadruped; body_position=[0.0;0.0;-0.43], hip_angle=0.0, thigh_angle=Cth, calf_angle=Ccf)
 
-actions = zeros(nu, N)            # <-- this is the variable you asked for
+    calf_state = get_body(env.mechanism, :FR_calf).state
+    position = get_sdf(get_contact(env.mechanism, :FR_calf_contact),
+                       Dojo.current_position(calf_state),
+                       Dojo.current_orientation(calf_state))
 
-for k in 1:N
-    t = (k-1) * dt
-    seg = clamp(Int(floor(t / cmd_duration)) + 1, 1, length(sequence))
-    intent = cmd_to_intent(sequence[seg])
-
-    u12 = gait_u12(t, intent, params)
-
-    # Fit to mechanism input dimension
-    m = min(nu, 12)
-    actions[1:m, k] .= u12[1:m]
-    # remaining entries already 0
+    initialize!(env, :quadruped; body_position=[0.0;0.0;-position-0.43], hip_angle=0.0, thigh_angle=Cth, calf_angle=Ccf)
 end
 
-# ----------------------------
-# Simulate using the precomputed actions
-# ----------------------------
-function controller!(mech, k)
-    # Dojo controllers receive (mechanism, k).  [oai_citation:2‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/dev/creating_simulation/define_controller.html)
-    # Clamp k in case simulate! calls beyond our precomputed length.
-    kk = clamp(k, 1, size(actions, 2))
-    set_input!(mech, actions[:, kk])  # set input for each joint in mechanism  [oai_citation:3‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/stable/api.html)
+function compute_u12(x, k, p, scaleL, scaleR, hipBL, hipBR, phaseS, osc_on, Kp, Kd)
+    freq, Ath, Cth, Acf, Ccf = p
+
+    a_th_L = Ath * scaleL
+    a_th_R = Ath * scaleR
+    a_cf_L = Acf * scaleL
+    a_cf_R = Acf * scaleR
+
+    thigh_A_L = legmovement(k, a_th_L, freq, Cth, 0.0 + phaseS)
+    thigh_B_L = legmovement(k, a_th_L, freq, Cth, pi  + phaseS)
+    thigh_A_R = legmovement(k, a_th_R, freq, Cth, 0.0 + phaseS)
+    thigh_B_R = legmovement(k, a_th_R, freq, Cth, pi  + phaseS)
+
+    calf_A_L  = legmovement(k, a_cf_L, freq, Ccf, -pi/2 + phaseS)
+    calf_B_L  = legmovement(k, a_cf_L, freq, Ccf,  pi/2 + phaseS)
+    calf_A_R  = legmovement(k, a_cf_R, freq, Ccf, -pi/2 + phaseS)
+    calf_B_R  = legmovement(k, a_cf_R, freq, Ccf,  pi/2 + phaseS)
+
+    u = zeros(12)
+
+    for i in 1:4
+        θ1  = x[12+(i-1)*6+1]; dθ1 = x[12+(i-1)*6+2]
+        θ2  = x[12+(i-1)*6+3]; dθ2 = x[12+(i-1)*6+4]
+        θ3  = x[12+(i-1)*6+5]; dθ3 = x[12+(i-1)*6+6]
+
+        is_left = (i in LEFT_LEGS)
+        hip_bias = is_left ? hipBL : hipBR
+
+        if !osc_on
+            θ2ref = Cth
+            θ3ref = Ccf
+        else
+            if i == 1 || i == 4
+                θ2ref = is_left ? thigh_A_L : thigh_A_R
+                θ3ref = is_left ? calf_A_L  : calf_A_R
+            else
+                θ2ref = is_left ? thigh_B_L : thigh_B_R
+                θ3ref = is_left ? calf_B_L  : calf_B_R
+            end
+        end
+
+        u[(i-1)*3 + 1] = Kp[1]*((hip_bias) - θ1) + Kd[1]*(0.0 - dθ1)
+        u[(i-1)*3 + 2] = Kp[2]*(θ2ref - θ2)      + Kd[2]*(0.0 - dθ2)
+        u[(i-1)*3 + 3] = Kp[3]*(θ3ref - θ3)      + Kd[3]*(0.0 - dθ3)
+    end
+
+    return clamp.(u, -U_MAX, U_MAX)
+end
+
+# ============================
+# Controller state (fixes scoping)
+# ============================
+mutable struct CtrlState
+    scaleL::Float64
+    scaleR::Float64
+    hipBL::Float64
+    hipBR::Float64
+    phaseS::Float64
+    osc_on::Bool
+end
+
+state = CtrlState(1.0, 1.0, 0.0, 0.0, 0.0, true)
+α = dt / (SMOOTH_TAU + dt)
+
+# Outputs you want
+actions12 = zeros(12, N_total)
+actions18 = zeros(18, N_total)
+
+# ============================
+# One-pass closed-loop sim + record
+# ============================
+reset_state!(env, p_best)
+
+function env_controller!(environment, k)
+    x = get_state(environment)
+
+    unstable = (x[3] < 0) || (!all(isfinite.(x))) || (abs(x[1]) > 1000)
+
+    cmd = sequence[clamp(Int(fld(k-1, N_per_cmd)) + 1, 1, length(sequence))]
+    t_scaleL, t_scaleR, t_hipBL, t_hipBR, t_phaseS, t_osc_on = cmd_to_gait(cmd)
+
+    # smooth transitions
+    state.scaleL = (1-α)*state.scaleL + α*t_scaleL
+    state.scaleR = (1-α)*state.scaleR + α*t_scaleR
+    state.hipBL  = (1-α)*state.hipBL  + α*t_hipBL
+    state.hipBR  = (1-α)*state.hipBR  + α*t_hipBR
+    state.phaseS = (1-α)*state.phaseS + α*t_phaseS
+    state.osc_on = t_osc_on
+
+    if unstable && FAILSAFE_STAND
+        u12 = compute_u12(x, k, p_best, 1.0, 1.0, 0.0, 0.0, 0.0, false, Kp, Kd)
+    else
+        u12 = compute_u12(x, k, p_best, state.scaleL, state.scaleR, state.hipBL, state.hipBR, state.phaseS, state.osc_on, Kp, Kd)
+    end
+
+    if 1 <= k <= N_total
+        actions12[:, k] .= u12
+        actions18[7:18, k] .= u12
+    end
+
+    set_input!(environment, u12)
     return nothing
 end
 
-storage = simulate!(mechanism, total_time, controller!; record=true)  #  [oai_citation:4‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/dev/creating_simulation/define_controller.html)
+simulate!(env, env_controller!; record=true)
+vis = visualize(env)
+render(vis)
 
-# ----------------------------
-# Visualize / render
-# ----------------------------
-vis = visualize(mechanism, storage)  #  [oai_citation:5‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/dev/creating_simulation/define_controller.html)
-render(vis)                          #  [oai_citation:6‡dojo-sim.github.io](https://dojo-sim.github.io/Dojo.jl/dev/creating_simulation/define_controller.html)
-
-# At this point:
-#   - `actions` is populated (nu x N)
-#   - `storage` contains the trajectory
-#   - a viewer should open / render depending on your Dojo backend
-println("Done. actions size = ", size(actions), ", mech_name = ", mech_name, ", nu = ", nu)
+println("Done.")
+println("actions12 size = ", size(actions12))
+println("actions18 size = ", size(actions18))
