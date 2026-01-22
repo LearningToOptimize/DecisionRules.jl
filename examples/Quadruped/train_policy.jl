@@ -261,7 +261,8 @@ function train!(
     val_loader::DataLoader,
     config::TrainConfig;
     device=cpu,
-    lg=nothing  # WandbLogger
+    lg=nothing,  # WandbLogger
+    checkpoint_dir::String=config.checkpoint_dir  # Run-specific checkpoint directory
 )
     # Move model to device
     model = model |> device
@@ -273,8 +274,8 @@ function train!(
     # Loss function
     loss_fn(x, y) = Flux.mse(model(x), y)
     
-    # Create checkpoint directory
-    mkpath(config.checkpoint_dir)
+    # Ensure checkpoint directory exists
+    mkpath(checkpoint_dir)
     
     # Training history
     history = Dict(
@@ -363,7 +364,7 @@ function train!(
             best_val_loss = val_loss
             model_cpu = model |> cpu
             model_state = Flux.state(model_cpu)
-            jldsave(joinpath(config.checkpoint_dir, "best_model.jld2"); model_state=model_state)
+            jldsave(joinpath(checkpoint_dir, "best_model.jld2"); model_state=model_state)
             println("  ✓ New best model saved (val_loss=$( round(val_loss, digits=6)))")
         end
         
@@ -371,32 +372,21 @@ function train!(
         if epoch % config.checkpoint_every == 0
             model_cpu = model |> cpu
             model_state = Flux.state(model_cpu)
-            jldsave(joinpath(config.checkpoint_dir, "model_epoch_$(epoch).jld2"); model_state=model_state)
-            jldsave(joinpath(config.checkpoint_dir, "history.jld2"); history=history)
+            jldsave(joinpath(checkpoint_dir, "model_epoch_$(epoch).jld2"); model_state=model_state)
+            jldsave(joinpath(checkpoint_dir, "history.jld2"); history=history)
         end
     end
     
     # Final save
     model_cpu = model |> cpu
     model_state = Flux.state(model_cpu)
-    jldsave(joinpath(config.checkpoint_dir, "final_model.jld2"); model_state=model_state)
-    jldsave(joinpath(config.checkpoint_dir, "history.jld2"); history=history)
-    
-    # Save config and architecture info (needed to reconstruct model)
-    arch_info = Dict(
-        "state_dim" => config.state_dim,
-        "path_dim" => 3 * div(config.path_horizon, config.path_subsample),
-        "action_dim" => config.action_dim,
-        "hidden_dims" => config.hidden_dims,
-        "path_horizon" => config.path_horizon,
-        "path_subsample" => config.path_subsample
-    )
-    jldsave(joinpath(config.checkpoint_dir, "config.jld2"); config=config, arch_info=arch_info)
+    jldsave(joinpath(checkpoint_dir, "final_model.jld2"); model_state=model_state)
+    jldsave(joinpath(checkpoint_dir, "history.jld2"); history=history)
     
     println("\n" * "="^60)
     println("Training complete!")
     println("Best validation loss: $(round(best_val_loss, digits=6))")
-    println("Models saved to: $(config.checkpoint_dir)")
+    println("Models saved to: $(checkpoint_dir)")
     println("="^60 * "\n")
     
     # Log final metrics to Wandb
@@ -488,19 +478,34 @@ function main()
     Y_train = Float32.((Y_train .- Y_mean) ./ Y_std)
     Y_val = Float32.((Y_val .- Y_mean) ./ Y_std)
     
+    # Create run-specific checkpoint directory
+    run_name = "quadruped_policy_$(Dates.format(now(), "yyyy-mm-dd_HH-MM-SS"))"
+    run_checkpoint_dir = joinpath(config.checkpoint_dir, run_name)
+    mkpath(run_checkpoint_dir)
+    println("Checkpoints will be saved to: $run_checkpoint_dir")
+    
     # Save normalization stats (needed for inference)
-    mkpath(config.checkpoint_dir)
-    jldsave(joinpath(config.checkpoint_dir, "normalization.jld2"); X_mean=X_mean, X_std=X_std, Y_mean=Y_mean, Y_std=Y_std)
+    jldsave(joinpath(run_checkpoint_dir, "normalization.jld2"); X_mean=X_mean, X_std=X_std, Y_mean=Y_mean, Y_std=Y_std)
+    
+    # Save config and architecture info early (so it's available even if training crashes)
+    state_dim = config.state_dim
+    path_dim = 3 * div(config.path_horizon, config.path_subsample)
+    action_dim = config.action_dim
+    arch_info = Dict(
+        "state_dim" => state_dim,
+        "path_dim" => path_dim,
+        "action_dim" => action_dim,
+        "hidden_dims" => config.hidden_dims,
+        "path_horizon" => config.path_horizon,
+        "path_subsample" => config.path_subsample
+    )
+    jldsave(joinpath(run_checkpoint_dir, "config.jld2"); config=config, arch_info=arch_info)
     
     # Create data loaders
     train_loader = DataLoader((X_train, Y_train); batchsize=config.batch_size, shuffle=true)
     val_loader = DataLoader((X_val, Y_val); batchsize=config.batch_size, shuffle=false)
     
     # Create model
-    state_dim = config.state_dim
-    path_dim = 3 * div(config.path_horizon, config.path_subsample)
-    action_dim = config.action_dim
-    
     println("\nCreating model...")
     println("  Input dim: $(state_dim + path_dim) (state: $state_dim, path: $path_dim)")
     println("  Output dim: $action_dim")
@@ -510,8 +515,7 @@ function main()
     n_params = sum(length(p) for p in Flux.trainables(model))
     println("  Total parameters: $n_params")
     
-    # Initialize Wandb logger
-    run_name = "quadruped_policy_$(Dates.format(now(), "yyyy-mm-dd_HH-MM-SS"))"
+    # Initialize Wandb logger (using same run_name as checkpoint directory)
     lg = WandbLogger(
         project = "QuadrupedPolicy",
         name = run_name,
@@ -531,12 +535,13 @@ function main()
             "gradient_clip" => config.gradient_clip,
             "n_params" => n_params,
             "train_samples" => size(X_train, 2),
-            "val_samples" => size(X_val, 2)
+            "val_samples" => size(X_val, 2),
+            "checkpoint_dir" => run_checkpoint_dir
         )
     )
     
-    # Train
-    trained_model, history = train!(model, train_loader, val_loader, config; device=device, lg=lg)
+    # Train (pass run_checkpoint_dir instead of config.checkpoint_dir)
+    trained_model, history = train!(model, train_loader, val_loader, config; device=device, lg=lg, checkpoint_dir=run_checkpoint_dir)
     
     # Close Wandb logger
     close(lg)
