@@ -44,7 +44,7 @@ julia --project -i visualize_trajectory.jl ./data_test/trajectory_00001.h5
 ```
 
 ### 3. `run_job.sbatch`
-SLURM batch script for generating datasets on the cluster.
+SLURM batch script for generating datasets on the cluster (sequential).
 
 **Usage:**
 ```bash
@@ -59,6 +59,44 @@ sbatch run_job.sbatch 500 ./my_data 789
 - `$1` (default: 100): Number of trajectories
 - `$2` (default: ./data): Output directory
 - `$3` (default: 42): Random seed
+
+### 4. `run_array_job.sbatch`
+SLURM **array job** for parallel dataset generation across multiple nodes.
+
+**Usage:**
+```bash
+# Generate 1000 trajectories using 10 parallel tasks (default)
+sbatch run_array_job.sbatch 1000 ./data_parallel 42
+
+# Generate 5000 trajectories using 50 parallel tasks
+sbatch --array=1-50 run_array_job.sbatch 5000 ./data_large 42
+
+# Test with 3 tasks generating 30 trajectories
+sbatch --array=1-3 run_array_job.sbatch 30 ./data_test 42
+```
+
+**Parameters:**
+- `$1` (default: 100): Total number of trajectories
+- `$2` (default: ./data_parallel): Output directory
+- `$3` (default: 42): Base random seed (each task gets seed + task_id*1000)
+- `--array=1-N`: Number of parallel tasks (default: 10)
+
+**After completion, merge the results:**
+```bash
+julia --project merge_dataset.jl ./data_parallel
+```
+
+### 5. `merge_dataset.jl`
+Merges trajectory files from parallel generation into a clean sequential dataset.
+
+**Usage:**
+```bash
+# Merge in place (renumber files)
+julia --project merge_dataset.jl ./data_parallel
+
+# Merge to a new directory
+julia --project merge_dataset.jl ./data_parallel ./data_final
+```
 
 ## Output Format
 
@@ -99,9 +137,30 @@ The `check_stability()` function evaluates trajectories based on:
 
 **Only stable trajectories are saved to disk.** Unstable trajectories are rejected during generation, resulting in a cleaner dataset and faster training.
 
+## Checkpointing & Resume
+
+Both sequential and parallel scripts support **automatic resume** if a job fails midway:
+
+- **Sequential (`generate_dataset.jl`)**: Counts existing `trajectory_*.h5` files in the output directory and resumes from where it left off.
+
+- **Parallel (`generate_dataset_worker.jl`)**: Each task counts its own `trajectory_taskXXX_*.h5` files and resumes independently.
+
+**To resume a failed job:**
+```bash
+# Sequential - just resubmit with the same parameters
+sbatch run_job.sbatch 1000 ./data_train 42
+
+# Parallel - resubmit with the same array range
+sbatch --array=1-20 run_array_job.sbatch 2000 ./data_large 42
+```
+
+The scripts will automatically detect existing files and continue from where they stopped. No data is lost or duplicated.
+
+**Important note on reproducibility:** When resuming, the RNG state cannot be perfectly restored because we don't track how many rejected trajectories occurred before the failure. This means resumed runs may generate **different command sequences** than if the job had run to completion. However, this is fine for training data since we only need diverse stable trajectories—the exact reproducibility of which specific trajectories are generated is not critical.
+
 ## Quick Start
 
-1. **Test with a few trajectories:**
+1. **Test with a few trajectories (sequential):**
    ```bash
    julia --project generate_dataset.jl 5 ./data_test
    ```
@@ -111,12 +170,21 @@ The `check_stability()` function evaluates trajectories based on:
    julia --project visualize_trajectory.jl ./data_test/trajectory_00001.h5
    ```
 
-3. **Generate full dataset on cluster:**
+3. **Generate full dataset on cluster (sequential):**
    ```bash
    sbatch run_job.sbatch 1000 ./data_train
    ```
 
-4. **Check results:**
+4. **Generate large dataset in parallel:**
+   ```bash
+   # Submit array job with 20 parallel tasks
+   sbatch --array=1-20 run_array_job.sbatch 2000 ./data_large 42
+   
+   # After all tasks complete, merge the results
+   julia --project merge_dataset.jl ./data_large
+   ```
+
+5. **Check results:**
    ```julia
    using HDF5
    attrs = h5readattr("./data_train/summary.h5", "/")
