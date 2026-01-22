@@ -6,11 +6,13 @@
 # ============================================================================
 
 # instantiate environment
+println("Activating project environment...")
 using Pkg
 Pkg.activate(@__DIR__)
-Pkg.instantiate()
+# Pkg.instantiate()
 
 ### Load packages
+println("Loading packages...")
 
 using Dojo
 using DojoEnvironments
@@ -20,6 +22,7 @@ using HDF5
 using Statistics
 
 # Include shared controller
+println("Including shared controller...")
 include("quadruped_controller.jl")
 
 # ============================

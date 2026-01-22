@@ -220,3 +220,109 @@ After generating a sufficient dataset:
 2. Train a neural network policy to predict actions from states
 3. Evaluate the learned policy in simulation
 4. Fine-tune with online learning if needed
+
+---
+
+## Training a Path-Following Policy
+
+### 6. `train_policy.jl`
+Trains a neural network policy using Flux.jl on GPU to follow arbitrary paths.
+
+**Architecture:**
+- Input: Current state (36D) + Future path waypoints (relative x,y,z positions)
+- Hidden: MLP with LayerNorm [256, 256, 128]
+- Output: Joint torques (12D)
+
+**Usage:**
+```bash
+julia --project train_policy.jl <data_dir> [options]
+```
+
+**Options:**
+- `--epochs N`: Number of training epochs (default: 100)
+- `--batch_size N`: Batch size (default: 256)
+- `--lr RATE`: Learning rate (default: 1e-3)
+- `--hidden DIMS`: Hidden layer dimensions, comma-separated (default: 256,256,128)
+- `--path_horizon N`: Future path horizon in timesteps (default: 50)
+- `--checkpoint_dir D`: Directory for model checkpoints (default: ./checkpoints)
+- `--no_gpu`: Disable GPU training
+
+**Examples:**
+```bash
+# Basic training
+julia --project train_policy.jl ./data_large
+
+# Custom training
+julia --project train_policy.jl ./data_large --epochs 200 --batch_size 512 --lr 5e-4
+```
+
+### 7. `run_train_policy.sbatch`
+SLURM script for GPU training on the cluster.
+
+**Usage:**
+```bash
+# Basic submission
+sbatch run_train_policy.sbatch ./data_large
+
+# With custom options
+sbatch run_train_policy.sbatch ./data_large --epochs 200 --batch_size 512
+```
+
+**Note:** Update `--account` and `--partition` in the script for your cluster.
+
+### 8. `eval_policy.jl`
+Evaluates a trained policy in closed-loop simulation.
+
+**Usage:**
+```bash
+julia --project -i eval_policy.jl ./checkpoints/best_model.jld2
+```
+
+**Path types for evaluation:**
+- `:circle` - Circular path (default)
+- `:figure8` - Figure-8 pattern
+- `:straight` - Straight line forward
+- `:zigzag` - Zigzag pattern
+
+## Complete Training Pipeline
+
+```bash
+# 1. Generate dataset (parallel on cluster)
+sbatch --array=1-20 run_array_job.sbatch 5000 ./data_large 42
+
+# 2. Wait for completion, then merge
+julia --project merge_dataset.jl ./data_large
+
+# 3. Train policy on GPU
+sbatch run_train_policy.sbatch ./data_large --epochs 100
+
+# 4. Evaluate trained policy
+julia --project -i eval_policy.jl ./checkpoints/best_model.jld2
+```
+
+## Policy Architecture Details
+
+The path-following policy learns:
+
+```
+Input = [state (36D), relative_future_path (15D)]
+        ↓
+      Dense(51 → 256, ReLU)
+      LayerNorm(256)
+        ↓
+      Dense(256 → 256, ReLU)
+      LayerNorm(256)
+        ↓
+      Dense(256 → 128, ReLU)
+      LayerNorm(128)
+        ↓
+      Dense(128 → 12)
+        ↓
+Output = joint_torques (12D)
+```
+
+**Key features:**
+- **Relative path encoding**: Future waypoints are encoded relative to current position
+- **Path subsampling**: Looking ahead 50 timesteps, sampled every 10 steps = 5 waypoints
+- **LayerNorm**: Better training stability than BatchNorm for RL-style tasks
+- **Normalized I/O**: Input/output normalization for stable gradients
