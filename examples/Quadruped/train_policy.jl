@@ -21,6 +21,7 @@ using LinearAlgebra
 using Dates
 using JLD2: jldsave, load
 using ProgressMeter
+using Wandb, Dates, Logging
 
 # check cuda availability
 if CUDA.has_cuda()
@@ -259,7 +260,8 @@ function train!(
     train_loader::DataLoader,
     val_loader::DataLoader,
     config::TrainConfig;
-    device=cpu
+    device=cpu,
+    lg=nothing  # WandbLogger
 )
     # Move model to device
     model = model |> device
@@ -318,6 +320,11 @@ function train!(
             
             if batch_idx % config.log_every == 0
                 println("  Epoch $epoch, Batch $batch_idx/$(length(train_loader)), Loss: $(round(loss, digits=6))")
+                if !isnothing(lg)
+                    Wandb.log(lg, Dict(
+                        "train/batch_loss" => loss,
+                    ))
+                end
             end
         end
         
@@ -340,6 +347,16 @@ function train!(
         push!(history["epoch_time"], epoch_time)
         
         println("Epoch $epoch/$( config.epochs): train_loss=$(round(train_loss, digits=6)), val_loss=$(round(val_loss, digits=6)), time=$(round(epoch_time, digits=1))s")
+        
+        # Log to Wandb
+        if !isnothing(lg)
+            Wandb.log(lg, Dict(
+                "train/loss" => train_loss,
+                "val/loss" => val_loss,
+                "train/epoch_time" => epoch_time,
+                "epoch" => epoch
+            ))
+        end
         
         # Save best model
         if val_loss < best_val_loss
@@ -381,6 +398,11 @@ function train!(
     println("Best validation loss: $(round(best_val_loss, digits=6))")
     println("Models saved to: $(config.checkpoint_dir)")
     println("="^60 * "\n")
+    
+    # Log final metrics to Wandb
+    if !isnothing(lg)
+        Wandb.log(lg, Dict("best_val_loss" => best_val_loss))
+    end
     
     return model |> cpu, history
 end
@@ -488,8 +510,36 @@ function main()
     n_params = sum(length(p) for p in Flux.trainables(model))
     println("  Total parameters: $n_params")
     
+    # Initialize Wandb logger
+    run_name = "quadruped_policy_$(Dates.format(now(), "yyyy-mm-dd_HH-MM-SS"))"
+    lg = WandbLogger(
+        project = "QuadrupedPolicy",
+        name = run_name,
+        config = Dict(
+            "state_dim" => config.state_dim,
+            "action_dim" => config.action_dim,
+            "path_dim" => path_dim,
+            "hidden_dims" => config.hidden_dims,
+            "path_horizon" => config.path_horizon,
+            "path_subsample" => config.path_subsample,
+            "epochs" => config.epochs,
+            "batch_size" => config.batch_size,
+            "learning_rate" => config.learning_rate,
+            "weight_decay" => config.weight_decay,
+            "lr_decay_epoch" => config.lr_decay_epoch,
+            "lr_decay_factor" => config.lr_decay_factor,
+            "gradient_clip" => config.gradient_clip,
+            "n_params" => n_params,
+            "train_samples" => size(X_train, 2),
+            "val_samples" => size(X_val, 2)
+        )
+    )
+    
     # Train
-    trained_model, history = train!(model, train_loader, val_loader, config; device=device)
+    trained_model, history = train!(model, train_loader, val_loader, config; device=device, lg=lg)
+    
+    # Close Wandb logger
+    close(lg)
     
     println("\nDone!")
 end

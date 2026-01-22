@@ -48,3 +48,4 @@ Manifest.toml
 *.out.*
 examples/**/.CondaPkg/*
 *.bson
+*.err
