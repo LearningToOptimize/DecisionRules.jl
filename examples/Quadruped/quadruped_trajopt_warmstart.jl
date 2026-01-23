@@ -814,6 +814,24 @@ oracle_set = MOI.VectorNonlinearOracle(;
 # ==========================================================================================
 println("\nSolving with staged trust-region...")
 
+# Helpers to avoid querying values when Ipopt didn't return a solution
+function safe_has_values(model::Model)
+    return JuMP.has_values(model) && JuMP.result_count(model) > 0
+end
+
+function refresh_warmstart!(model::Model, X, U)
+    if !safe_has_values(model)
+        return false
+    end
+    for k in 1:size(X, 2)
+        set_start_value.(X[:, k], value.(X[:, k]))
+    end
+    for k in 1:size(U, 2)
+        set_start_value.(U[:, k], value.(U[:, k]))
+    end
+    return true
+end
+
 # Stage 1: strong tracking and reference controls
 fix(lambda_track, lambda_track_init; force=true)
 fix(lambda_u_ref, lambda_u_ref_init; force=true)
@@ -821,13 +839,8 @@ optimize!(model)
 
 println("Stage 1 done. Status=$(termination_status(model)), Obj=$(try objective_value(model) catch; NaN end)")
 
-# Prepare warmstart for next stage
-for k in 1:N
-    set_start_value.(X[:, k], value.(X[:, k]))
-end
-for k in 1:(N-1)
-    set_start_value.(U[:, k], value.(U[:, k]))
-end
+# Prepare warmstart for next stage if we got a solution
+stage1_has_values = refresh_warmstart!(model, X, U)
 
 # Optionally relax trust-region bounds for stage 2
 if trust_pos_eps > 0.0
@@ -864,18 +877,16 @@ if trust_vel_eps > 0.0
 end
 
 # Stage 2+: relax multipliers to 1.0 and resolve
-for s in 2:stages
-    fix(lambda_track, 1.0; force=true)
-    fix(lambda_u_ref, 1.0; force=true)
-    optimize!(model)
-    println("Stage $(s) done. Status=$(termination_status(model)), Obj=$(try objective_value(model) catch; NaN end)")
-    # Refresh warmstart for potential next stage
-    for k in 1:N
-        set_start_value.(X[:, k], value.(X[:, k]))
+if stage1_has_values
+    for s in 2:stages
+        fix(lambda_track, 1.0; force=true)
+        fix(lambda_u_ref, 1.0; force=true)
+        optimize!(model)
+        println("Stage $(s) done. Status=$(termination_status(model)), Obj=$(try objective_value(model) catch; NaN end)")
+        refresh_warmstart!(model, X, U)
     end
-    for k in 1:(N-1)
-        set_start_value.(U[:, k], value.(U[:, k]))
-    end
+else
+    println("Skipping later stages: no solution values from stage 1.")
 end
 
 println("\n" * "="^60)
