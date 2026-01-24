@@ -253,8 +253,8 @@ end
 
 function pdual(v::VariableRef)
     if is_parameter(v)
-        # using Dual of parameter if available
-        MOI.get(JuMP.owner_model(v), POI.ParameterDual(), v)
+        # Use our custom parameter dual computation that works with any JuMP model
+        return compute_parameter_dual(JuMP.owner_model(v), v)
     else
         error("Variable is not a parameter")
     end

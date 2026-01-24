@@ -2,6 +2,7 @@ using DecisionRules
 using Test
 using SCS
 using JuMP
+import MathOptInterface as MOI
 using Zygote
 using Flux
 using Random
@@ -162,5 +163,74 @@ end
         )
 
         @test obj_val_after < obj_val_before
+    end
+
+    @testset "compute_parameter_dual" begin
+        # Test 1: Simple LP with parameter in constraint
+        # min x  s.t. x >= p
+        # At optimality x* = p, dual of constraint is 1
+        # ∂obj/∂p = -1 * 1 = -1 (since p appears with coef 1 in RHS equivalent: x - p >= 0)
+        # But in our formulation: x >= p => x - p >= 0, so coef of p is -1
+        # dual contribution = -(-1) * 1 = 1
+        model1 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model1, x1 >= 0)
+        @variable(model1, p1 in MOI.Parameter(2.0))
+        @constraint(model1, con1, x1 - p1 >= 0)
+        @objective(model1, Min, x1)
+        optimize!(model1)
+        @test compute_parameter_dual(model1, p1) ≈ 1.0 rtol=1.0e-2
+
+        # Test 2: Parameter in objective
+        # min x + 2*p  s.t. x >= 1
+        # ∂obj/∂p = 2 (from objective directly, minimization)
+        model2 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model2, x2 >= 0)
+        @variable(model2, p2 in MOI.Parameter(3.0))
+        @constraint(model2, x2 >= 1)
+        @objective(model2, Min, x2 + 2 * p2)
+        optimize!(model2)
+        @test compute_parameter_dual(model2, p2) ≈ 2.0 rtol=1.0e-2
+
+        # Test 3: Parameter in both constraint and objective
+        # min x + p  s.t. x >= 2*p
+        # At optimality x* = 2p, constraint dual = 1
+        # ∂obj/∂p = 1 (from obj) + (-(-2) * 1) = 1 + 2 = 3
+        model3 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model3, x3 >= 0)
+        @variable(model3, p3 in MOI.Parameter(1.0))
+        @constraint(model3, con3, x3 - 2 * p3 >= 0)
+        @objective(model3, Min, x3 + p3)
+        optimize!(model3)
+        @test compute_parameter_dual(model3, p3) ≈ 3.0 rtol=1.0e-2
+
+        # Test 4: Maximization problem
+        # max -x + p  s.t. x >= 1
+        # Equivalent to min x - p, so ∂obj/∂p = -(-1) = 1 for max
+        model4 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model4, x4 >= 0)
+        @variable(model4, p4 in MOI.Parameter(1.0))
+        @constraint(model4, x4 >= 1)
+        @objective(model4, Max, -x4 + p4)
+        optimize!(model4)
+        @test compute_parameter_dual(model4, p4) ≈ -1.0 rtol=1.0e-2
+
+        # Test 5: SOC constraint with parameter (similar to existing pdual tests)
+        model5 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model5, x5 >= 0.0)
+        @variable(model5, 0.0 <= y5 <= 8.0)
+        @variable(model5, 0.0 <= state_out_var5 <= 8.0)
+        @variable(model5, _deficit5)
+        @variable(model5, norm_deficit5)
+        @variable(model5, state_in5 in MOI.Parameter(5.0))
+        @variable(model5, state_out5 in MOI.Parameter(4.0))
+        @variable(model5, uncertainty5 in MOI.Parameter(2.0))
+        @constraint(model5, state_out_var5 == state_in5 + uncertainty5 - x5)
+        @constraint(model5, x5 + y5 >= 10)
+        @constraint(model5, _deficit5 == state_out_var5 - state_out5)
+        @constraint(model5, [norm_deficit5; _deficit5] in SecondOrderCone())
+        @objective(model5, Min, 30 * y5 + norm_deficit5 * 10^4)
+        optimize!(model5)
+        @test compute_parameter_dual(model5, state_in5) ≈ -30.0 rtol=1.0e-1
+        @test compute_parameter_dual(model5, state_out5) ≈ 30.0 rtol=1.0e-1
     end
 end
