@@ -182,9 +182,12 @@ function build_atlas_subproblems(;
         
         # Objective: minimize state deviation from reference + deviation from target
         @constraint(model, [norm_deficit; target_x .- x] in MOI.NormOneCone(nx + 1))
+
+        @variable(model, obj_cost >= 0)
+        @constraint(model, obj_cost >= sum((x[i] - x_ref[i])^2 for i in 1:nx))
         
         @objective(model, Min, 
-            sum((x[i] - x_ref[i])^2 for i in 1:nx) + 
+            obj_cost + 
             penalty * norm_deficit
         )
         
@@ -284,9 +287,11 @@ function build_atlas_deterministic_equivalent(;
     end
     
     # Objective
+    @variable(det_equivalent, cost >= 0)
     @constraint(det_equivalent, [norm_deficit; vec([target[t,i] - X[t+1,i] for t in 1:N-1, i in 1:nx])] in MOI.NormOneCone(1 + (N-1)*nx))
+    @constraint(det_equivalent, cost >= sum((X[t,i] - x_ref[i])^2 for t in 2:N, i in 1:nx))
     @objective(det_equivalent, Min, 
-        sum((X[t,i] - x_ref[i])^2 for t in 2:N, i in 1:nx) +
+        cost +
         penalty * norm_deficit
     )
     

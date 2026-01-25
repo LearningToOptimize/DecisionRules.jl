@@ -39,7 +39,7 @@ num_batches=1000
 _num_train_per_batch=1
 # dense = Flux.LSTM # RNN, Dense, LSTM
 activation = sigmoid # tanh, DecisionRules.identity, relu
-layers = Int64[64, 64] # Int64[8, 8], Int64[]
+layers = Int64[128, 128] # Int64[8, 8], Int64[]
 ensure_feasibility = non_ensurance # ensure_feasibility_double_softplus
 optimizers= [Flux.Adam()] # Flux.Adam(0.01), Flux.Descent(0.1), Flux.RMSProp(0.00001, 0.001)
 pre_trained_model = nothing #joinpath(HydroPowerModels_dir, case_name, formulation, "models", "case3-ACPPowerModel-h48-2024-05-18T10:16:25.117.jld2")
@@ -82,12 +82,10 @@ function record_loss(iter, model, loss, tag)
 end
 
 # Define Model
-models = Chain(Dense(num_hydro+num_hydro, layers[1], sigmoid), 
-    x -> reshape(x, :, 1), 
-    Flux.LSTM(layers[1] => layers[2]),
-    x -> x[:, end],
-    Dense(layers[2], num_hydro)
-)
+# Policy architecture: LSTM processes uncertainty, Dense combines with previous state
+num_uncertainties = length(uncertainty_samples[1])
+models = state_conditioned_policy(num_uncertainties, num_hydro, num_hydro, layers; 
+                                   activation=activation, encoder_type=Flux.LSTM)
 
 # Load pretrained Model
 if !isnothing(pre_trained_model)

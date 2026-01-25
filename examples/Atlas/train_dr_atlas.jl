@@ -92,20 +92,15 @@ end
 # Define Neural Network Policy
 # ============================================================================
 
-# Policy input: uncertainty (n_perturb) + state (nx) -> target state (nx)
-# The apply_rule function concatenates [uncertainty..., state_in...]
-input_dim = n_perturb + nx
+# Policy architecture: LSTM processes perturbations, Dense combines with previous state
+# This design is memory-efficient and allows the LSTM to focus on temporal patterns
+n_uncertainties = length(uncertainty_samples[1])
+models = state_conditioned_policy(n_uncertainties, nx, nx, layers; 
+                                   activation=activation, encoder_type=Flux.LSTM)
 
-models = Chain(
-    Dense(input_dim, layers[1], activation),
-    x -> reshape(x, :, 1),
-    Flux.LSTM(layers[1] => layers[2]),
-    x -> x[:, end],
-    Dense(layers[2], nx)
-)
-
-println("Model architecture:")
-println(models)
+println("Model architecture: StateConditionedPolicy")
+println("  Encoder (LSTM): $n_uncertainties -> $(layers)")
+println("  Combiner (Dense): $(layers[end]) + $nx -> $nx")
 
 # ============================================================================
 # Initial Evaluation
@@ -122,7 +117,7 @@ best_obj = mean(objective_values)
 println("Initial objective: $best_obj")
 
 model_path = joinpath(model_dir, save_file * ".jld2")
-save_control = SaveBest(best_obj, model_path, 0.003)
+save_control = SaveBest(best_obj, model_path)
 
 # ============================================================================
 # Hyperparameter Adjustment

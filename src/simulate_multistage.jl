@@ -8,10 +8,11 @@ function simulate_states(
     states[1] = initial_state
     for stage in 1:num_stages
         uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
-        if stage == 1
-            uncertainties_stage = initial_state .+ uncertainties_stage
-        end
-        states[stage + 1] = decision_rule(uncertainties_stage)
+        # Input: [uncertainty, previous_predicted_state]
+        # For stage 1, previous_predicted_state = initial_state
+        # For stage t > 1, previous_predicted_state = states[t] (output from previous stage)
+        prev_state = states[stage]
+        states[stage + 1] = decision_rule(vcat(uncertainties_stage, prev_state))
     end
     return states
 end
@@ -25,10 +26,11 @@ function simulate_states(
     states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
     for stage in 1:num_stages
-        uncertainties_stage_vec = vcat(initial_state, [[uncertainties[j][i][2] for i in 1:length(uncertainties[j])] for j in 1:stage]...)
         uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
         decision_rule = decision_rules[stage]
-        states[stage + 1] = decision_rule(uncertainties_stage)
+        # Input: [uncertainty, previous_predicted_state]
+        prev_state = states[stage]
+        states[stage + 1] = decision_rule(vcat(uncertainties_stage, prev_state))
     end
     return states
 end
@@ -185,7 +187,7 @@ function simulate_multistage(
     uncertainties,
     decision_rules
 ) where {T <: Real, U}
-    @ignore_derivatives Flux.reset!.(decision_rules)
+    @ignore_derivatives Flux.reset!(decision_rules)
     
     # Loop over stages
     objective_value = 0.0
@@ -247,7 +249,7 @@ function simulate_multistage(
     uncertainties,
     decision_rules
 ) where {T <: Real, U}
-    Flux.reset!.(decision_rules)
+    Flux.reset!(decision_rules)
     states = simulate_states(initial_state, uncertainties, decision_rules)
     return simulate_multistage(subproblems, state_params_in, state_params_out, uncertainties, states)
 end
@@ -370,19 +372,24 @@ function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
 
         # Update the parameters so as to reduce the objective,
         # according the chosen optimisation rule:
-        Flux.update!(opt_state, model, grads[1])
+        # Convert gradients from MutableTangent to plain NamedTuples for Flux.update!
+        grad = materialize_tangent(grads[1])
+        Flux.update!(opt_state, model, grad)
     end
     
     return model
 end
 
-function sim_states(t, m, initial_state, uncertainty_sample_vec)
+function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
+    # Input: [uncertainty, previous_predicted_state]
+    # For t=1: return initial_state (no prediction needed)
+    # For t>1: policy receives [uncertainty[t-1], prev_states[t-1]]
     if t == 1
         return Float32.(initial_state)
-    elseif t == 2
-        return m(uncertainty_sample_vec[1] + initial_state)
     else
-        return m(uncertainty_sample_vec[t - 1])
+        uncertainties_t = uncertainty_sample_vec[t - 1]
+        prev_state = prev_states[t - 1]
+        return m(vcat(uncertainties_t, prev_state))
     end
 end
 
@@ -397,6 +404,7 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
 )
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
+    num_stages = length(state_params_in)
 
     for iter in 1:num_batches
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
@@ -413,9 +421,15 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
             grads = Flux.gradient(model) do m
                 for s in 1:num_train_per_batch
                     Flux.reset!(m)
-                    # m.state = initial_state[:,:]
-                    # m(initial_state) # Breaks Everything
-                    states = [sim_states(t, m, initial_state, uncertainty_samples_vec[s]) for t = 1:length(state_params_in) + 1]
+                    # Compute states using accumulate (AD-friendly scan operation)
+                    # Input to policy: [uncertainty, previous_predicted_state]
+                    init_state = Float32.(initial_state)
+                    # accumulate returns all intermediate states
+                    predicted_states = accumulate(uncertainty_samples_vec[s]; init=init_state) do prev_state, uncertainties_t
+                        m(vcat(uncertainties_t, prev_state))
+                    end
+                    # Combine initial state with predicted states
+                    states = vcat([init_state], predicted_states)
                     objective += simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainty_samples[s], states)
                     eval_loss += get_objective_no_target_deficit(det_equivalent)
                 end
@@ -431,19 +445,21 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
 
         # Update the parameters so as to reduce the objective,
         # according the chosen optimisation rule:
-        Flux.update!(opt_state, model, grads[1])
+        # Convert gradients from MutableTangent to plain NamedTuples for Flux.update!
+        grad = materialize_tangent(grads[1])
+        Flux.update!(opt_state, model, grad)
     end
     
     return model
 end
 
-function make_single_network(models::Vector{F}, number_of_states::Int) where {F}
-    size_m = length(models)
-    return Parallel(permutedims ∘ hcat, [Chain(
-        x -> x[1:number_of_states * (i + 1)],
-        models[i]
-    ) for i in 1:size_m]...)
-end
+# function make_single_network(models::Vector{F}, number_of_states::Int) where {F}
+#     size_m = length(models)
+#     return Parallel(permutedims ∘ hcat, [Chain(
+#         x -> x[1:number_of_states * (i + 1)],
+#         models[i]
+#     ) for i in 1:size_m]...)
+# end
 
 # function train_multistage(models::Vector, initial_state, subproblems::Vector{JuMP.Model}, 
 #     state_params_in, state_params_out, uncertainty_sampler; 
@@ -497,48 +513,58 @@ end
 # end
 
 
-function train_multistage(models::Vector, initial_state, det_equivalent::JuMP.Model, 
-    state_params_in, state_params_out, uncertainty_sampler; 
-    num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
-    adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
-    record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
-        return false
-    end,
-    get_objective_no_target_deficit=get_objective_no_target_deficit
-)
-    num_states = length(initial_state)
-    model = make_single_network(models, num_states)
-    # Initialise the optimiser for this model:
-    opt_state = Flux.setup(optimizer, model)
+# function train_multistage(models::Vector, initial_state, det_equivalent::JuMP.Model, 
+#     state_params_in, state_params_out, uncertainty_sampler; 
+#     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
+#     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
+#     record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
+#         return false
+#     end,
+#     get_objective_no_target_deficit=get_objective_no_target_deficit
+# )
+#     num_states = length(initial_state)
+#     num_stages = length(state_params_in)
+#     # Initialise the optimiser for each model:
+#     opt_states = [Flux.setup(optimizer, m) for m in models]
 
-    for iter in 1:num_batches
-        num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
-        # Sample uncertainties
-        uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
-        uncertainty_samples_vecs = [[[uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties] for stage in 1:length(uncertainty_samples[1])] for s in 1:num_train_per_batch]
-        uncertainty_samples_vec = [vcat(initial_state, uncertainty_samples_vecs[s]...) for s in 1:num_train_per_batch]
+#     for iter in 1:num_batches
+#         num_train_per_batch = adjust_hyperparameters(iter, opt_states, num_train_per_batch)
+#         # Sample uncertainties
+#         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
+#         num_uncertainties = length(uncertainty_samples[1][1])
+#         uncertainty_samples_vecs = [[[uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties] for stage in 1:length(uncertainty_samples[1])] for s in 1:num_train_per_batch]
 
-        # Calculate the gradient of the objective
-        # with respect to the parameters within the model:
-        eval_loss = 0.0
-        objective = 0.0
-        grads = Flux.gradient(model) do m
-            for s in 1:num_train_per_batch
-                states = [Vector(i) for i in eachrow([Float32.(initial_state)'; m(uncertainty_samples_vec[s])])]
-                objective += simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainty_samples[s], states)
-                @ignore_derivatives eval_loss += get_objective_no_target_deficit(det_equivalent)
-            end
-            objective /= num_train_per_batch
-            @ignore_derivatives eval_loss /= num_train_per_batch
-            return objective
-        end
-        record_loss(iter, model, eval_loss, "metrics/loss") && break
-        record_loss(iter, model, objective, "metrics/training_loss") && break
+#         # Calculate the gradient of the objective
+#         # with respect to the parameters within the model:
+#         eval_loss = 0.0
+#         objective = 0.0
+#         grads = Flux.gradient(models...) do ms...
+#             for s in 1:num_train_per_batch
+#                 # Compute states sequentially: each state depends on the previous predicted state
+#                 # Input to policy: [uncertainty, previous_predicted_state]
+#                 states = Vector{Any}(undef, num_stages + 1)
+#                 states[1] = Float32.(initial_state)
+#                 for t in 2:num_stages + 1
+#                     uncertainties_t = uncertainty_samples_vecs[s][t - 1]
+#                     prev_state = states[t - 1]
+#                     states[t] = ms[t - 1](vcat(uncertainties_t, prev_state))
+#                 end
+#                 objective += simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainty_samples[s], states)
+#                 @ignore_derivatives eval_loss += get_objective_no_target_deficit(det_equivalent)
+#             end
+#             objective /= num_train_per_batch
+#             @ignore_derivatives eval_loss /= num_train_per_batch
+#             return objective
+#         end
+#         record_loss(iter, models, eval_loss, "metrics/loss") && break
+#         record_loss(iter, models, objective, "metrics/training_loss") && break
 
-        # Update the parameters so as to reduce the objective,
-        # according the chosen optimisation rule:
-        Flux.update!(opt_state, model, grads[1])
-    end
+#         # Update the parameters so as to reduce the objective,
+#         # according the chosen optimisation rule:
+#         for (i, m) in enumerate(models)
+#             Flux.update!(opt_states[i], m, grads[i])
+#         end
+#     end
     
-    return model
-end
+#     return models
+# end

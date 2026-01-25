@@ -29,13 +29,12 @@ save_file = "$(case_name)-$(formulation)-h$(num_stages)-deteq-$(now())"
 formulation_file = formulation * ".mof.json"
 
 # Training parameters
-num_epochs = 1
-num_batches = 1000
+num_epochs = 100
+num_batches = 32
 _num_train_per_batch = 1
 dense = Flux.LSTM                        # RNN, Dense, LSTM
 activation = sigmoid                     # tanh, identity, relu, sigmoid
-layers = Int64[64, 64]
-num_models = 1                           # 1, num_stages
+layers = Int64[128, 128]
 ensure_feasibility = non_ensurance
 optimizers = [Flux.Adam()]
 pre_trained_model = nothing
@@ -72,7 +71,6 @@ lg = WandbLogger(
     config = Dict(
         "layers" => layers,
         "activation" => string(activation),
-        "num_models" => num_models,
         "dense" => string(dense),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
@@ -86,18 +84,16 @@ function record_loss(iter, model, loss, tag)
 end
 
 # Define Model
-models = dense_multilayer_nn(num_models, num_hydro, num_hydro, layers; activation=activation, dense=dense)
+# Policy architecture: LSTM processes uncertainty, Dense combines with previous state
+num_uncertainties = length(uncertainty_samples[1])
+models = state_conditioned_policy(num_uncertainties, num_hydro, num_hydro, layers; 
+                                   activation=activation, encoder_type=dense)
 
 # Load pretrained Model
 if !isnothing(pre_trained_model)
-    model = if num_models > 1
-        DecisionRules.make_single_network(models, num_hydro)
-    else
-        models
-    end
     model_save = JLD2.load(pre_trained_model)
     model_state = model_save["model_state"]
-    Flux.loadmodel!(model, model_state)
+    Flux.loadmodel!(models, model_state)
 end
 
 # Initial evaluation

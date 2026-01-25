@@ -30,7 +30,7 @@ formulation_file = formulation * ".mof.json"
 dense = Dense # RNN, Dense
 activation = DecisionRules.identity # tanh, DecisionRules.identity, relu, sigmoid
 layers = Int64[32, 32] # Int64[8, 8], Int64[]
-num_models = num_stages # 1, num_stages
+# num_models = num_stages # 1, num_stages
 ensure_feasibility = non_ensurance # ensure_feasibility_double_softplus
 optimizer = Flux.Adam(0.01)
 
@@ -53,12 +53,8 @@ det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(de
 num_hydro = length(initial_state)
 
 # Build Model
-models = dense_multilayer_nn(num_models, num_hydro, num_hydro, layers; activation=activation, dense=dense)
-model = if num_models > 1
-    DecisionRules.make_single_network(models, num_hydro)
-else
-    models
-end
+models = dense_multilayer_nn(num_hydro, num_hydro, layers; activation=activation, dense=dense)
+model = models
 # model = Chain(Dense(num_hydro, 32, sigmoid), LSTM(32, 32), Dense(32, num_hydro))
 opt_state = Flux.setup(optimizer, model)
 x = randn(num_hydro, 1)

@@ -76,9 +76,11 @@ det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent
 
 nx = atlas.nx
 nu = atlas.nu
+n_perturb = length(uncertainty_samples[1])  # Number of perturbation parameters
 
 println("Atlas state dimension: $nx")
 println("Atlas control dimension: $nu")
+println("Number of perturbations: $n_perturb")
 println("Number of stages: $(N-1)")
 
 # ============================================================================
@@ -112,18 +114,15 @@ end
 # Define Neural Network Policy
 # ============================================================================
 
-# Policy: maps state (nx) to target state (nx)
-# Using LSTM to capture temporal dependencies
-models = Chain(
-    Dense(nx, layers[1], activation),
-    x -> reshape(x, :, 1),
-    Flux.LSTM(layers[1] => layers[2]),
-    x -> x[:, end],
-    Dense(layers[2], nx)
-)
+# Policy architecture: LSTM processes perturbations, Dense combines with previous state
+# This design is memory-efficient and allows the LSTM to focus on temporal patterns
+n_uncertainties = length(uncertainty_samples[1])
+models = state_conditioned_policy(n_uncertainties, nx, nx, layers; 
+                                   activation=activation, encoder_type=Flux.LSTM)
 
-println("Model architecture:")
-println(models)
+println("Model architecture: StateConditionedPolicy")
+println("  Encoder (LSTM): $n_uncertainties -> $(layers)")
+println("  Combiner (Dense): $(layers[end]) + $nx -> $nx")
 
 # ============================================================================
 # Initial Evaluation
@@ -140,7 +139,7 @@ best_obj = mean(objective_values)
 println("Initial objective: $best_obj")
 
 model_path = joinpath(model_dir, save_file * ".jld2")
-save_control = SaveBest(best_obj, model_path, 0.003)
+save_control = SaveBest(best_obj, model_path)
 
 # ============================================================================
 # Hyperparameter Adjustment

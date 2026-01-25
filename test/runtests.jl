@@ -104,6 +104,7 @@ end
         @test simulate([9.0], [[7.], [4.000]]) ≈ 359 rtol=1.0e-1
 
         Random.seed!(222)
+        # Policy input: [uncertainty, previous_state] = 1 + 1 = 2 dimensions
         m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val_prev = DecisionRules.simulate_multistage(
             subproblems, state_params_in, state_params_out, 
@@ -147,7 +148,8 @@ end
         Random.seed!(222)
         uncertainty_sample = sample(uncertainty_samples)
         
-        m = Chain(Dense(1, 10), Dense(10, 1))
+        # Policy input: [uncertainty, previous_state] = 1 + 1 = 2 dimensions
+        m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val_before = DecisionRules.simulate_multistage(
             det_equivalent, state_params_in, state_params_out, 
             initial_state, uncertainty_sample, 
@@ -232,5 +234,78 @@ end
         optimize!(model5)
         @test compute_parameter_dual(model5, state_in5) ≈ -30.0 rtol=1.0e-1
         @test compute_parameter_dual(model5, state_out5) ≈ 30.0 rtol=1.0e-1
+    end
+
+    @testset "StateConditionedPolicy" begin
+        # Test construction
+        n_uncertainty = 5
+        n_state = 3
+        n_output = 3
+        layers = [8, 8]
+        
+        policy = state_conditioned_policy(n_uncertainty, n_state, n_output, layers; 
+                                          activation=sigmoid, encoder_type=Flux.LSTM)
+        
+        @test policy.n_uncertainty == n_uncertainty
+        @test policy.n_state == n_state
+        
+        # Test forward pass
+        Flux.reset!(policy)
+        input = rand(Float32, n_uncertainty + n_state)
+        output = policy(input)
+        @test length(output) == n_output
+        
+        # Test sequential calls (recurrent behavior)
+        Flux.reset!(policy)
+        prev_state = rand(Float32, n_state)
+        for t in 1:5
+            uncertainty = rand(Float32, n_uncertainty)
+            input = vcat(uncertainty, prev_state)
+            next_state = policy(input)
+            @test length(next_state) == n_output
+            prev_state = next_state
+        end
+        
+        # Test gradient computation with Flux.gradient
+        function test_loss(m, n_uncertainty, n_state)
+            Flux.reset!(m)
+            total = 0.0f0
+            prev_state = rand(Float32, n_state)
+            for t in 1:3
+                uncertainty = rand(Float32, n_uncertainty)
+                input = vcat(uncertainty, prev_state)
+                next_state = m(input)
+                total += sum(next_state)
+                prev_state = next_state
+            end
+            return total
+        end
+        
+        loss, grads = Flux.withgradient(policy) do m
+            test_loss(m, n_uncertainty, n_state)
+        end
+        
+        @test loss > 0
+        @test grads[1] !== nothing
+        @test grads[1].encoder !== nothing
+        @test grads[1].combiner !== nothing
+        
+        # Test Flux.update! works (this was the original bug)
+        opt_state = Flux.setup(Flux.Adam(0.01), policy)
+        Flux.update!(opt_state, policy, grads[1])
+        
+        # Test single layer encoder
+        policy_single = state_conditioned_policy(n_uncertainty, n_state, n_output, [8]; 
+                                                  activation=relu, encoder_type=Flux.LSTM)
+        Flux.reset!(policy_single)
+        output_single = policy_single(rand(Float32, n_uncertainty + n_state))
+        @test length(output_single) == n_output
+        
+        # Test empty layers (edge case)
+        policy_empty = state_conditioned_policy(n_uncertainty, n_state, n_output, Int[]; 
+                                                 activation=Base.identity, encoder_type=Flux.LSTM)
+        Flux.reset!(policy_empty)
+        output_empty = policy_empty(rand(Float32, n_uncertainty + n_state))
+        @test length(output_empty) == n_output
     end
 end
