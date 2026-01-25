@@ -20,7 +20,7 @@ include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
 # ============================================================================
 
 # Problem parameters
-N = 50                          # Number of time steps
+N = 11                          # Number of time steps
 h = 0.01                        # Time step
 perturbation_scale = 0.05       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage

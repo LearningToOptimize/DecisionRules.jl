@@ -168,7 +168,7 @@ function build_atlas_subproblems(;
         @variable(model, x_prev_perturbed[i=1:nx])
         
         # Deviation penalty variable
-        @variable(model, state_deviation >= 0)
+        @variable(model, norm_deficit >= 0)
         
         # Perturbation constraints: x_prev_perturbed = x_prev + w (on perturbed indices)
         for i in 1:nx
@@ -181,11 +181,11 @@ function build_atlas_subproblems(;
         end
         
         # Objective: minimize state deviation from reference + deviation from target
-        @constraint(model, [state_deviation; target_x .- x] in MOI.NormOneCone(nx + 1))
+        @constraint(model, [norm_deficit; target_x .- x] in MOI.NormOneCone(nx + 1))
         
         @objective(model, Min, 
             sum((x[i] - x_ref[i])^2 for i in 1:nx) + 
-            penalty * state_deviation
+            penalty * norm_deficit
         )
         
         # Dynamics constraint using VectorNonlinearOracle
@@ -264,7 +264,7 @@ function build_atlas_deterministic_equivalent(;
     @variable(det_equivalent, w[t=1:N-1, i=1:n_perturb] ∈ MOI.Parameter(0.0))
     
     # Deviation variable
-    @variable(det_equivalent, total_deviation >= 0)
+    @variable(det_equivalent, norm_deficit >= 0)
     
     # Fix initial condition
     for i in 1:nx
@@ -284,10 +284,10 @@ function build_atlas_deterministic_equivalent(;
     end
     
     # Objective
-    @constraint(det_equivalent, [total_deviation; vec([target[t,i] - X[t+1,i] for t in 1:N-1, i in 1:nx])] in MOI.NormOneCone(1 + (N-1)*nx))
+    @constraint(det_equivalent, [norm_deficit; vec([target[t,i] - X[t+1,i] for t in 1:N-1, i in 1:nx])] in MOI.NormOneCone(1 + (N-1)*nx))
     @objective(det_equivalent, Min, 
         sum((X[t,i] - x_ref[i])^2 for t in 2:N, i in 1:nx) +
-        penalty * total_deviation
+        penalty * norm_deficit
     )
     
     # Build VectorNonlinearOracle (same as subproblems)
