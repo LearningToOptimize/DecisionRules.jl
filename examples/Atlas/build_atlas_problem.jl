@@ -33,6 +33,12 @@ The problem minimizes deviation from a reference state while subject to:
 - Discrete-time dynamics with stochastic perturbations
 - Torque limits on all joints
 
+# Penalty arguments
+- `penalty`: Legacy argument for L1 norm penalty (backwards compatible)
+- `penalty_l1`: Penalty for L1 norm (NormOneCone). If provided, creates L1 deviation constraint.
+- `penalty_l2`: Penalty for L2 norm (SecondOrderCone). If provided, creates L2 deviation constraint.
+- If both `penalty_l1` and `penalty_l2` are provided, both norms are used with separate penalties.
+
 Returns the components needed for DecisionRules.jl training:
 - subproblems: Vector of JuMP models for each stage
 - state_params_in: Input state parameters for each stage
@@ -50,8 +56,15 @@ function build_atlas_subproblems(;
     perturbation_indices::Union{Nothing, Vector{Int}} = nothing,
     num_scenarios::Int = 10,
     penalty::Float64 = 1e3,
+    penalty_l1::Union{Nothing, Float64} = nothing,
+    penalty_l2::Union{Nothing, Float64} = nothing,
     optimizer = nothing,
 )
+    # Handle penalty arguments: if penalty_l1/penalty_l2 not specified, use legacy penalty for L1
+    if isnothing(penalty_l1) && isnothing(penalty_l2)
+        penalty_l1 = penalty
+    end
+    
     # Load reference state if not provided
     if isnothing(x_ref) || isnothing(u_ref)
         @load joinpath(@__DIR__, "atlas_ref.jld2") x_ref u_ref
@@ -167,7 +180,7 @@ function build_atlas_subproblems(;
         # Perturbed previous state (x_prev with perturbations added)
         @variable(model, x_prev_perturbed[i=1:nx])
         
-        # Deviation penalty variable
+        # Deviation penalty variable (single variable for logging compatibility)
         @variable(model, norm_deficit >= 0)
         
         # Perturbation constraints: x_prev_perturbed = x_prev + w (on perturbed indices)
@@ -181,14 +194,36 @@ function build_atlas_subproblems(;
         end
         
         # Objective: minimize state deviation from reference + deviation from target
-        @constraint(model, [norm_deficit; target_x .- x] in MOI.NormOneCone(nx + 1))
+        # Create norm constraints based on penalty arguments
+        use_l1 = !isnothing(penalty_l1)
+        use_l2 = !isnothing(penalty_l2)
+        
+        if use_l1 && use_l2
+            # Both L1 and L2 squared norms
+            @variable(model, norm_l1 >= 0)
+            @variable(model, norm_l2_sq >= 0)  # L2 squared (sum of squares)
+            @constraint(model, [norm_l1; target_x .- x] in MOI.NormOneCone(nx + 1))
+            @constraint(model, norm_l2_sq >= sum((target_x[i] - x[i])^2 for i in 1:nx))
+            @constraint(model, norm_deficit >= penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq)
+            deficit_coef = 1.0
+        elseif use_l1
+            # L1 norm only
+            @constraint(model, [norm_deficit; target_x .- x] in MOI.NormOneCone(nx + 1))
+            deficit_coef = penalty_l1
+        elseif use_l2
+            # L2 squared norm only (sum of squares)
+            @constraint(model, norm_deficit >= sum((target_x[i] - x[i])^2 for i in 1:nx))
+            deficit_coef = penalty_l2
+        else
+            error("At least one of penalty_l1 or penalty_l2 must be specified")
+        end
 
         @variable(model, obj_cost >= 0)
         @constraint(model, obj_cost >= sum((x[i] - x_ref[i])^2 for i in 1:nx))
         
         @objective(model, Min, 
             obj_cost + 
-            penalty * norm_deficit
+            deficit_coef * norm_deficit
         )
         
         # Dynamics constraint using VectorNonlinearOracle
@@ -220,6 +255,12 @@ end
 
 Build a deterministic equivalent formulation for the Atlas balancing problem.
 This creates a single large optimization problem instead of decomposed subproblems.
+
+# Penalty arguments
+- `penalty`: Legacy argument for L1 norm penalty (backwards compatible)
+- `penalty_l1`: Penalty for L1 norm (NormOneCone). If provided, creates L1 deviation constraint.
+- `penalty_l2`: Penalty for L2 norm (SecondOrderCone). If provided, creates L2 deviation constraint.
+- If both `penalty_l1` and `penalty_l2` are provided, both norms are used with separate penalties.
 """
 function build_atlas_deterministic_equivalent(;
     atlas::Atlas = Atlas(),
@@ -231,7 +272,14 @@ function build_atlas_deterministic_equivalent(;
     perturbation_indices::Union{Nothing, Vector{Int}} = nothing,
     num_scenarios::Int = 10,
     penalty::Float64 = 1e3,
+    penalty_l1::Union{Nothing, Float64} = nothing,
+    penalty_l2::Union{Nothing, Float64} = nothing,
 )
+    # Handle penalty arguments: if penalty_l1/penalty_l2 not specified, use legacy penalty for L1
+    if isnothing(penalty_l1) && isnothing(penalty_l2)
+        penalty_l1 = penalty
+    end
+    
     # Load reference state if not provided
     if isnothing(x_ref) || isnothing(u_ref)
         @load joinpath(@__DIR__, "atlas_ref.jld2") x_ref u_ref
@@ -288,11 +336,37 @@ function build_atlas_deterministic_equivalent(;
     
     # Objective
     @variable(det_equivalent, cost >= 0)
-    @constraint(det_equivalent, [norm_deficit; vec([target[t,i] - X[t+1,i] for t in 1:N-1, i in 1:nx])] in MOI.NormOneCone(1 + (N-1)*nx))
+    
+    # Create norm constraints based on penalty arguments
+    use_l1 = !isnothing(penalty_l1)
+    use_l2 = !isnothing(penalty_l2)
+    deviation_expr = vec([target[t,i] - X[t+1,i] for t in 1:N-1, i in 1:nx])
+    deviation_dim = (N-1) * nx
+    
+    if use_l1 && use_l2
+        # Both L1 and L2 squared norms
+        @variable(det_equivalent, norm_l1 >= 0)
+        @variable(det_equivalent, norm_l2_sq >= 0)  # L2 squared (sum of squares)
+        @constraint(det_equivalent, [norm_l1; deviation_expr] in MOI.NormOneCone(1 + deviation_dim))
+        @constraint(det_equivalent, norm_l2_sq >= sum(deviation_expr[i]^2 for i in 1:deviation_dim))
+        @constraint(det_equivalent, norm_deficit >= penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq)
+        deficit_coef = 1.0
+    elseif use_l1
+        # L1 norm only
+        @constraint(det_equivalent, [norm_deficit; deviation_expr] in MOI.NormOneCone(1 + deviation_dim))
+        deficit_coef = penalty_l1
+    elseif use_l2
+        # L2 squared norm only (sum of squares)
+        @constraint(det_equivalent, norm_deficit >= sum(deviation_expr[i]^2 for i in 1:deviation_dim))
+        deficit_coef = penalty_l2
+    else
+        error("At least one of penalty_l1 or penalty_l2 must be specified")
+    end
+    
     @constraint(det_equivalent, cost >= sum((X[t,i] - x_ref[i])^2 for t in 2:N, i in 1:nx))
     @objective(det_equivalent, Min, 
         cost +
-        penalty * norm_deficit
+        deficit_coef * norm_deficit
     )
     
     # Build VectorNonlinearOracle (same as subproblems)

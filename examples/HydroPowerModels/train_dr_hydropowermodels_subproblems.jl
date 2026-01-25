@@ -34,8 +34,8 @@ model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 save_file = "$(case_name)-$(formulation)-h$(num_stages)-subproblems-$(now())"
 formulation_file = formulation * ".mof.json"
-num_epochs=1
-num_batches=1000
+num_epochs=30
+num_batches=100
 _num_train_per_batch=1
 # dense = Flux.LSTM # RNN, Dense, LSTM
 activation = sigmoid # tanh, DecisionRules.identity, relu
@@ -43,6 +43,8 @@ layers = Int64[128, 128] # Int64[8, 8], Int64[]
 ensure_feasibility = non_ensurance # ensure_feasibility_double_softplus
 optimizers= [Flux.Adam()] # Flux.Adam(0.01), Flux.Descent(0.1), Flux.RMSProp(0.00001, 0.001)
 pre_trained_model = nothing #joinpath(HydroPowerModels_dir, case_name, formulation, "models", "case3-ACPPowerModel-h48-2024-05-18T10:16:25.117.jld2")
+penalty_l2 = :auto
+penalty_l1 = :auto
 
 # Build MSP using subproblems (not deterministic equivalent)
 
@@ -56,7 +58,9 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Op
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
     joinpath(HydroPowerModels_dir, case_name), formulation_file; 
     num_stages=num_stages,
-    optimizer=diff_optimizer
+    optimizer=diff_optimizer,
+    penalty_l1=penalty_l1,
+    penalty_l2=penalty_l2
 )
 
 num_hydro = length(initial_state)
@@ -72,7 +76,12 @@ lg = WandbLogger(
         # "dense" => string(dense),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
-        "training_method" => "subproblems"
+        "training_method" => "subproblems",
+        "penalty_l1" => string(penalty_l1),
+        "penalty_l2" => string(penalty_l2),
+        "num_epochs" => string(num_epochs),
+        "num_batches" => string(num_batches),
+        "num_train_per_batch" => string(_num_train_per_batch),
     )
 )
 

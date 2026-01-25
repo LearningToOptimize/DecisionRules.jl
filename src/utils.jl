@@ -10,16 +10,92 @@ function variable_to_parameter(model::JuMP.Model, variable::JuMP.VariableRef; in
     end
 end
 
-function create_deficit!(model::JuMP.Model, len::Int; penalty=nothing)
-    if isnothing(penalty)
-        obj = objective_function(model)
-        # get the highest coefficient
-        penalty = maximum(abs.(values(obj.terms)))
+"""
+    create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalty_l2=nothing, penalty=nothing)
+
+Create deficit variables to penalize state deviations in a JuMP model.
+
+Supports three modes:
+- L1 norm only: Uses `MOI.NormOneCone` (default if no penalty specified)
+- L2 squared norm only: Uses sum of squared deviations (solver-compatible alternative to SecondOrderCone)
+- Both norms: Creates both constraints with separate penalties
+
+# Arguments
+- `model`: The JuMP model to add deficit variables to
+- `len`: Number of deficit variables (typically dimension of state)
+- `penalty_l1`: Penalty coefficient for L1 norm (NormOneCone). If `nothing` and L1 is used, defaults to max objective coefficient.
+- `penalty_l2`: Penalty coefficient for L2 squared norm (sum of squares). If `nothing` and L2 is used, defaults to max objective coefficient.
+- `penalty`: Legacy argument. If provided and penalty_l1/penalty_l2 are both `nothing`, uses this for L1 norm only.
+
+# Returns
+- `norm_deficit`: Single variable representing total penalized deviation (for logging compatibility)
+- `_deficit`: Vector of deficit variables for each state dimension
+
+# Examples
+```julia
+# L1 norm only (default behavior, backwards compatible)
+norm_deficit, _deficit = create_deficit!(model, 3; penalty=1000.0)
+
+# L2 norm only
+norm_deficit, _deficit = create_deficit!(model, 3; penalty_l2=1000.0)
+
+# Both L1 and L2 norms
+norm_deficit, _deficit = create_deficit!(model, 3; penalty_l1=1000.0, penalty_l2=500.0)
+```
+"""
+function create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalty_l2=nothing, penalty=nothing)
+    # Handle legacy 'penalty' argument for backwards compatibility
+    if isnothing(penalty_l1) && isnothing(penalty_l2)
+        if !isnothing(penalty)
+            penalty_l1 = penalty  # Use legacy penalty for L1 only
+        else
+            # Default: L1 norm with auto-computed penalty
+            obj = objective_function(model)
+            penalty_l1 = maximum(abs.(values(obj.terms)))
+        end
     end
+
+    # Auto-compute penalties if needed
+    if !isnothing(penalty_l1) && penalty_l1 === :auto
+        obj = objective_function(model)
+        penalty_l1 = maximum(abs.(values(obj.terms)))
+    end
+    if !isnothing(penalty_l2) && penalty_l2 === :auto
+        obj = objective_function(model)
+        penalty_l2 = maximum(abs.(values(obj.terms)))
+    end
+
+    # Create deficit variables
     _deficit = @variable(model, _deficit[1:len])
+    
+    # Create individual norm variables for each cone type
+    use_l1 = !isnothing(penalty_l1)
+    use_l2 = !isnothing(penalty_l2)
+    
+    # Create norm_deficit as the total penalized deviation (for logging compatibility)
     @variable(model, norm_deficit >= 0.0)
-    @constraint(model, [norm_deficit; _deficit] in MOI.NormOneCone(1 + len))
-    set_objective_coefficient(model, norm_deficit, penalty)
+    
+    if use_l1 && use_l2
+        # Both L1 and L2 squared norms
+        @variable(model, norm_l1 >= 0.0)
+        @variable(model, norm_l2_sq >= 0.0)  # L2 squared (sum of squares)
+        @constraint(model, [norm_l1; _deficit] in MOI.NormOneCone(1 + len))
+        @constraint(model, norm_l2_sq >= sum(_deficit[i]^2 for i in 1:len))
+        # norm_deficit = penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq
+        @constraint(model, norm_deficit >= penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq)
+        set_objective_coefficient(model, norm_deficit, 1.0)
+    elseif use_l1
+        # L1 norm only
+        @constraint(model, [norm_deficit; _deficit] in MOI.NormOneCone(1 + len))
+        set_objective_coefficient(model, norm_deficit, penalty_l1)
+    elseif use_l2
+        # L2 squared norm only (sum of squares)
+        @constraint(model, norm_deficit >= sum(_deficit[i]^2 for i in 1:len))
+        set_objective_coefficient(model, norm_deficit, penalty_l2)
+    else
+        error("At least one of penalty_l1 or penalty_l2 must be specified")
+    end
+    
     return norm_deficit, _deficit
 end
 

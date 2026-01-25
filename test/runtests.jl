@@ -236,6 +236,108 @@ end
         @test compute_parameter_dual(model5, state_out5) ≈ 30.0 rtol=1.0e-1
     end
 
+    @testset "create_deficit!" begin
+        # Test 1: L1 norm only (default/legacy behavior)
+        model1 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model1, x1)
+        @variable(model1, state[1:3])
+        @variable(model1, target[1:3])
+        @objective(model1, Min, x1)
+        fix(x1, 1.0)
+        norm_deficit1, _deficit1 = create_deficit!(model1, 3; penalty=100.0)
+        for i in 1:3
+            @constraint(model1, _deficit1[i] == state[i] - target[i])
+        end
+        # Set state and target values to create deficit
+        for i in 1:3
+            fix(state[i], 1.0 * i)
+            fix(target[i], 0.5 * i)  # deficit = 0.5 * i for each
+        end
+        optimize!(model1)
+        @test termination_status(model1) == MOI.OPTIMAL
+        @test value(norm_deficit1) ≈ 3.0 rtol=1.0e-2  # L1 norm = |0.5| + |1.0| + |1.5| = 3.0
+        
+        # Test 2: L2 squared norm only (sum of squares)
+        model2 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model2, x2)
+        @variable(model2, state2[1:3])
+        @variable(model2, target2[1:3])
+        @objective(model2, Min, x2)
+        fix(x2, 1.0)
+        norm_deficit2, _deficit2 = create_deficit!(model2, 3; penalty_l2=100.0)
+        for i in 1:3
+            @constraint(model2, _deficit2[i] == state2[i] - target2[i])
+        end
+        for i in 1:3
+            fix(state2[i], 1.0 * i)
+            fix(target2[i], 0.5 * i)
+        end
+        optimize!(model2)
+        @test termination_status(model2) == MOI.OPTIMAL
+        # L2 squared = 0.5^2 + 1.0^2 + 1.5^2 = 3.5
+        @test value(norm_deficit2) ≈ 3.5 rtol=1.0e-2
+        
+        # Test 3: Both L1 and L2 squared norms
+        model3 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model3, x3)
+        @variable(model3, state3[1:3])
+        @variable(model3, target3[1:3])
+        @objective(model3, Min, x3)
+        fix(x3, 1.0)
+        norm_deficit3, _deficit3 = create_deficit!(model3, 3; penalty_l1=100.0, penalty_l2=50.0)
+        for i in 1:3
+            @constraint(model3, _deficit3[i] == state3[i] - target3[i])
+        end
+        for i in 1:3
+            fix(state3[i], 1.0 * i)
+            fix(target3[i], 0.5 * i)
+        end
+        optimize!(model3)
+        @test termination_status(model3) == MOI.OPTIMAL
+        # Combined: 100 * 3.0 + 50 * 3.5 = 300 + 175 = 475
+        expected_combined = 100.0 * 3.0 + 50.0 * 3.5
+        @test value(norm_deficit3) ≈ expected_combined rtol=1.0e-2
+        
+        # Test 4: Verify backward compatibility with legacy 'penalty' argument
+        model4 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model4, x4)
+        @objective(model4, Min, x4)
+        fix(x4, 1.0)
+        norm_deficit4, _deficit4 = create_deficit!(model4, 2; penalty=500.0)
+        @test length(_deficit4) == 2
+        # Should create L1 norm constraint (backwards compatible)
+        optimize!(model4)
+        @test termination_status(model4) == MOI.OPTIMAL
+        
+        # Test 5: Verify objective contribution with L1 norm
+        model5 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model5, y5 >= 0)
+        @objective(model5, Min, 10 * y5)
+        @constraint(model5, y5 >= 1)  # Forces y5 = 1
+        norm_deficit5, _deficit5 = create_deficit!(model5, 2; penalty_l1=100.0)
+        @constraint(model5, _deficit5[1] == 2.0)  # Fixed deficit
+        @constraint(model5, _deficit5[2] == 3.0)  # Fixed deficit
+        optimize!(model5)
+        @test termination_status(model5) == MOI.OPTIMAL
+        @test value(norm_deficit5) ≈ 5.0 rtol=1.0e-2  # L1 = 2 + 3 = 5
+        # Total objective = 10 * 1 + 100 * 5 = 510
+        @test objective_value(model5) ≈ 510.0 rtol=1.0e-2
+        
+        # Test 6: Verify objective contribution with L2 squared norm
+        model6 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        @variable(model6, y6 >= 0)
+        @objective(model6, Min, 10 * y6)
+        @constraint(model6, y6 >= 1)
+        norm_deficit6, _deficit6 = create_deficit!(model6, 2; penalty_l2=100.0)
+        @constraint(model6, _deficit6[1] == 3.0)
+        @constraint(model6, _deficit6[2] == 4.0)
+        optimize!(model6)
+        @test termination_status(model6) == MOI.OPTIMAL
+        @test value(norm_deficit6) ≈ 25.0 rtol=1.0e-2  # L2 squared = 9 + 16 = 25
+        # Total objective = 10 * 1 + 100 * 25 = 2510
+        @test objective_value(model6) ≈ 2510.0 rtol=1.0e-2
+    end
+
     @testset "StateConditionedPolicy" begin
         # Test construction
         n_uncertainty = 5

@@ -29,8 +29,8 @@ save_file = "$(case_name)-$(formulation)-h$(num_stages)-deteq-$(now())"
 formulation_file = formulation * ".mof.json"
 
 # Training parameters
-num_epochs = 100
-num_batches = 32
+num_epochs = 20
+num_batches = 100
 _num_train_per_batch = 1
 dense = Flux.LSTM                        # RNN, Dense, LSTM
 activation = sigmoid                     # tanh, identity, relu, sigmoid
@@ -38,11 +38,15 @@ layers = Int64[128, 128]
 ensure_feasibility = non_ensurance
 optimizers = [Flux.Adam()]
 pre_trained_model = nothing
+penalty_l2 = :auto
+penalty_l1 = :auto
 
 # Build MSP with deterministic equivalent formulation
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
     joinpath(HydroPowerModels_dir, case_name), formulation_file; 
-    num_stages=num_stages
+    num_stages=num_stages,
+    penalty_l1=penalty_l1,
+    penalty_l2=penalty_l2
 )
 
 # det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
@@ -74,7 +78,12 @@ lg = WandbLogger(
         "dense" => string(dense),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
-        "training_method" => "deterministic_equivalent"
+        "training_method" => "deterministic_equivalent",
+        "penalty_l1" => string(penalty_l1),
+        "penalty_l2" => string(penalty_l2),
+        "num_epochs" => string(num_epochs),
+        "num_batches" => string(num_batches),
+        "num_train_per_batch" => string(_num_train_per_batch)
     )
 )
 

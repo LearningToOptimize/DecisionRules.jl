@@ -23,10 +23,17 @@ function build_rocket_problem(;
     u_t_max = 3.5 * g_0 * m_0,    # Maximum thrust
     T = 1_000,                    # Number of time steps
     Δt = 0.2 / T,                 # Time per discretized step
-    penalty = 10,                 # Penalty for violating target
+    penalty = 10,                 # Penalty for violating target (legacy, used for L1 if penalty_l1/penalty_l2 not specified)
+    penalty_l1 = nothing,         # Penalty for L1 norm (NormOneCone)
+    penalty_l2 = nothing,         # Penalty for L2 norm (SecondOrderCone)
     final_u_state = 0.0,          # Final state of the control
     num_scenarios = 10,           # Number of samples
 )
+    # Handle penalty arguments: if penalty_l1/penalty_l2 not specified, use legacy penalty for L1
+    if isnothing(penalty_l1) && isnothing(penalty_l2)
+        penalty_l1 = penalty
+    end
+    
     # ## JuMP formulation
 
     # First, we create a model and choose an optimizer. Since this is a nonlinear
@@ -49,7 +56,7 @@ function build_rocket_problem(;
     @variable(det_equivalent, 0 <= u_t[1:T-1] <= u_t_max, start = 0); # Thrust
     @variable(det_equivalent, target[1:T-1] ∈ MOI.Parameter.(0.0)); # Target thrust
     @variable(det_equivalent, w[1:T-1] ∈ MOI.Parameter.(1.0));      # Wind
-    @variable(det_equivalent, norm_deficit >= 0);                   # Wind
+    @variable(det_equivalent, norm_deficit >= 0);                   # Deviation penalty
     @variable(det_equivalent, u_T ∈ MOI.Parameter(final_u_state));    # Final thrust target
 
     # We implement boundary conditions by fixing variables to values.
@@ -59,10 +66,32 @@ function build_rocket_problem(;
     fix(x_m[1], m_0; force = true)
     # fix(u_T, final_u_state; force = true)
 
-    # The objective is to maximize altitude at end of time of flight.
-    @constraint(det_equivalent, [norm_deficit; (target.-u_t[1:T-1])] in MOI.NormOneCone(T))
+    # Create norm constraints based on penalty arguments
+    use_l1 = !isnothing(penalty_l1)
+    use_l2 = !isnothing(penalty_l2)
+    deviation_expr = target .- u_t[1:T-1]
+    
+    if use_l1 && use_l2
+        # Both L1 and L2 squared norms
+        @variable(det_equivalent, norm_l1 >= 0)
+        @variable(det_equivalent, norm_l2_sq >= 0)  # L2 squared (sum of squares)
+        @constraint(det_equivalent, [norm_l1; deviation_expr] in MOI.NormOneCone(T))
+        @constraint(det_equivalent, norm_l2_sq >= sum(deviation_expr[i]^2 for i in 1:T-1))
+        @constraint(det_equivalent, norm_deficit >= penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq)
+        deficit_coef = 1.0
+    elseif use_l1
+        # L1 norm only
+        @constraint(det_equivalent, [norm_deficit; deviation_expr] in MOI.NormOneCone(T))
+        deficit_coef = penalty_l1
+    elseif use_l2
+        # L2 squared norm only (sum of squares)
+        @constraint(det_equivalent, norm_deficit >= sum(deviation_expr[i]^2 for i in 1:T-1))
+        deficit_coef = penalty_l2
+    else
+        error("At least one of penalty_l1 or penalty_l2 must be specified")
+    end
 
-    @objective(det_equivalent, Min, -x_h[T] + penalty * norm_deficit)
+    @objective(det_equivalent, Min, -x_h[T] + deficit_coef * norm_deficit)
 
     # Forces are defined as functions:
     D(x_h, x_v) = D_c * x_v^2 * exp(-h_c * (x_h - h_0) / h_0)
@@ -105,10 +134,17 @@ function build_rocket_subproblems(;
     u_t_max = 3.5 * g_0 * m_0,    # Maximum thrust
     T = 1_000,                    # Number of time steps
     Δt = 0.2 / T,                 # Time per discretized step
-    penalty = 10,                 # Penalty for violating target
+    penalty = 10,                 # Penalty for violating target (legacy, used for L1 if penalty_l1/penalty_l2 not specified)
+    penalty_l1 = nothing,         # Penalty for L1 norm (NormOneCone)
+    penalty_l2 = nothing,         # Penalty for L2 norm (SecondOrderCone)
     final_u_state = 0.0,          # Final state of the control
     num_scenarios = 10,           # Number of samples
 )
+    # Handle penalty arguments: if penalty_l1/penalty_l2 not specified, use legacy penalty for L1
+    if isnothing(penalty_l1) && isnothing(penalty_l2)
+        penalty_l1 = penalty
+    end
+    
     subproblems = Vector{JuMP.Model}(undef, T-1)
     state_params_in = Vector{Vector{Any}}(undef, T-1)
     state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, T-1)
@@ -133,16 +169,39 @@ function build_rocket_subproblems(;
         @variable(subproblems[t], target_h ∈ MOI.Parameter(0.0)) # Target Height
         @variable(subproblems[t], target_m ∈ MOI.Parameter(0.0)) # Target Mass
         @variable(subproblems[t], w ∈ MOI.Parameter(1.0))      # Wind
-        @variable(subproblems[t], norm_deficit >= 0)                   # Wind
+        @variable(subproblems[t], norm_deficit >= 0)            # Deviation penalty
 
         # initial state parameters
         @variable(subproblems[t], x_v_prev ∈ MOI.Parameter(v_0))
         @variable(subproblems[t], x_h_prev ∈ MOI.Parameter(h_0))
         @variable(subproblems[t], x_m_prev ∈ MOI.Parameter(m_0))
         
-        # @constraint(subproblems[t], [norm_deficit; (target - u_t)] in MOI.NormOneCone(2))
-        @constraint(subproblems[t], [norm_deficit; target_v - x_v; target_h - x_h; target_m - x_m] in MOI.NormOneCone(4))
-        @objective(subproblems[t], Min, -x_h + penalty * norm_deficit)
+        # Create norm constraints based on penalty arguments
+        use_l1 = !isnothing(penalty_l1)
+        use_l2 = !isnothing(penalty_l2)
+        deviation_expr = [target_v - x_v, target_h - x_h, target_m - x_m]
+        
+        if use_l1 && use_l2
+            # Both L1 and L2 squared norms
+            @variable(subproblems[t], norm_l1 >= 0)
+            @variable(subproblems[t], norm_l2_sq >= 0)  # L2 squared (sum of squares)
+            @constraint(subproblems[t], [norm_l1; deviation_expr] in MOI.NormOneCone(4))
+            @constraint(subproblems[t], norm_l2_sq >= sum(deviation_expr[i]^2 for i in 1:3))
+            @constraint(subproblems[t], norm_deficit >= penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq)
+            deficit_coef = 1.0
+        elseif use_l1
+            # L1 norm only
+            @constraint(subproblems[t], [norm_deficit; deviation_expr] in MOI.NormOneCone(4))
+            deficit_coef = penalty_l1
+        elseif use_l2
+            # L2 squared norm only (sum of squares)
+            @constraint(subproblems[t], norm_deficit >= sum(deviation_expr[i]^2 for i in 1:3))
+            deficit_coef = penalty_l2
+        else
+            error("At least one of penalty_l1 or penalty_l2 must be specified")
+        end
+        
+        @objective(subproblems[t], Min, -x_h + deficit_coef * norm_deficit)
 
         # Forces are defined as functions:
         D(x_h, x_v) = D_c * x_v^2 * exp(-h_c * (x_h - h_0) / h_0)
