@@ -26,7 +26,6 @@ end
 mutable struct SaveBest <: Function
     best_loss::Float64
     model_path::String
-    threshold::Float64
 end
 function (callback::SaveBest)(iter, model, loss)
     if loss < callback.best_loss
@@ -36,7 +35,22 @@ function (callback::SaveBest)(iter, model, loss)
         model_state = Flux.state(m)
         jldsave(callback.model_path; model_state=model_state)
     end
-    if loss < callback.threshold
+    return false
+end
+
+mutable struct StallingCriterium <: Function
+    patience::Int
+    best_loss::Float64
+    stall_count::Int
+end
+function (callback::StallingCriterium)(iter, model, loss)
+    if loss < callback.best_loss
+        callback.best_loss = loss
+        callback.stall_count = 0
+    else
+        callback.stall_count += 1
+    end
+    if callback.stall_count >= callback.patience
         return true
     end
     return false

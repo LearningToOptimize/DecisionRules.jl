@@ -8,6 +8,7 @@ using Ipopt, HSL_jll
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
+using JuMP
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -45,7 +46,13 @@ subproblems, state_params_in, state_params_out, uncertainty_samples, initial_sta
     num_stages=num_stages
 )
 
-det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+# det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+#     "print_level" => 0,
+#     "hsllib" => HSL_jll.libhsl_path,
+#     "linear_solver" => "ma27"
+# ))
+
+det_equivalent = JuMP.Model(optimizer_with_attributes(Ipopt.Optimizer, 
     "print_level" => 0,
     "hsllib" => HSL_jll.libhsl_path,
     "linear_solver" => "ma27"
@@ -103,7 +110,8 @@ objective_values = [simulate_multistage(
 best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
-save_control = SaveBest(best_obj, model_path, 0.003)
+save_control = SaveBest(best_obj, model_path)
+convergence_criterium = StallingCriterium(100, best_obj, 0)
 
 adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
     if iter % 2100 == 0
@@ -122,6 +130,8 @@ for iter in 1:num_epochs
         record_loss= (iter, model, loss, tag) -> begin
             if tag == "metrics/training_loss"
                 save_control(iter, model, loss)
+                record_loss(iter, model, loss, tag)
+                return convergence_criterium(iter, model, loss)
             end
             return record_loss(iter, model, loss, tag)
         end,

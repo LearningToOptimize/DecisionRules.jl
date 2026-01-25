@@ -1,7 +1,6 @@
-# Setup the dynamics and visualization for the Atlas model
+# Setup the dynamics for the Atlas model
+# Visualization utilities are in atlas_visualization.jl
 using RigidBodyDynamics
-using MeshCat
-using MeshCatMechanisms
 using Random
 using StaticArrays
 using Rotations
@@ -119,25 +118,4 @@ function rk4(model::Atlas, x, u, h)
     return x + h/6*(k1 + 2*k2 + 2*k3 + k4)
 end
 
-function init_visualizer(model::Atlas, vis::Visualizer)
-    delete!(vis)
-    meshes_path = joinpath(@__DIR__, "urdf")
-    mvis = MechanismVisualizer(model.mech, URDFVisuals(URDFPATH, package_path=[meshes_path]), vis)
-    return mvis
-end
-
-function visualize!(model::Atlas, mvis::MechanismVisualizer, q)
-    set_configuration!(mvis, q[1:model.nq])
-end
-
-function animate!(model::Atlas, mvis::MechanismVisualizer, qs; Δt=0.001)
-    anim = MeshCat.Animation(mvis.visualizer; fps=convert(Int, floor(1.0 / Δt)))
-    for (t, q) in enumerate(qs)
-        MeshCat.atframe(anim, t) do 
-            set_configuration!(mvis, q[1:model.nq])
-        end
-    end
-    MeshCat.setanimation!(mvis, anim)
-
-    return anim
-end
+# Visualization functions moved to atlas_visualization.jl

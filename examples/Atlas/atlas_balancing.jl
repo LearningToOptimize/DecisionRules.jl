@@ -8,6 +8,7 @@ using LinearAlgebra
 
 # include(joinpath(@__DIR__, "../mpc_utils.jl"))
 include(joinpath(@__DIR__, "atlas_utils.jl"))
+include(joinpath(@__DIR__, "atlas_visualization.jl"))
 
 # Setup model and visualizer
 atlas = Atlas();
