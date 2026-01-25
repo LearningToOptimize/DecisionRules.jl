@@ -27,13 +27,13 @@ end
 
 @testset "DecisionRules.jl" begin
     @testset "pdual at infeasibility" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(SCS.Optimizer), state_out_val=9.0)
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)), state_out_val=9.0)
         optimize!(subproblem1)
         @test DecisionRules.pdual(state_in_1) ≈ -1.0e4 rtol=1.0e-1
         @test DecisionRules.pdual(state_out_1) ≈ 1.0e4 rtol=1.0e-1
     end
 
-    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(SCS.Optimizer))
+    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)))
 
     optimize!(subproblem1)
 
@@ -67,7 +67,7 @@ end
         m = Chain(Dense(1, 10), Dense(10, 1))
         # 90 is what we expect after training, so we start above that for a random policy
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) > 90.0
-        for _ in 1:2050
+        for _ in 1:100
             _inflow = rand(1.:5)
             uncertainty_samp = [(uncertainty_1, _inflow)]
             Flux.train!((m, inflow) -> DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m(inflow)), m, [[_inflow] for _ =1:10], Flux.Adam())

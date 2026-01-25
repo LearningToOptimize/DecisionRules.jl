@@ -129,8 +129,9 @@ function ChainRulesCore.rrule(::typeof(get_next_state),
             # Return cotangents for each primal argument, in order:
             #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target)
             return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
-        catch
+        catch e
             # In case of any error (e.g. non-DiffOpt model, missing parameters, etc.), return identity gradients 1 * Δy for state_in and state_out_target.
+            @warn "get_next_state rrule fallback triggered due to error: $e"
             d_state_in = ones(length(state_in)) .* Δy  # simple fallback: sum Δy and return for all inputs
             d_state_out_target = ones(length(state_out_target)) .* Δy
             return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)

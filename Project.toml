@@ -18,7 +18,18 @@ Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 
 [compat]
-julia = "1"
+julia = "~1.9"
+ChainRules = "1.72.6"
+ChainRulesCore = "1.25.2"
+DiffOpt = "0.5.4"
+FillArrays = "1.14.0"
+Flux = "0.14.21"
+JLD2 = "0.6.3"
+JuMP = "1.29.4"
+MathOptInterface = "1.48.0"
+ParametricOptInterface = "0.14.1"
+SCS = "2.0.2"
+Zygote = "0.6.77"
 
 [extras]
 CUDA_Runtime_jll = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"
