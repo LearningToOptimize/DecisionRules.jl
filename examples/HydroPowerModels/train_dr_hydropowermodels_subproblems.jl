@@ -37,10 +37,9 @@ formulation_file = formulation * ".mof.json"
 num_epochs=1
 num_batches=1000
 _num_train_per_batch=1
-dense = Flux.LSTM # RNN, Dense, LSTM
+# dense = Flux.LSTM # RNN, Dense, LSTM
 activation = sigmoid # tanh, DecisionRules.identity, relu
 layers = Int64[32, 32] # Int64[8, 8], Int64[]
-num_models = 1 # 1, num_stages
 ensure_feasibility = non_ensurance # ensure_feasibility_double_softplus
 optimizers= [Flux.Adam()] # Flux.Adam(0.01), Flux.Descent(0.1), Flux.RMSProp(0.00001, 0.001)
 pre_trained_model = nothing #joinpath(HydroPowerModels_dir, case_name, formulation, "models", "case3-ACPPowerModel-h48-2024-05-18T10:16:25.117.jld2")
@@ -70,8 +69,7 @@ lg = WandbLogger(
     config = Dict(
         "layers" => layers,
         "activation" => string(activation),
-        "num_models" => num_models,
-        "dense" => string(dense),
+        # "dense" => string(dense),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
         "training_method" => "subproblems"
@@ -84,23 +82,18 @@ function record_loss(iter, model, loss, tag)
 end
 
 # Define Model
-models = Chain(Dense(num_hydro+num_hydro, 64, sigmoid), 
+models = Chain(Dense(num_hydro+num_hydro, layers[1], sigmoid), 
     x -> reshape(x, :, 1), 
-    Flux.LSTM(64 => 64), 
+    Flux.LSTM(layers[1] => layers[2]),
     x -> x[:, end],
-    Dense(64, num_hydro)
+    Dense(layers[2], num_hydro)
 )
 
 # Load pretrained Model
 if !isnothing(pre_trained_model)
-    model = if num_models > 1
-        DecisionRules.make_single_network(models, num_hydro)
-    else
-        models
-    end
     model_save = JLD2.load(pre_trained_model)
     model_state = model_save["model_state"]
-    Flux.loadmodel!(model, model_state)
+    Flux.loadmodel!(models, model_state)
 end
 
 Random.seed!(8788)
