@@ -63,7 +63,8 @@ julia --project -e 'using Pkg; Pkg.test()'
 If you use DecisionRules.jl, please cite:
 ```
 @article{rosemberg2024two,
-  title={Two-Stage ML-Guided Decision Rules for Sequential Decision Making under Uncertainty},
+  title={Efficiently Training Deep-Learning Parametric
+policies using Lagrangian Duality},
   author={Rosemberg, Andrew and Street, Alexandre and Vallad{\~a}o, Davi M and Van Hentenryck, Pascal},
   journal={arXiv preprint arXiv:2405.14973},
   year={2024}
