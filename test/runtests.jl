@@ -7,6 +7,7 @@ using Zygote
 using Flux
 using Random
 using DiffOpt
+using ChainRules: @ignore_derivatives
 
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model())
     # set_attributes(subproblem, "output_flag" => false)
@@ -409,5 +410,269 @@ end
         Flux.reset!(policy_empty)
         output_empty = policy_empty(rand(Float32, n_uncertainty + n_state))
         @test length(output_empty) == n_output
+    end
+
+    @testset "Multiple Shooting" begin
+        # Test create_shooting_window! first (creates models needed for other tests)
+        @testset "create_shooting_window!" begin
+            Random.seed!(456)
+            
+            # Create 6 subproblems to test windowing with multiple windows
+            num_stages = 6
+            subproblems = Vector{JuMP.Model}(undef, num_stages)
+            state_params_in = Vector{Vector{Any}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+            
+            for t in 1:num_stages
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                @variable(subproblems[t], x[1:3] >= 0)
+                @variable(subproblems[t], state_in in MOI.Parameter(1.0))
+                @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
+                @variable(subproblems[t], state_out in MOI.Parameter(1.0))
+                @variable(subproblems[t], state_out_var)
+                @constraint(subproblems[t], sum(x) >= state_in + uncertainty)
+                @constraint(subproblems[t], state_out_var == sum(x[1:2]))
+                @constraint(subproblems[t], state_out_var >= state_out - 3.0)
+                @constraint(subproblems[t], state_out_var <= state_out + 3.0)
+                @objective(subproblems[t], Min, sum(x) + 5 * (state_out - state_out_var)^2)
+                
+                state_params_in[t] = [state_in]
+                state_params_out[t] = [(state_out, state_out_var)]
+                uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.3, 0.5, 0.7])]
+            end
+            
+            initial_state = [2.0]
+            
+            # Create a shooting window for stages 1-2
+            window_model = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            window_model, uncertainties_new = DecisionRules.create_shooting_window!(
+                window_model,
+                subproblems,
+                state_params_in,
+                state_params_out,
+                initial_state,
+                uncertainty_samples,
+                1,  # window_start
+                2   # window_size
+            )
+            
+            # Verify the window model was created
+            @test window_model !== nothing
+            @test length(uncertainties_new) == 2  # Only 2 stages in the window
+            
+            # Verify we can solve the window model
+            optimize!(window_model)
+            @test termination_status(window_model) in [MOI.OPTIMAL, MOI.ALMOST_OPTIMAL]
+            
+            # Create window for stages 3-4
+            window_model_2 = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            window_model_2, uncertainties_new_2 = DecisionRules.create_shooting_window!(
+                window_model_2,
+                subproblems,
+                state_params_in,
+                state_params_out,
+                initial_state,
+                uncertainty_samples,
+                3,  # window_start
+                2   # window_size
+            )
+            
+            @test window_model_2 !== nothing
+            @test length(uncertainties_new_2) == 2
+            optimize!(window_model_2)
+            @test termination_status(window_model_2) in [MOI.OPTIMAL, MOI.ALMOST_OPTIMAL]
+            
+            # Create window for stages 5-6
+            window_model_3 = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            window_model_3, uncertainties_new_3 = DecisionRules.create_shooting_window!(
+                window_model_3,
+                subproblems,
+                state_params_in,
+                state_params_out,
+                initial_state,
+                uncertainty_samples,
+                5,  # window_start
+                2   # window_size
+            )
+            
+            @test window_model_3 !== nothing
+            @test length(uncertainties_new_3) == 2
+            
+            # Test edge case: window extends beyond num_stages
+            window_model_edge = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            window_model_edge, uncertainties_edge = DecisionRules.create_shooting_window!(
+                window_model_edge,
+                subproblems,
+                state_params_in,
+                state_params_out,
+                initial_state,
+                uncertainty_samples,
+                5,  # window_start
+                5   # window_size (larger than remaining stages)
+            )
+            
+            # Should only include stages 5-6 (2 stages)
+            @test length(uncertainties_edge) == 2
+        end
+        
+        # Test predict_window_states
+        @testset "predict_window_states" begin
+            # Simple decision rule that adds uncertainty to state
+            simple_rule(x) = x[1:1] .+ x[2:2]  # state + uncertainty
+            
+            initial_state = Float32[0.0]
+            uncertainties = [Float32[1.0], Float32[2.0], Float32[3.0]]
+            
+            states = DecisionRules.predict_window_states(simple_rule, initial_state, uncertainties)
+            
+            # states[1] = initial = [0]
+            # states[2] = simple_rule([0, 1]) = [1]
+            # states[3] = simple_rule([1, 2]) = [3]
+            # states[4] = simple_rule([3, 3]) = [6]
+            @test length(states) == 4
+            @test states[1] ≈ [0.0f0]
+            @test states[2] ≈ [1.0f0]
+            @test states[3] ≈ [3.0f0]
+            @test states[4] ≈ [6.0f0]
+        end
+        
+        # Test gradients flow through predict_window_states
+        @testset "predict_window_states gradients" begin
+            # Use a simple neural network
+            m = Chain(Dense(2, 1, identity))
+            
+            initial_state = Float32[1.0]
+            uncertainties = [Float32[0.5], Float32[0.3]]
+            
+            loss, grads = Flux.withgradient(m) do model
+                states = DecisionRules.predict_window_states(model, initial_state, uncertainties)
+                sum(sum.(states))  # Simple loss to get gradients
+            end
+            
+            @test loss > 0
+            @test grads[1] !== nothing
+        end
+        
+        # Test simulate_window_stages with multiple windows each having multiple stages
+        @testset "simulate_window_stages with multiple windows" begin
+            Random.seed!(789)
+            
+            # Create 6 subproblems: 3 windows of 2 stages each
+            num_stages = 6
+            window_size = 2
+            num_windows = 3
+            
+            subproblems = Vector{JuMP.Model}(undef, num_stages)
+            state_params_in = Vector{Vector{Any}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+            
+            for t in 1:num_stages
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                @variable(subproblems[t], x[1:4] >= 0)
+                @variable(subproblems[t], state_in in MOI.Parameter(1.0))
+                @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
+                @variable(subproblems[t], state_out in MOI.Parameter(1.0))
+                @variable(subproblems[t], state_out_var)
+                @constraint(subproblems[t], sum(x) >= state_in + uncertainty)
+                @constraint(subproblems[t], state_out_var == sum(x[1:2]))
+                @constraint(subproblems[t], state_out_var >= state_out - 5.0)
+                @constraint(subproblems[t], state_out_var <= state_out + 5.0)
+                @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
+                
+                state_params_in[t] = [state_in]
+                state_params_out[t] = [(state_out, state_out_var)]
+                uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.2, 0.4, 0.6])]
+            end
+            
+            initial_state = [1.5]
+            
+            # Sample uncertainties for this test
+            sampled_uncertainties = [[(subproblems[t][:uncertainty], 0.4)] for t in 1:num_stages]
+            
+            # Test each window separately using simulate_window_stages
+            total_objective = 0.0
+            current_state = Float32.(initial_state)
+            
+            for w in 1:num_windows
+                window_start = (w - 1) * window_size + 1
+                window_end = w * window_size
+                
+                # Get window data
+                window_subproblems = subproblems[window_start:window_end]
+                window_state_params_in = state_params_in[window_start:window_end]
+                window_state_params_out = state_params_out[window_start:window_end]
+                window_uncertainties = sampled_uncertainties[window_start:window_end]
+                window_uncertainties_vec = [Float32[0.4] for _ in 1:window_size]
+                
+                # Predict states for this window using a simple decision rule
+                simple_rule(x) = x[2:2] .+ 0.5f0  # state_out = uncertainty + 0.5
+                window_states = DecisionRules.predict_window_states(simple_rule, current_state, window_uncertainties_vec)
+                
+                # Simulate this window
+                window_obj = DecisionRules.simulate_window_stages(
+                    window_subproblems,
+                    window_state_params_in,
+                    window_state_params_out,
+                    window_uncertainties,
+                    window_states
+                )
+                
+                @test window_obj > 0  # Each window should have positive objective
+                total_objective += window_obj
+                
+                # Get real state for next window from last stage's optimization result
+                if w < num_windows
+                    current_state = Float32[value(var) for (param, var) in window_state_params_out[end]]
+                end
+            end
+            
+            @test total_objective > 0  # Total objective across all windows should be positive
+            
+            # Test with neural network decision rule
+            nn_rule = Chain(Dense(2, 4, relu), Dense(4, 1))
+            
+            # Verify gradients flow through multiple windows
+            loss, grads = Flux.withgradient(nn_rule) do model
+                total = 0.0f0
+                curr_state = Float32.(initial_state)
+                
+                for w in 1:num_windows
+                    window_start = (w - 1) * window_size + 1
+                    window_end = w * window_size
+                    
+                    window_subproblems = subproblems[window_start:window_end]
+                    window_state_params_in = state_params_in[window_start:window_end]
+                    window_state_params_out = state_params_out[window_start:window_end]
+                    window_uncertainties = sampled_uncertainties[window_start:window_end]
+                    window_uncertainties_vec = [Float32[0.4] for _ in 1:window_size]
+                    
+                    # Predict states using the model
+                    window_states = DecisionRules.predict_window_states(model, curr_state, window_uncertainties_vec)
+                    
+                    # Simulate window
+                    window_obj = DecisionRules.simulate_window_stages(
+                        window_subproblems,
+                        window_state_params_in,
+                        window_state_params_out,
+                        window_uncertainties,
+                        window_states
+                    )
+                    
+                    total += window_obj
+                    
+                    # Get real state (stop gradients here)
+                    if w < num_windows
+                        curr_state = @ignore_derivatives Float32[value(var) for (param, var) in window_state_params_out[end]]
+                    end
+                end
+                
+                return total
+            end
+            
+            @test loss > 0
+            @test grads[1] !== nothing  # Gradients should flow through
+        end
     end
 end
