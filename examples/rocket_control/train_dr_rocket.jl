@@ -36,7 +36,7 @@ mkpath(model_dir)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 
-save_control = SaveBest(best_obj, model_path, 0.003)
+save_control = SaveBest(best_obj, model_path)
 
 train_multistage(models, final_state, det_equivalent, state_params_in, state_params_out, uncertainty_samples; 
     num_batches=10,
@@ -77,7 +77,7 @@ objective_values = [simulate_multistage(
     model_per_stage;
 ) for _ in 1:2]
 best_obj = mean(objective_values)
-# save_control = SaveBest(best_obj, model_path, 0.003)
+# save_control = SaveBest(best_obj, model_path)
 train_multistage(model_per_stage, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples; 
     num_batches=10,
     num_train_per_batch=1,

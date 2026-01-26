@@ -38,6 +38,7 @@ Manifest.toml
 *.yaml
 *.sbatch
 *.out
+*.h5
 
 *.cuts.json
 *subproblem*.json
@@ -47,3 +48,4 @@ Manifest.toml
 *.out.*
 examples/**/.CondaPkg/*
 *.bson
+*.err

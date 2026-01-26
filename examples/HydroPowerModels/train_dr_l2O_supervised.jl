@@ -103,7 +103,7 @@ end
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 
-save_control = SaveBest(100, model_path, 0.0003)
+save_control = SaveBest(100, model_path)
 
 lg = WandbLogger(
     project = "HydroPowerModels",

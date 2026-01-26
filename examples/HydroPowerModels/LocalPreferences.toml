@@ -1,0 +1,6 @@
+# Use pip instead of uv as the pip backend for CondaPkg
+# This is needed because uv requires libstdcxx-ng >=13, which is not available on this HPC system
+# The environment variable JULIA_CONDAPKG_PIP_BACKEND=pip also works
+
+[CondaPkg]
+pip_backend = "pip"

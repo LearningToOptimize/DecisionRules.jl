@@ -57,7 +57,7 @@ function read_inflow(file::String, nHyd::Int; num_stages=nothing)
     return vector_inflows, nCen, num_stages
 end
 
-function build_hydropowermodels(case_folder::AbstractString, subproblem_file::AbstractString; num_stages=nothing, penalty=nothing)
+function build_hydropowermodels(case_folder::AbstractString, subproblem_file::AbstractString; num_stages=nothing, penalty=nothing, penalty_l1=nothing, penalty_l2=nothing, optimizer=nothing)
     hydro_file = JSON.parsefile(joinpath(case_folder, "hydro.json"))["Hydrogenerators"]
     nHyd = length(hydro_file)
     vector_inflows, nCen, num_stages = read_inflow(joinpath(case_folder, "inflows.csv"), nHyd; num_stages=num_stages)
@@ -67,11 +67,15 @@ function build_hydropowermodels(case_folder::AbstractString, subproblem_file::Ab
     subproblems = Vector{JuMP.Model}(undef, num_stages)
     state_params_in = Vector{Vector{Any}}(undef, num_stages)
     state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-    uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector}}}(undef, num_stages)
+    uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
     
     for t in 1:num_stages
-        subproblems[t] = JuMP.read_from_file(joinpath(case_folder, subproblem_file))
-        norm_deficit, _deficit = create_deficit!(subproblems[t], nHyd; penalty=penalty)
+        subproblems[t] = JuMP.read_from_file(joinpath(case_folder, subproblem_file); use_nlp_block = false)
+        # Set optimizer if provided (for DiffOpt support)
+        if !isnothing(optimizer)
+            set_optimizer(subproblems[t], optimizer)
+        end
+        norm_deficit, _deficit = create_deficit!(subproblems[t], nHyd; penalty=penalty, penalty_l1=penalty_l1, penalty_l2=penalty_l2)
         # delete fix constraints
         for con in JuMP.all_constraints(subproblems[t], VariableRef, MOI.EqualTo{Float64})
             delete(subproblems[t], con)
