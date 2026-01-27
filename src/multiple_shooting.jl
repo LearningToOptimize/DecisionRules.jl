@@ -489,7 +489,7 @@ function train_multiple_shooting(
                 @ignore_derivatives Flux.reset!(m)
 
                 uncertainty_sample = uncertainty_sampler()
-                uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
+                uncertainties_vec = [[Float32.(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
 
                 objective += simulate_multiple_shooting(
                     windows, m, initial_state_f32, uncertainty_sample, uncertainties_vec
