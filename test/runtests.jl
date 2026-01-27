@@ -1026,10 +1026,10 @@ end
 
             states_stage = Vector{Vector{Float64}}(undef, num_stages + 1)
             states_stage[1] = initial_state
-            decisions_stage = Vector{Float64}(undef, num_stages)
+            # decisions_stage = Vector{Float64}(undef, num_stages)
             for t in 1:num_stages
                 states_stage[t + 1] = [value(state_out_s[t][1][2])]
-                decisions_stage[t] = value(subproblems_s[t][:x])
+                # decisions_stage[t] = value(subproblems_s[t][:x])
             end
 
             # Deterministic equivalent
@@ -1113,8 +1113,8 @@ end
 
             @test length(states_stage) == length(states_det) == length(states_shoot)
             for t in 1:length(states_stage)
-                @test states_stage[t][1] ≈ states_det[t][1] atol=1.0e-4
-                @test states_stage[t][1] ≈ states_shoot[t][1] atol=1.0e-4   
+                @test states_stage[t][1] ≈ states_det[t][1] rtol=1.0e-4
+                @test states_stage[t][1] ≈ states_shoot[t][1] rtol=1.0e-4   
             end
 
             @test obj_stage ≈ obj_det rtol=1.0e-4
