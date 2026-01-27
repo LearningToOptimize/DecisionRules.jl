@@ -919,6 +919,50 @@ end
             @test obj > 0
         end
 
+        @testset "train_multiple_shooting samples are ignored by AD" begin
+            num_stages = 1
+            subproblems = Vector{JuMP.Model}(undef, num_stages)
+            state_params_in = Vector{Vector{Any}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+
+            subproblems[1] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            @variable(subproblems[1], x)
+            @variable(subproblems[1], state_in in MOI.Parameter(0.0))
+            @variable(subproblems[1], uncertainty in MOI.Parameter(0.0))
+            @variable(subproblems[1], state_out in MOI.Parameter(0.0))
+            @variable(subproblems[1], state_out_var)
+            @constraint(subproblems[1], x == state_in + uncertainty)
+            @constraint(subproblems[1], state_out_var == x)
+            @constraint(subproblems[1], state_out_var == state_out)
+            @objective(subproblems[1], Min, x)
+
+            state_params_in[1] = [state_in]
+            state_params_out[1] = [(state_out, state_out_var)]
+            uncertainty_samples[1] = [(uncertainty, [0.1, 0.2, 0.3])]
+
+            # Model that returns uncertainty + state (inputs are [uncertainty; state])
+            model = Dense(2, 1; bias=false)
+            model.weight .= 1.0f0
+
+            DecisionRules.train_multiple_shooting(
+                model,
+                [1.0],
+                subproblems,
+                state_params_in,
+                state_params_out,
+                () -> uncertainty_samples;
+                window_size=1,
+                num_batches=1,
+                num_train_per_batch=1,
+                optimizer=Flux.Descent(0.0),
+                record_loss=(iter, m, loss, tag) -> false,
+                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
+            )
+
+            @test true  # no mutation error during AD
+        end
+
         @testset "consistent_state_paths_across_methods" begin
             function build_consistent_subproblems(num_stages)
                 subproblems = Vector{JuMP.Model}(undef, num_stages)
