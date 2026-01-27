@@ -466,6 +466,11 @@ function train_multiple_shooting(
 
     # Build windows once. We only need the uncertainty *structure* here.
     base_uncertainty = uncertainty_sampler()
+    # If uncertainty values are vectors (sample sets), draw realized values per iteration.
+    has_sample_sets = !isempty(base_uncertainty) &&
+        !isempty(base_uncertainty[1]) &&
+        (base_uncertainty[1][1][2] isa AbstractVector)
+    draw_uncertainty = has_sample_sets ? (() -> DecisionRules.sample(base_uncertainty)) : uncertainty_sampler
     windows = setup_shooting_windows(
         subproblems,
         state_params_in,
@@ -488,8 +493,8 @@ function train_multiple_shooting(
             for _ in 1:num_train_per_batch
                 @ignore_derivatives Flux.reset!(m)
 
-                uncertainty_sample = uncertainty_sampler()
-                uncertainties_vec = [Float32.(vcat([u[2] for u in stage_u]...)) for stage_u in uncertainty_sample]
+                uncertainty_sample = draw_uncertainty()
+                uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
 
                 objective += simulate_multiple_shooting(
                     windows, m, initial_state_f32, uncertainty_sample, uncertainties_vec

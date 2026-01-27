@@ -838,7 +838,7 @@ end
 
                 state_params_in[t] = [state_in]
                 state_params_out[t] = [(state_out, state_out_var)]
-                uncertainty_samples[t] = [(u1, [0.1 * t]), (u2, [0.2 * t])]
+                uncertainty_samples[t] = [(u1, [0.1, 0.2, 0.3]), (u2, [0.2, 0.4, 0.6])]
             end
 
             initial_state = [1.0]
@@ -856,7 +856,7 @@ end
             decision_rule(x) = [x[3] + x[1] + x[2]]
 
             uncertainty_sample = DecisionRules.sample(uncertainty_samples)
-            uncertainties_vec = [Float32.(vcat([u[2] for u in stage_u]...)) for stage_u in uncertainty_sample]
+            uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
 
             obj = DecisionRules.simulate_multiple_shooting(
                 windows,
