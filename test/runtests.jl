@@ -866,6 +866,54 @@ end
             @test grads[1] !== nothing  # Gradients should flow across windows
         end
 
+        @testset "no extra solve inside AD tape" begin
+            num_stages = 2
+            subproblems = Vector{JuMP.Model}(undef, num_stages)
+            state_params_in = Vector{Vector{Any}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+
+            for t in 1:num_stages
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                @variable(subproblems[t], x >= 0)
+                @variable(subproblems[t], state_in in MOI.Parameter(1.0))
+                @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
+                @variable(subproblems[t], state_out in MOI.Parameter(1.0))
+                @variable(subproblems[t], state_out_var)
+                @constraint(subproblems[t], x >= state_in + uncertainty)
+                @constraint(subproblems[t], state_out_var == x)
+                @constraint(subproblems[t], state_out_var == state_out)
+                @objective(subproblems[t], Min, x)
+
+                state_params_in[t] = [state_in]
+                state_params_out[t] = [(state_out, state_out_var)]
+                uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.2, 0.4, 0.6])]
+            end
+
+            windows = DecisionRules.setup_shooting_windows(
+                subproblems,
+                state_params_in,
+                state_params_out,
+                [1.0],
+                uncertainty_samples;
+                window_size=2,
+                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
+            )
+
+            uncertainty_sample = DecisionRules.sample(uncertainty_samples)
+            uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
+
+            model = Chain(Dense(2, 1, identity))
+            DecisionRules._reset_solve_window_ad_calls!()
+            Flux.withgradient(model) do m
+                DecisionRules.simulate_multiple_shooting(
+                    windows, m, Float32[1.0], uncertainty_sample, uncertainties_vec
+                )
+            end
+
+            @test DecisionRules._get_solve_window_ad_calls() == length(windows)
+        end
+
         @testset "multiple_shooting_vector_uncertainties" begin
             num_stages = 2
             subproblems = Vector{JuMP.Model}(undef, num_stages)
@@ -1070,6 +1118,15 @@ end
                 window_size=6,
                 optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
             )
+            # Variable count checks
+            stage_var_count = sum(length.(all_variables.(subproblems_s)))
+            det_var_count = length(all_variables(det_model))
+            windows_var_count = sum(length(all_variables(w.model)) for w in windows)
+            state_dim = length(state_in_s[1])
+            expected_det = stage_var_count - (num_stages - 1) * state_dim
+            expected_windows = stage_var_count - (num_stages - length(windows)) * state_dim
+            @test det_var_count == expected_det
+            @test windows_var_count == expected_windows
             uncertainties_w = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
                                for (t, stage_u) in enumerate(uncertainty_samples_w)]
             uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainties_w]

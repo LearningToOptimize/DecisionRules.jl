@@ -23,58 +23,31 @@ model* to obtain vector-Jacobian products w.r.t. window start parameters and all
 target parameters.
 
 Assumptions:
-- `deterministic_equivalent!(window_model, window_subproblems, window_state_params_in,
+- `windows_equivalent!(window_model, window_subproblems, window_state_params_in,
    window_state_params_out, initial_state, window_uncertainties)` builds the window model
-  and updates `window_state_params_in/out` to refer to parameters/variables in the new model.
+  without mutating the original subproblems and updates `window_state_params_in/out`
+  to refer to parameters/variables in the new model.
 - `window_state_params_out[t]` is a vector of tuples (target_param, realized_state_var) at stage t.
 """
 
 using Base: accumulate
+import Zygote
+
+# Track solve_window calls inside AD tape to detect accidental extra solves.
+const _solve_window_ad_calls_ref = Base.RefValue{Int}(0)
+
+function _reset_solve_window_ad_calls!()
+    _solve_window_ad_calls_ref[] = 0
+    return nothing
+end
+
+function _get_solve_window_ad_calls()
+    return _solve_window_ad_calls_ref[]
+end
 
 #=============================================================================
  Helpers
 =============================================================================#
-
-"""
-    ensure_state_in_is_parameter!(m, state_in_params)
-
-Ensure window-start state entries are MOI.Parameter variables so `set_parameter_value`
-works on window models. If an entry is not a parameter, create a new parameter and
-tie it to the original variable with an equality constraint.
-"""
-function ensure_state_in_is_parameter!(m::JuMP.Model, state_in_params::Vector)
-    for i in eachindex(state_in_params)
-        v = state_in_params[i]
-        if v isa JuMP.VariableRef && !JuMP.is_parameter(v)
-            p = @variable(m; base_name = "shooting_state_in[$i]", set = MOI.Parameter(0.0))
-            @constraint(m, v == p)
-            state_in_params[i] = p
-        end
-    end
-    return state_in_params
-end
-
-"""
-    ensure_target_params_are_parameters!(m, window_state_out_params)
-
-Ensure the target parameters in window_state_out_params are MOI.Parameter variables.
-If a target is not a parameter, create a new parameter and tie it to the original
-variable with an equality constraint.
-"""
-function ensure_target_params_are_parameters!(m::JuMP.Model, window_state_out_params)
-    for t in eachindex(window_state_out_params)
-        stage_pairs = window_state_out_params[t]
-        for i in eachindex(stage_pairs)
-            target_param, realized_var = stage_pairs[i]
-            if target_param isa JuMP.VariableRef && !JuMP.is_parameter(target_param)
-                p = @variable(m; base_name = "shooting_target[$t,$i]", set = MOI.Parameter(0.0))
-                @constraint(m, target_param == p)
-                stage_pairs[i] = (p, realized_var)
-            end
-        end
-    end
-    return window_state_out_params
-end
 
 """
     extract_uncertainty_params(window_uncertainties_new)
@@ -99,6 +72,175 @@ function extract_uncertainty_params(window_uncertainties)
         # assume tuples (param, something)
         return [[u[1] for u in stage_u] for stage_u in window_uncertainties]
     end
+end
+
+function _param_init_value(src::JuMP.VariableRef)
+    if JuMP.is_parameter(src)
+        try
+            return JuMP.parameter_value(src)
+        catch
+            return 0.0
+        end
+    end
+    return 0.0
+end
+
+function _as_float64_vec(val)
+    if val isa AbstractVector
+        return val isa Vector{Float64} ? val : Float64.(val)
+    end
+    return [Float64(val)]
+end
+
+function _create_like_variable(
+    m::JuMP.Model,
+    src::JuMP.VariableRef,
+    t::Int;
+    force_parameter::Bool=false,
+)
+    if force_parameter || JuMP.is_parameter(src)
+        dest = @variable(m, set=MOI.Parameter(_param_init_value(src)))
+    else
+        dest = @variable(m)
+    end
+    DecisionRules.var_set_name!(src, dest, t)
+    return dest
+end
+
+"""
+    windows_equivalent!(model, subproblems, state_params_in, state_params_out, initial_state, uncertainties)
+
+Create a window equivalent without mutating the original subproblems and without
+adding extra variables/constraints beyond those already present in the subproblems.
+"""
+function windows_equivalent!(
+    model::JuMP.Model,
+    subproblems::Vector{JuMP.Model},
+    state_params_in::Vector,
+    state_params_out::Vector,
+    initial_state::Vector{Float64},
+    uncertainties,
+)
+    num_stages = length(subproblems)
+    set_objective_sense(model, objective_sense(subproblems[1]))
+
+    var_src_to_dest = Dict{VariableRef, VariableRef}()
+    state_in_new = Vector{Vector{Any}}(undef, num_stages)
+    state_out_new = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+    uncertainties_new = Vector{Vector{Tuple{Any, Vector{Float64}}}}(undef, num_stages)
+
+    for t in 1:num_stages
+        subproblem = subproblems[t]
+
+        state_in_vars = [v for v in state_params_in[t] if v isa VariableRef]
+        state_out_targets = [pair[1] for pair in state_params_out[t] if pair[1] isa VariableRef]
+        state_out_realized = [pair[2] for pair in state_params_out[t]]
+
+        allvars = all_variables(subproblem)
+        allvars = setdiff(allvars, state_in_vars)
+        allvars = setdiff(allvars, state_out_targets)
+        allvars = setdiff(allvars, state_out_realized)
+
+        for src in allvars
+            if !haskey(var_src_to_dest, src)
+                dest = _create_like_variable(model, src, t)
+                var_src_to_dest[src] = dest
+            end
+        end
+
+        # state_out params (target param + realized var)
+        state_out_new[t] = Vector{Tuple{Any, VariableRef}}(undef, length(state_params_out[t]))
+        for (i, pair) in enumerate(state_params_out[t])
+            target_src, realized_src = pair
+            dest_realized = _create_like_variable(model, realized_src, t; force_parameter=false)
+            var_src_to_dest[realized_src] = dest_realized
+
+            if target_src isa VariableRef
+                dest_target = _create_like_variable(model, target_src, t; force_parameter=true)
+                var_src_to_dest[target_src] = dest_target
+                state_out_new[t][i] = (dest_target, dest_realized)
+            else
+                state_out_new[t][i] = (target_src, dest_realized)
+            end
+        end
+
+        # state_in params
+        state_in_new[t] = Vector{Any}(undef, length(state_params_in[t]))
+        if t == 1
+            for (i, src) in enumerate(state_params_in[t])
+                if src isa VariableRef
+                    dest = _create_like_variable(model, src, t; force_parameter=true)
+                    var_src_to_dest[src] = dest
+                    state_in_new[t][i] = dest
+                else
+                    state_in_new[t][i] = src
+                end
+            end
+        else
+            for (i, src) in enumerate(state_params_in[t])
+                state_in_new[t][i] = state_out_new[t - 1][i][2]
+                if src isa VariableRef
+                    var_src_to_dest[src] = state_in_new[t][i]
+                end
+            end
+        end
+
+        # uncertainties
+        uncertainties_new[t] = Vector{Tuple{Any, Vector{Float64}}}(undef, length(uncertainties[t]))
+        for (i, tup) in enumerate(uncertainties[t])
+            u_src, u_vals = tup
+            if u_src isa VariableRef
+                dest = get(var_src_to_dest, u_src, nothing)
+                if dest === nothing
+                    dest = _create_like_variable(model, u_src, t; force_parameter=true)
+                    var_src_to_dest[u_src] = dest
+                end
+                uncertainties_new[t][i] = (dest, _as_float64_vec(u_vals))
+            else
+                uncertainties_new[t][i] = (u_src, _as_float64_vec(u_vals))
+            end
+        end
+
+        # constraints
+        cons_to_cons = Dict{Any, Any}()
+        for con in JuMP.all_constraints(subproblem; include_variable_in_set_constraints=true)
+            obj = JuMP.constraint_object(con)
+            if obj.func isa VariableRef && obj.set isa MOI.Parameter
+                continue
+            end
+            c = DecisionRules.create_constraint(model, obj, var_src_to_dest)
+            cons_to_cons[con] = c
+        end
+
+        # map any constraint-based targets/state_in/uncertainties
+        for i in eachindex(state_out_new[t])
+            target = state_out_new[t][i][1]
+            if target isa ConstraintRef && haskey(cons_to_cons, target)
+                state_out_new[t][i] = (cons_to_cons[target], state_out_new[t][i][2])
+            end
+        end
+        if t == 1
+            for i in eachindex(state_in_new[t])
+                src = state_in_new[t][i]
+                if src isa ConstraintRef && haskey(cons_to_cons, src)
+                    state_in_new[t][i] = cons_to_cons[src]
+                end
+            end
+        end
+        for i in eachindex(uncertainties_new[t])
+            src = uncertainties_new[t][i][1]
+            if src isa ConstraintRef && haskey(cons_to_cons, src)
+                uncertainties_new[t][i] = (cons_to_cons[src], uncertainties_new[t][i][2])
+            end
+        end
+
+        # objective
+        current = JuMP.objective_function(model)
+        sub_obj = DecisionRules.copy_and_replace_variables(JuMP.objective_function(subproblem), var_src_to_dest)
+        JuMP.set_objective_function(model, current + sub_obj)
+    end
+
+    return model, state_in_new, state_out_new, uncertainties_new
 end
 
 """
@@ -149,7 +291,7 @@ function solve_window(
     window_state_in_params::AbstractVector,
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::AbstractVector{<:AbstractVector},
+    targets::AbstractVector,
 )
     num_stages = length(window_state_out_params)
 
@@ -162,9 +304,10 @@ function solve_window(
     @inbounds for t in 1:num_stages
         stage_pairs = window_state_out_params[t]
         tgt = targets[t]
+        tgt_vec = tgt isa AbstractVector ? tgt : (tgt,)
         @inbounds for i in eachindex(stage_pairs)
             target_param = stage_pairs[i][1]
-            set_parameter_value(target_param, tgt[i])
+            set_parameter_value(target_param, tgt_vec[i])
         end
     end
 
@@ -193,7 +336,7 @@ function ChainRulesCore.rrule(
     window_state_in_params::AbstractVector,
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::AbstractVector{<:AbstractVector},
+    targets::AbstractVector,
 )
     obj = solve_window(window_model, window_state_in_params, window_state_out_params, s_in, targets)
     @assert JuMP.owner_model(window_state_in_params[1]) === window_model "window_model must be DiffOpt-enabled"
@@ -222,7 +365,7 @@ function get_last_realized_state(
     window_state_in_params::AbstractVector,
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::AbstractVector{<:AbstractVector},
+    targets::AbstractVector,
 )
 
     last_stage = window_state_out_params[end]
@@ -249,7 +392,7 @@ function ChainRulesCore.rrule(
     window_state_in_params::AbstractVector,
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::AbstractVector{<:AbstractVector},
+    targets::AbstractVector,
 )
     s_out = get_last_realized_state(window_model, window_state_in_params, window_state_out_params, s_in, targets)
 
@@ -362,9 +505,11 @@ function setup_shooting_windows(
             set_optimizer(window_model, optimizer_factory)
         end
 
-        # Build deterministic equivalent window model.
-        # This is expected to mutate window_state_params_in/out to refer to params/vars in window_model.
-        window_model, window_uncertainties_new = deterministic_equivalent!(
+        # Build window equivalent model without mutating the originals.
+        window_model,
+        window_state_params_in,
+        window_state_params_out,
+        window_uncertainties_new = windows_equivalent!(
             window_model,
             window_subproblems,
             window_state_params_in,
@@ -375,8 +520,6 @@ function setup_shooting_windows(
 
         # Only first stage has separate state_in params
         state_in_params = window_state_params_in[1]
-        ensure_state_in_is_parameter!(window_model, state_in_params)
-        ensure_target_params_are_parameters!(window_model, window_state_params_out)
 
         uncertainty_params = extract_uncertainty_params(window_uncertainties_new)
 
@@ -516,9 +659,9 @@ function train_multiple_shooting(
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
 
         objective = 0.0
-        eval_loss = 0.0
 
         grads = Flux.gradient(model) do m
+            objective = 0.0
             for _ in 1:num_train_per_batch
                 @ignore_derivatives Flux.reset!(m)
 
@@ -528,35 +671,36 @@ function train_multiple_shooting(
                 objective += simulate_multiple_shooting(
                     windows, m, initial_state_f32, uncertainty_sample, uncertainties_vec
                 )
-
-                # evaluation metric (no deficit)
-                eval_loss += @ignore_derivatives begin
-                    # windows already contain the window models; compute metric by summing each window model's
-                    # deficit-free objective after a forward pass
-                    total = 0.0
-                    current_state = initial_state_f32
-                    for win in windows
-                        # set uncertainties for this metric pass
-                        set_window_uncertainties!(win, uncertainty_sample)
-
-                        win_range = win.stage_range
-                        win_uvec = uncertainties_vec[win_range]
-                        targs = predict_window_targets(m, current_state, win_uvec)
-
-                        obj = solve_window(
-                            win.model, win.state_in_params, win.state_out_params, current_state, targs
-                        )
-                        current_state = get_last_realized_state(
-                            win.model, win.state_in_params, win.state_out_params, current_state, targs
-                        )
-                        total += get_objective_no_target_deficit(win.model)
-                    end
-                    total
-                end
             end
             objective /= num_train_per_batch
-            eval_loss /= num_train_per_batch
             return objective
+        end
+
+        eval_loss = @ignore_derivatives begin
+            total = 0.0
+            for _ in 1:num_train_per_batch
+                Flux.reset!(model)
+                uncertainty_sample = draw_uncertainty()
+                uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
+
+                current_state = initial_state_f32
+                for win in windows
+                    set_window_uncertainties!(win, uncertainty_sample)
+
+                    win_range = win.stage_range
+                    win_uvec = uncertainties_vec[win_range]
+                    targs = predict_window_targets(model, current_state, win_uvec)
+
+                    solve_window(
+                        win.model, win.state_in_params, win.state_out_params, current_state, targs
+                    )
+                    current_state = get_last_realized_state(
+                        win.model, win.state_in_params, win.state_out_params, current_state, targs
+                    )
+                    total += get_objective_no_target_deficit(win.model)
+                end
+            end
+            total / num_train_per_batch
         end
 
         record_loss(iter, model, eval_loss, "metrics/loss") && break
