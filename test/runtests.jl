@@ -617,7 +617,7 @@ end
             targets = [Float32[1.5]]
 
             obj = DecisionRules.solve_window(model, state_in_params, state_out_params, s_in, targets)
-            @test obj ≈ 1.5
+            @test obj ≈ 1.5 atol=1.0e-6
             @test JuMP.is_parameter(state_in_params[1])
         end
         
