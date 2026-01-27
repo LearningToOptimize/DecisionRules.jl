@@ -155,10 +155,16 @@ function ChainRulesCore.rrule(
     targets::Vector{<:AbstractVector},
 )
     obj = solve_window(window_model, window_state_in_params, window_state_out_params, s_in, targets)
+    @assert JuMP.owner_model(window_state_in_params[1]) === window_model "window_model must be DiffOpt-enabled"
+    @assert JuMP.owner_model(window_state_out_params[1][1][1]) === window_model "window_model must be DiffOpt-enabled"
+    dual_s_in = pdual.(window_state_in_params)
+    dual_targets = [pdual.([s[1] for s in stage_pairs]) for stage_pairs in window_state_out_params]
 
     function pullback(Δobj_val)
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δobj_val * pdual.(window_state_in_params), 
-                [Δobj_val * pdual.([s[1] for s in stage_pairs]) for stage_pairs in window_state_out_params]...)
+        Δobj = (Δobj_val isa NoTangent || Δobj_val isa ZeroTangent) ? 0.0 : float(Δobj_val)
+        d_s_in = Δobj .* dual_s_in
+        d_targets = Δobj .* dual_targets
+        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_s_in, d_targets)
     end
 
     return obj, pullback
@@ -209,7 +215,7 @@ function ChainRulesCore.rrule(
     function pullback(Δs_out)
 
         Δs_out_vec =
-            (Δs_out isa NoTangent || Δs_out isa ZeroTangent) ? zeros(Float32, length(Δs_out)) : Float32.(collect(Δs_out))
+            (Δs_out isa NoTangent || Δs_out isa ZeroTangent) ? zeros(Float32, length(s_out)) : Float32.(collect(Δs_out))
 
         num_stages = length(window_state_out_params)
 
@@ -245,7 +251,7 @@ function ChainRulesCore.rrule(
 
         DiffOpt.empty_input_sensitivities!(window_model)
 
-        return (NoTangent(), NoTangent(), NoTangent(), d_s_in, d_targets)
+        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_s_in, d_targets)
     end
 
     return s_out, pullback
@@ -261,6 +267,19 @@ struct WindowData
     state_out_params::Vector{Vector{Tuple{Any, VariableRef}}} # per-stage (target_param, realized_var)
     uncertainty_params::Vector{Vector{VariableRef}}       # per-stage uncertainty parameters (in the window model)
     stage_range::UnitRange{Int}                           # global stages covered by this window
+end
+
+"""
+ChainRulesCore.rrule(::typeof(set_window_uncertainties!), window::WindowData, uncertainty_sample)
+
+Declare set_window_uncertainties! as non-differentiable (mutates solver state).
+"""
+ChainRulesCore.rrule(::typeof(set_window_uncertainties!), window::WindowData, uncertainty_sample) = begin
+    set_window_uncertainties!(window, uncertainty_sample)
+    function pullback(::Any)
+        return (NoTangent(), NoTangent(), NoTangent())
+    end
+    return nothing, pullback
 end
 
 """
@@ -386,7 +405,7 @@ function simulate_multiple_shooting(
         targets = predict_window_targets(decision_rule, current_real_state, window_uncertainties_vec)
 
         # Set sampled uncertainty values into the window model (parameters in window model)
-        set_window_uncertainties!(window, uncertainty_sample)
+        @ignore_derivatives set_window_uncertainties!(window, uncertainty_sample)
 
         # Solve window
         window_obj = solve_window(
