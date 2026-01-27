@@ -45,6 +45,25 @@ function _get_solve_window_ad_calls()
     return _solve_window_ad_calls_ref[]
 end
 
+function _print_window_status_and_params(window, status; context::AbstractString="")
+    header = isempty(context) ? "solve_window status" : "solve_window status ($context)"
+    println("[$header] status=$(status) stage_range=$(window.stage_range)")
+    params = [v for v in all_variables(window.model) if JuMP.is_parameter(v)]
+    sort!(params, by=JuMP.name)
+    for v in params
+        val = try
+            JuMP.parameter_value(v)
+        catch
+            try
+                value(v)
+            catch
+                missing
+            end
+        end
+        println("  ", JuMP.name(v), " = ", val)
+    end
+end
+
 #=============================================================================
  Helpers
 =============================================================================#
@@ -601,6 +620,12 @@ function simulate_multiple_shooting(
             current_real_state,
             targets,
         )
+        @ignore_derivatives begin
+            status = termination_status(window.model)
+            if !(status in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED))
+                _print_window_status_and_params(window, status; context="simulate_multiple_shooting")
+            end
+        end
 
         realized_state = get_last_realized_state(window.model,
             window.state_in_params,
@@ -694,6 +719,12 @@ function train_multiple_shooting(
                     solve_window(
                         win.model, win.state_in_params, win.state_out_params, current_state, targs
                     )
+                    @ignore_derivatives begin
+                        status = termination_status(win.model)
+                        if !(status in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED))
+                            _print_window_status_and_params(win, status; context="train_multiple_shooting")
+                        end
+                    end
                     current_state = get_last_realized_state(
                         win.model, win.state_in_params, win.state_out_params, current_state, targs
                     )
