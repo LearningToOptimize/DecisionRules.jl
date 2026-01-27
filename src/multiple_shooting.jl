@@ -478,22 +478,18 @@ end
 =============================================================================#
 
 """
-    train_multiple_shooting(model, initial_state, subproblems, state_params_in, state_params_out,
-                            uncertainty_sampler; window_size, ...)
+    train_multiple_shooting(model, initial_state, windows, uncertainty_sampler; ...)
 
 This mirrors your other training loops:
-- Build window models once (reused across iterations).
+- Reuse pre-built window models.
 - For each SGD step, sample uncertainties, build uncertainties_vec for the policy,
   evaluate simulate_multiple_shooting, and update parameters.
 """
 function train_multiple_shooting(
     model,
     initial_state::Vector{<:Real},
-    subproblems::Vector{JuMP.Model},
-    state_params_in,
-    state_params_out,
+    windows::Vector{WindowData},
     uncertainty_sampler;
-    window_size::Int=4,
     num_batches::Int=100,
     num_train_per_batch::Int=32,
     optimizer=Flux.Adam(0.01),
@@ -503,26 +499,16 @@ function train_multiple_shooting(
         return false
     end,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
-    optimizer_factory=nothing,
 )
     opt_state = Flux.setup(optimizer, model)
 
-    # Build windows once. We only need the uncertainty *structure* here.
+    # We only need the uncertainty *structure* here.
     base_uncertainty = uncertainty_sampler()
     # If uncertainty values are vectors (sample sets), draw realized values per iteration.
     has_sample_sets = !isempty(base_uncertainty) &&
         !isempty(base_uncertainty[1]) &&
         (base_uncertainty[1][1][2] isa AbstractVector)
     draw_uncertainty = has_sample_sets ? (() -> DecisionRules.sample(base_uncertainty)) : uncertainty_sampler
-    windows = setup_shooting_windows(
-        subproblems,
-        state_params_in,
-        state_params_out,
-        Float64.(initial_state),
-        base_uncertainty;
-        window_size=window_size,
-        optimizer_factory=optimizer_factory,
-    )
 
     initial_state_f32 = Float32.(initial_state)
 

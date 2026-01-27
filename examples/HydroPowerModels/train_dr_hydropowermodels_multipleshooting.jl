@@ -139,11 +139,8 @@ for iter in 1:num_epochs
     train_multiple_shooting(
         models,
         initial_state,
-        subproblems,
-        state_params_in,
-        state_params_out,
+        windows,
         () -> uncertainty_samples;
-        window_size=window_size,
         num_batches=num_batches,
         num_train_per_batch=num_train_per_batch,
         optimizer=optimizers[floor(Int, min(iter, length(optimizers)))],
@@ -155,8 +152,7 @@ for iter in 1:num_epochs
             end
             return record_loss(iter, model, loss, tag)
         end,
-        adjust_hyperparameters=adjust_hyperparameters,
-        optimizer_factory=diff_optimizer
+        adjust_hyperparameters=adjust_hyperparameters
     )
 end
 

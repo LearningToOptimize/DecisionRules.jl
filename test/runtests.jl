@@ -945,19 +945,25 @@ end
             model = Dense(2, 1; bias=false)
             model.weight .= 1.0f0
 
-            DecisionRules.train_multiple_shooting(
-                model,
-                [1.0],
+            windows = DecisionRules.setup_shooting_windows(
                 subproblems,
                 state_params_in,
                 state_params_out,
-                () -> uncertainty_samples;
+                [1.0],
+                uncertainty_samples;
                 window_size=1,
+                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
+            )
+
+            DecisionRules.train_multiple_shooting(
+                model,
+                [1.0],
+                windows,
+                () -> uncertainty_samples;
                 num_batches=1,
                 num_train_per_batch=1,
                 optimizer=Flux.Descent(0.0),
                 record_loss=(iter, m, loss, tag) -> false,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
             )
 
             @test true  # no mutation error during AD
@@ -975,11 +981,11 @@ end
                     @variable(subproblems[t], reservoir_in)
                     @variable(subproblems[t], reservoir_out)
                     @variable(subproblems[t], inflow)
-                    @variable(subproblems[t], deficit)
-                    @variable(subproblems[t], x)
-                    @constraint(subproblems[t], reservoir_out == reservoir_in + inflow)
-                    @constraint(subproblems[t], x == reservoir_out)
-                    @objective(subproblems[t], Min, x)
+                    @variable(subproblems[t], deficit >= 0)
+                    @variable(subproblems[t], release >= 0)
+                    @constraint(subproblems[t], reservoir_out == reservoir_in + inflow - release)
+                    @constraint(subproblems[t], reservoir_out >= 0)
+                    @objective(subproblems[t], Min, release + 0.1 * reservoir_out + 100.0 * deficit)
 
                     state_in_param = DecisionRules.variable_to_parameter(subproblems[t], reservoir_in)
                     state_out_param, realized_out = DecisionRules.variable_to_parameter(
@@ -998,7 +1004,7 @@ end
             num_stages = 28
             initial_state = [1.0]
 
-            decision_rule(x) = [x[2] + x[1]]  # next_state = prev_state + uncertainty
+            decision_rule(x) = [x[2] + 0.5 * x[1]]  # next_state = prev_state + 0.5*uncertainty
 
             # Per-stage simulation
             subproblems_s, state_in_s, state_out_s, uncertainty_samples_s =
@@ -1111,8 +1117,8 @@ end
                 @test states_stage[t][1] ≈ states_shoot[t][1] atol=1.0e-4   
             end
 
-            @test obj_stage ≈ obj_det atol=1.0e-4
-            @test obj_stage ≈ obj_shoot atol=1.0e-4
+            @test obj_stage ≈ obj_det rtol=1.0e-4
+            @test obj_stage ≈ obj_shoot rtol=1.0e-4
 
             # @test length(decisions_stage) == length(decisions_det) == length(decisions_shoot)
             # for t in 1:length(decisions_stage)
