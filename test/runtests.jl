@@ -640,12 +640,13 @@ end
             for param in window.uncertainty_params[1]
                 set_parameter_value(param, 0.1)
             end
+            target_val = Float32[1.0 + 0.1]
             obj = DecisionRules.solve_window(
                 window.model,
                 window.state_in_params,
                 window.state_out_params,
                 Float32[1.0],
-                [Float32[1.0]]
+                [target_val]
             )
             @test isfinite(obj)
         end
