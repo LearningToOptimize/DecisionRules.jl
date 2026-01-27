@@ -124,10 +124,10 @@ Returns
 """
 function solve_window(
     window_model::JuMP.Model,
-    window_state_in_params::Vector,
-    window_state_out_params::Vector{Vector{Tuple{Any, VariableRef}}},
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::Vector{<:AbstractVector},
+    targets::AbstractVector{<:AbstractVector},
 )
     num_stages = length(window_state_out_params)
 
@@ -171,10 +171,10 @@ Given cotangents (Δobj_val), we:
 function ChainRulesCore.rrule(
     ::typeof(solve_window),
     window_model::JuMP.Model,
-    window_state_in_params::Vector,
-    window_state_out_params::Vector{Vector{Tuple{Any, VariableRef}}},
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::Vector{<:AbstractVector},
+    targets::AbstractVector{<:AbstractVector},
 )
     obj = solve_window(window_model, window_state_in_params, window_state_out_params, s_in, targets)
     @assert JuMP.owner_model(window_state_in_params[1]) === window_model "window_model must be DiffOpt-enabled"
@@ -200,10 +200,10 @@ Get the realized end state from the window model after solving.
 """
 function get_last_realized_state(
     window_model::JuMP.Model,
-    window_state_in_params::Vector,
-    window_state_out_params::Vector{Vector{Tuple{Any, VariableRef}}},
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::Vector{<:AbstractVector},
+    targets::AbstractVector{<:AbstractVector},
 )
 
     last_stage = window_state_out_params[end]
@@ -227,10 +227,10 @@ Given cotangents (Δs_out), we:
 function ChainRulesCore.rrule(
     ::typeof(get_last_realized_state),
     window_model::JuMP.Model,
-    window_state_in_params::Vector,
-    window_state_out_params::Vector{Vector{Tuple{Any, VariableRef}}},
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any, VariableRef}}},
     s_in::AbstractVector,
-    targets::Vector{<:AbstractVector},
+    targets::AbstractVector{<:AbstractVector},
 )
     s_out = get_last_realized_state(window_model, window_state_in_params, window_state_out_params, s_in, targets)
 

@@ -929,7 +929,12 @@ end
             # Per-stage simulation
             subproblems_s, state_in_s, state_out_s, uncertainty_samples_s =
                 build_consistent_subproblems(num_stages)
-            uncertainties_s = DecisionRules.sample(uncertainty_samples_s)
+            # Use a single draw of uncertainty values across all three methods
+            Random.seed!(1234)
+            base_sample = DecisionRules.sample(uncertainty_samples_s)
+            base_values = [[u[2] for u in stage_u] for stage_u in base_sample]
+            uncertainties_s = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
+                               for (t, stage_u) in enumerate(uncertainty_samples_s)]
             DecisionRules.simulate_multistage(
                 subproblems_s,
                 state_in_s,
@@ -959,7 +964,8 @@ end
                 Float64.(initial_state),
                 uncertainty_samples_d,
             )
-            uncertainties_d = DecisionRules.sample(uncertainty_samples_d)
+            uncertainties_d = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
+                               for (t, stage_u) in enumerate(uncertainty_samples_d)]
             states_policy = DecisionRules.simulate_states(initial_state, uncertainties_d, decision_rule)
             DecisionRules.simulate_multistage(det_model, state_in_d, state_out_d, uncertainties_d, states_policy)
 
@@ -984,7 +990,8 @@ end
                 window_size=6,
                 optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
             )
-            uncertainties_w = DecisionRules.sample(uncertainty_samples_w)
+            uncertainties_w = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
+                               for (t, stage_u) in enumerate(uncertainty_samples_w)]
             uncertainties_vec = [[Float64(u[2]) for u in stage_u] for stage_u in uncertainties_w]
 
             states_shoot = Vector{Vector{Float64}}()
