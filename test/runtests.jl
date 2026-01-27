@@ -601,24 +601,53 @@ end
             @test !isnan(s_out[1])
         end
 
-        @testset "solve_window non-parameter state_in" begin
-            model = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
-            @variable(model, state_in)
-            @variable(model, target in MOI.Parameter(0.0))
-            @variable(model, x)
-            @constraint(model, x == state_in)
-            @constraint(model, x == target)
-            @objective(model, Min, x)
+        @testset "setup_shooting_windows converts non-parameter state/target" begin
+            num_stages = 1
+            subproblems = Vector{JuMP.Model}(undef, num_stages)
+            state_params_in = Vector{Vector{Any}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
-            state_in_params = [state_in]
-            state_out_params = [[(target, x)]]
+            subproblems[1] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            @variable(subproblems[1], x)
+            @variable(subproblems[1], state_in)
+            @variable(subproblems[1], uncertainty in MOI.Parameter(0.1))
+            @variable(subproblems[1], state_out)
+            @variable(subproblems[1], state_out_var)
+            @constraint(subproblems[1], state_out_var == state_in + uncertainty)
+            @constraint(subproblems[1], x == state_out_var)
+            @constraint(subproblems[1], state_out_var == state_out)
+            @objective(subproblems[1], Min, x)
 
-            s_in = Float32[1.5]
-            targets = [Float32[1.5]]
+            state_params_in[1] = [state_in]
+            state_params_out[1] = [(state_out, state_out_var)]
+            uncertainty_samples[1] = [(subproblems[1][:uncertainty], [0.1])]
 
-            obj = DecisionRules.solve_window(model, state_in_params, state_out_params, s_in, targets)
-            @test obj ≈ 1.5 atol=1.0e-6
-            @test JuMP.is_parameter(state_in_params[1])
+            windows = DecisionRules.setup_shooting_windows(
+                subproblems,
+                state_params_in,
+                state_params_out,
+                [1.0],
+                uncertainty_samples;
+                window_size=1,
+                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer)
+            )
+
+            window = windows[1]
+            @test all(JuMP.is_parameter, window.state_in_params)
+            @test JuMP.is_parameter(window.state_out_params[1][1][1])
+
+            for param in window.uncertainty_params[1]
+                set_parameter_value(param, 0.1)
+            end
+            obj = DecisionRules.solve_window(
+                window.model,
+                window.state_in_params,
+                window.state_out_params,
+                Float32[1.0],
+                [Float32[1.0]]
+            )
+            @test isfinite(obj)
         end
         
         # Test solve_window gradients

@@ -45,13 +45,35 @@ tie it to the original variable with an equality constraint.
 function ensure_state_in_is_parameter!(m::JuMP.Model, state_in_params::Vector)
     for i in eachindex(state_in_params)
         v = state_in_params[i]
-        if !JuMP.is_parameter(v)
+        if v isa JuMP.VariableRef && !JuMP.is_parameter(v)
             p = @variable(m; base_name = "shooting_state_in[$i]", set = MOI.Parameter(0.0))
             @constraint(m, v == p)
             state_in_params[i] = p
         end
     end
     return state_in_params
+end
+
+"""
+    ensure_target_params_are_parameters!(m, window_state_out_params)
+
+Ensure the target parameters in window_state_out_params are MOI.Parameter variables.
+If a target is not a parameter, create a new parameter and tie it to the original
+variable with an equality constraint.
+"""
+function ensure_target_params_are_parameters!(m::JuMP.Model, window_state_out_params)
+    for t in eachindex(window_state_out_params)
+        stage_pairs = window_state_out_params[t]
+        for i in eachindex(stage_pairs)
+            target_param, realized_var = stage_pairs[i]
+            if target_param isa JuMP.VariableRef && !JuMP.is_parameter(target_param)
+                p = @variable(m; base_name = "shooting_target[$t,$i]", set = MOI.Parameter(0.0))
+                @constraint(m, target_param == p)
+                stage_pairs[i] = (p, realized_var)
+            end
+        end
+    end
+    return window_state_out_params
 end
 
 """
@@ -130,9 +152,6 @@ function solve_window(
     targets::AbstractVector{<:AbstractVector},
 )
     num_stages = length(window_state_out_params)
-
-    # Ensure window start state is represented by Parameter variables when needed
-    ensure_state_in_is_parameter!(window_model, window_state_in_params)
 
     # Set initial state parameters
     @inbounds for i in eachindex(window_state_in_params)
@@ -356,6 +375,8 @@ function setup_shooting_windows(
 
         # Only first stage has separate state_in params
         state_in_params = window_state_params_in[1]
+        ensure_state_in_is_parameter!(window_model, state_in_params)
+        ensure_target_params_are_parameters!(window_model, window_state_params_out)
 
         uncertainty_params = extract_uncertainty_params(window_uncertainties_new)
 
