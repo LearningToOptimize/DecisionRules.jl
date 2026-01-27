@@ -1009,7 +1009,7 @@ end
             base_values = [[u[2] for u in stage_u] for stage_u in base_sample]
             uncertainties_s = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
                                for (t, stage_u) in enumerate(uncertainty_samples_s)]
-            DecisionRules.simulate_multistage(
+            obj_stage = DecisionRules.simulate_multistage(
                 subproblems_s,
                 state_in_s,
                 state_out_s,
@@ -1041,7 +1041,7 @@ end
             uncertainties_d = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
                                for (t, stage_u) in enumerate(uncertainty_samples_d)]
             states_policy = DecisionRules.simulate_states(initial_state, uncertainties_d, decision_rule)
-            DecisionRules.simulate_multistage(det_model, state_in_d, state_out_d, uncertainties_d, states_policy)
+            obj_det = DecisionRules.simulate_multistage(det_model, state_in_d, state_out_d, uncertainties_d, states_policy)
 
             states_det = Vector{Vector{Float64}}(undef, num_stages + 1)
             states_det[1] = initial_state
@@ -1066,7 +1066,15 @@ end
             )
             uncertainties_w = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
                                for (t, stage_u) in enumerate(uncertainty_samples_w)]
-            uncertainties_vec = [[Float64(u[2]) for u in stage_u] for stage_u in uncertainties_w]
+            uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainties_w]
+
+            obj_shoot = DecisionRules.simulate_multiple_shooting(
+                windows,
+                decision_rule,
+                Float32.(initial_state),
+                uncertainties_w,
+                uncertainties_vec
+            )
 
             states_shoot = Vector{Vector{Float64}}()
             push!(states_shoot, Float64.(initial_state))
@@ -1102,6 +1110,9 @@ end
                 @test states_stage[t][1] ≈ states_det[t][1] atol=1.0e-4
                 @test states_stage[t][1] ≈ states_shoot[t][1] atol=1.0e-4   
             end
+
+            @test obj_stage ≈ obj_det atol=1.0e-4
+            @test obj_stage ≈ obj_shoot atol=1.0e-4
 
             # @test length(decisions_stage) == length(decisions_det) == length(decisions_shoot)
             # for t in 1:length(decisions_stage)
