@@ -600,6 +600,26 @@ end
             @test length(s_out) == 1  # State dimension is 1
             @test !isnan(s_out[1])
         end
+
+        @testset "solve_window non-parameter state_in" begin
+            model = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            @variable(model, state_in)
+            @variable(model, target in MOI.Parameter(0.0))
+            @variable(model, x)
+            @constraint(model, x == state_in)
+            @constraint(model, x == target)
+            @objective(model, Min, x)
+
+            state_in_params = [state_in]
+            state_out_params = [[(target, x)]]
+
+            s_in = Float32[1.5]
+            targets = [Float32[1.5]]
+
+            obj = DecisionRules.solve_window(model, state_in_params, state_out_params, s_in, targets)
+            @test obj ≈ 1.5
+            @test JuMP.is_parameter(state_in_params[1])
+        end
         
         # Test solve_window gradients
         @testset "solve_window gradients" begin
@@ -878,19 +898,24 @@ end
 
                 for t in 1:num_stages
                     subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                    @variable(subproblems[t], reservoir_in)
+                    @variable(subproblems[t], reservoir_out)
+                    @variable(subproblems[t], inflow)
+                    @variable(subproblems[t], deficit)
                     @variable(subproblems[t], x)
-                    @variable(subproblems[t], state_in in MOI.Parameter(0.0))
-                    @variable(subproblems[t], uncertainty in MOI.Parameter(0.0))
-                    @variable(subproblems[t], state_out in MOI.Parameter(0.0))
-                    @variable(subproblems[t], state_out_var)
-                    @constraint(subproblems[t], state_out_var == state_in + uncertainty)
-                    @constraint(subproblems[t], x == state_out_var)
-                    @constraint(subproblems[t], state_out_var == state_out)
+                    @constraint(subproblems[t], reservoir_out == reservoir_in + inflow)
+                    @constraint(subproblems[t], x == reservoir_out)
                     @objective(subproblems[t], Min, x)
 
-                    state_params_in[t] = [state_in]
-                    state_params_out[t] = [(state_out, state_out_var)]
-                    uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.1 * t])]
+                    state_in_param = DecisionRules.variable_to_parameter(subproblems[t], reservoir_in)
+                    state_out_param, realized_out = DecisionRules.variable_to_parameter(
+                        subproblems[t], reservoir_out; deficit=deficit
+                    )
+                    inflow_param = DecisionRules.variable_to_parameter(subproblems[t], inflow)
+
+                    state_params_in[t] = [state_in_param]
+                    state_params_out[t] = [(state_out_param, realized_out)]
+                    uncertainty_samples[t] = [(inflow_param, [0.1 * t, 0.2 * t])]
                 end
 
                 return subproblems, state_params_in, state_params_out, uncertainty_samples

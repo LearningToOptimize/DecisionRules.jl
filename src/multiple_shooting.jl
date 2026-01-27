@@ -36,6 +36,25 @@ using Base: accumulate
 =============================================================================#
 
 """
+    ensure_state_in_is_parameter!(m, state_in_params)
+
+Ensure window-start state entries are MOI.Parameter variables so `set_parameter_value`
+works on window models. If an entry is not a parameter, create a new parameter and
+tie it to the original variable with an equality constraint.
+"""
+function ensure_state_in_is_parameter!(m::JuMP.Model, state_in_params::Vector)
+    for i in eachindex(state_in_params)
+        v = state_in_params[i]
+        if !JuMP.is_parameter(v)
+            p = @variable(m; base_name = "shooting_state_in[$i]", set = MOI.Parameter(0.0))
+            @constraint(m, v == p)
+            state_in_params[i] = p
+        end
+    end
+    return state_in_params
+end
+
+"""
     extract_uncertainty_params(window_uncertainties_new)
 
 Normalize uncertainty data to a per-stage vector of parameter VariableRefs.
@@ -111,6 +130,9 @@ function solve_window(
     targets::Vector{<:AbstractVector},
 )
     num_stages = length(window_state_out_params)
+
+    # Ensure window start state is represented by Parameter variables when needed
+    ensure_state_in_is_parameter!(window_model, window_state_in_params)
 
     # Set initial state parameters
     @inbounds for i in eachindex(window_state_in_params)
@@ -332,7 +354,7 @@ function setup_shooting_windows(
             window_uncertainties,
         )
 
-        # Only first stage has separate state_in params;
+        # Only first stage has separate state_in params
         state_in_params = window_state_params_in[1]
 
         uncertainty_params = extract_uncertainty_params(window_uncertainties_new)
