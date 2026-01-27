@@ -14,7 +14,8 @@ export simulate_multistage, sample, train_multistage, simulate_states, simulate_
     SaveBest, find_variables, compute_parameter_dual, StallingCriterium, policy_input_dim, 
     StateConditionedPolicy, state_conditioned_policy, materialize_tangent,
     # Multiple shooting exports
-    train_multiple_shooting, predict_window_states, simulate_window_stages
+    train_multiple_shooting, setup_shooting_windows, solve_window, predict_window_targets,
+    simulate_multiple_shooting, WindowData
 
 include("parameter_duals.jl")
 include("simulate_multistage.jl")
