@@ -816,6 +816,59 @@ end
             @test grads[1] !== nothing  # Gradients should flow across windows
         end
 
+        @testset "multiple_shooting_vector_uncertainties" begin
+            num_stages = 2
+            subproblems = Vector{JuMP.Model}(undef, num_stages)
+            state_params_in = Vector{Vector{Any}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+
+            for t in 1:num_stages
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                @variable(subproblems[t], x)
+                @variable(subproblems[t], state_in in MOI.Parameter(1.0))
+                @variable(subproblems[t], u1 in MOI.Parameter(0.1))
+                @variable(subproblems[t], u2 in MOI.Parameter(0.2))
+                @variable(subproblems[t], state_out in MOI.Parameter(1.0))
+                @variable(subproblems[t], state_out_var)
+                @constraint(subproblems[t], state_out_var == state_in + u1 + u2)
+                @constraint(subproblems[t], x == state_out_var)
+                @constraint(subproblems[t], state_out_var == state_out)
+                @objective(subproblems[t], Min, x)
+
+                state_params_in[t] = [state_in]
+                state_params_out[t] = [(state_out, state_out_var)]
+                uncertainty_samples[t] = [(u1, [0.1 * t]), (u2, [0.2 * t])]
+            end
+
+            initial_state = [1.0]
+            windows = DecisionRules.setup_shooting_windows(
+                subproblems,
+                state_params_in,
+                state_params_out,
+                Float64.(initial_state),
+                uncertainty_samples;
+                window_size=2,
+                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer)
+            )
+
+            # Policy expects flat [u1, u2, state] input
+            decision_rule(x) = [x[3] + x[1] + x[2]]
+
+            uncertainty_sample = DecisionRules.sample(uncertainty_samples)
+            uncertainties_vec = [Float32.(vcat([u[2] for u in stage_u]...)) for stage_u in uncertainty_sample]
+
+            obj = DecisionRules.simulate_multiple_shooting(
+                windows,
+                decision_rule,
+                Float32.(initial_state),
+                uncertainty_sample,
+                uncertainties_vec
+            )
+
+            @test obj > 0
+        end
+
         @testset "consistent_state_paths_across_methods" begin
             function build_consistent_subproblems(num_stages)
                 subproblems = Vector{JuMP.Model}(undef, num_stages)
