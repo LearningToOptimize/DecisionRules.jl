@@ -815,5 +815,140 @@ end
             @test loss > 0
             @test grads[1] !== nothing  # Gradients should flow across windows
         end
+
+        @testset "consistent_state_paths_across_methods" begin
+            function build_consistent_subproblems(num_stages)
+                subproblems = Vector{JuMP.Model}(undef, num_stages)
+                state_params_in = Vector{Vector{Any}}(undef, num_stages)
+                state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
+                uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+
+                for t in 1:num_stages
+                    subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                    @variable(subproblems[t], x)
+                    @variable(subproblems[t], state_in in MOI.Parameter(0.0))
+                    @variable(subproblems[t], uncertainty in MOI.Parameter(0.0))
+                    @variable(subproblems[t], state_out in MOI.Parameter(0.0))
+                    @variable(subproblems[t], state_out_var)
+                    @constraint(subproblems[t], state_out_var == state_in + uncertainty)
+                    @constraint(subproblems[t], x == state_out_var)
+                    @constraint(subproblems[t], state_out_var == state_out)
+                    @objective(subproblems[t], Min, x)
+
+                    state_params_in[t] = [state_in]
+                    state_params_out[t] = [(state_out, state_out_var)]
+                    uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.1 * t])]
+                end
+
+                return subproblems, state_params_in, state_params_out, uncertainty_samples
+            end
+
+            num_stages = 28
+            initial_state = [1.0]
+
+            decision_rule(x) = [x[2] + x[1]]  # next_state = prev_state + uncertainty
+
+            # Per-stage simulation
+            subproblems_s, state_in_s, state_out_s, uncertainty_samples_s =
+                build_consistent_subproblems(num_stages)
+            uncertainties_s = DecisionRules.sample(uncertainty_samples_s)
+            DecisionRules.simulate_multistage(
+                subproblems_s,
+                state_in_s,
+                state_out_s,
+                initial_state,
+                uncertainties_s,
+                decision_rule,
+            )
+
+            states_stage = Vector{Vector{Float64}}(undef, num_stages + 1)
+            states_stage[1] = initial_state
+            decisions_stage = Vector{Float64}(undef, num_stages)
+            for t in 1:num_stages
+                states_stage[t + 1] = [value(state_out_s[t][1][2])]
+                decisions_stage[t] = value(subproblems_s[t][:x])
+            end
+
+            # Deterministic equivalent
+            subproblems_d, state_in_d, state_out_d, uncertainty_samples_d =
+                build_consistent_subproblems(num_stages)
+            det_model = JuMP.Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            det_model, uncertainty_samples_d = DecisionRules.deterministic_equivalent!(
+                det_model,
+                subproblems_d,
+                state_in_d,
+                state_out_d,
+                Float64.(initial_state),
+                uncertainty_samples_d,
+            )
+            uncertainties_d = DecisionRules.sample(uncertainty_samples_d)
+            states_policy = DecisionRules.simulate_states(initial_state, uncertainties_d, decision_rule)
+            DecisionRules.simulate_multistage(det_model, state_in_d, state_out_d, uncertainties_d, states_policy)
+
+            states_det = Vector{Vector{Float64}}(undef, num_stages + 1)
+            states_det[1] = initial_state
+            decisions_det = Float64[]
+            # x_det = DecisionRules.find_variables(det_model, ["x"])
+            for t in 1:num_stages
+                states_det[t + 1] = [value(state_out_d[t][1][2])]
+                # push!(decisions_det, value(x_det[t]))
+            end
+
+            # Multiple shooting
+            subproblems_w, state_in_w, state_out_w, uncertainty_samples_w =
+                build_consistent_subproblems(num_stages)
+            windows = DecisionRules.setup_shooting_windows(
+                subproblems_w,
+                state_in_w,
+                state_out_w,
+                Float64.(initial_state),
+                uncertainty_samples_w;
+                window_size=6,
+                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
+            )
+            uncertainties_w = DecisionRules.sample(uncertainty_samples_w)
+            uncertainties_vec = [[Float64(u[2]) for u in stage_u] for stage_u in uncertainties_w]
+
+            states_shoot = Vector{Vector{Float64}}()
+            push!(states_shoot, Float64.(initial_state))
+            decisions_shoot = Float64[]
+            current_state = Float64.(initial_state)
+            for window in windows
+                window_range = window.stage_range
+                window_uncertainties_vec = uncertainties_vec[window_range]
+                targets = DecisionRules.predict_window_targets(
+                    decision_rule,
+                    current_state,
+                    window_uncertainties_vec,
+                )
+                DecisionRules.set_window_uncertainties!(window, uncertainties_w)
+                DecisionRules.solve_window(
+                    window.model,
+                    window.state_in_params,
+                    window.state_out_params,
+                    current_state,
+                    targets,
+                )
+
+                # x_win = DecisionRules.find_variables(window.model, ["x"])
+                for local_t in 1:length(window_range)
+                    push!(states_shoot, [value(window.state_out_params[local_t][1][2])])
+                    # push!(decisions_shoot, value(x_win[local_t]))
+                end
+                current_state = states_shoot[end]
+            end
+
+            @test length(states_stage) == length(states_det) == length(states_shoot)
+            for t in 1:length(states_stage)
+                @test states_stage[t][1] ≈ states_det[t][1] atol=1.0e-4
+                @test states_stage[t][1] ≈ states_shoot[t][1] atol=1.0e-4   
+            end
+
+            # @test length(decisions_stage) == length(decisions_det) == length(decisions_shoot)
+            # for t in 1:length(decisions_stage)
+            #     @test decisions_stage[t] ≈ decisions_det[t]
+            #     @test decisions_stage[t] ≈ decisions_shoot[t]
+            # end
+        end
     end
 end
