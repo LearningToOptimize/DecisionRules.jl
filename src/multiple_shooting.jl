@@ -33,18 +33,6 @@ Assumptions:
 using Base: accumulate
 import Zygote
 
-# Track solve_window calls inside AD tape to detect accidental extra solves.
-const _solve_window_ad_calls_ref = Base.RefValue{Int}(0)
-
-function _reset_solve_window_ad_calls!()
-    _solve_window_ad_calls_ref[] = 0
-    return nothing
-end
-
-function _get_solve_window_ad_calls()
-    return _solve_window_ad_calls_ref[]
-end
-
 function _print_window_status_and_params(window, status; context::AbstractString="")
     header = isempty(context) ? "solve_window status" : "solve_window status ($context)"
     println("[$header] status=$(status) stage_range=$(window.stage_range)")

@@ -22,7 +22,7 @@ end
 case_name = "bolivia"                    # bolivia, case3
 formulation = "ACPPowerModel"            # SOCWRConicPowerModel, DCPPowerModel, ACPPowerModel
 num_stages = 96                          # 96, 48
-window_size = 6                       # 12, 6
+window_size = 8                       # 12, 6
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 save_file = "$(case_name)-$(formulation)-h$(num_stages)-shooting-w$(window_size)-$(now())"
@@ -38,7 +38,7 @@ ensure_feasibility = non_ensurance
 optimizers = [Flux.Adam()]
 pre_trained_model = nothing
 penalty_l2 = :auto
-penalty_l1 = :auto
+penalty_l1 = nothing
 
 # Build MSP using subproblems (not deterministic equivalent)
 
@@ -124,7 +124,7 @@ best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
-convergence_criterium = StallingCriterium(100, best_obj, 0)
+convergence_criterium = StallingCriterium(200, best_obj, 0)
 
 adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
     if iter % 2100 == 0
