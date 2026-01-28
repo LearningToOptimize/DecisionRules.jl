@@ -35,6 +35,9 @@ import Zygote
 
 function _print_window_status_and_params(window, status; context::AbstractString="")
     header = isempty(context) ? "solve_window status" : "solve_window status ($context)"
+    println("=====")
+    JuMP.primal_feasibility_report(window.model)
+    println("=====")
     println("[$header] status=$(status) stage_range=$(window.stage_range)")
     params = [v for v in all_variables(window.model) if JuMP.is_parameter(v)]
     sort!(params, by=JuMP.name)

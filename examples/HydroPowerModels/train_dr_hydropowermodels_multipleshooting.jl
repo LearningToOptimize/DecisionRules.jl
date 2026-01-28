@@ -22,7 +22,7 @@ end
 case_name = "bolivia"                    # bolivia, case3
 formulation = "ACPPowerModel"            # SOCWRConicPowerModel, DCPPowerModel, ACPPowerModel
 num_stages = 96                          # 96, 48
-window_size = 8                       # 12, 6
+window_size = 12                       # 12, 6
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 save_file = "$(case_name)-$(formulation)-h$(num_stages)-shooting-w$(window_size)-$(now())"
