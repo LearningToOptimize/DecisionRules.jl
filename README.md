@@ -1,3 +1,5 @@
+[![Build Status](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml?query=branch%3Amain)
+
 # DecisionRules.jl
 
 DecisionRules.jl is a Julia package for **training parametric decision rules through multi-stage optimization**, following the **Two-Stage General / Deep Decision Rules** (TS-GDR / TS-DDR) framework. The main use-case is multi-stage stochastic control where the feasible (closed-loop) action at each stage is obtained by solving an optimization problem (e.g., OPF, MPC), and we want to train a policy end-to-end that maps observed states and uncertainties to target trajectories.
