@@ -24,9 +24,9 @@ include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
 # Problem parameters
 N = 10                          # Number of time steps
 h = 0.01                        # Time step
-perturbation_scale = 0.05       # Scale of random perturbations
+perturbation_scale = 1.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
-penalty = 1e3                   # Penalty for state deviation
+penalty = 10.0                   # Penalty for state deviation
 perturbation_frequency = 5      # Frequency of perturbations (every k stages)
 
 # Training parameters
@@ -60,7 +60,7 @@ println("Building Atlas deterministic equivalent problem...")
 )
 
 # Build deterministic equivalent
-det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+det_equivalent = DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
     "print_level" => 0,
     "hsllib" => HSL_jll.libhsl_path,
     "linear_solver" => "ma97",

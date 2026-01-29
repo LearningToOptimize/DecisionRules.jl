@@ -10,6 +10,7 @@ import Ipopt, HSL_jll
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
+import MathOptInterface as MOI
 
 Atlas_dir = dirname(@__FILE__)
 include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
@@ -19,11 +20,11 @@ include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
 # ============================================================================
 
 # Problem parameters
-N = 11                          # Number of time steps
+N = 50                          # Number of time steps
 h = 0.01                        # Time step
-perturbation_scale = 0.05       # Scale of random perturbations
+perturbation_scale = 1.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
-penalty = 1e3                   # Penalty for state deviation
+penalty = 10.0                   # Penalty for state deviation
 perturbation_frequency = 5      # Frequency of perturbations (every k stages)
 window_size = 5                 # Multiple shooting window length
 
@@ -129,6 +130,11 @@ windows = DecisionRules.setup_shooting_windows(
     window_size=window_size,
     optimizer_factory=diff_optimizer,
 )
+
+# loop over windows and set diffopt backend
+for window in windows
+    MOI.set(window.model, DiffOpt.ModelConstructor(), DiffOpt.NonLinearProgram.Model)
+end
 
 # ============================================================================
 # Initial Evaluation

@@ -123,7 +123,7 @@ models = state_conditioned_policy(n_uncertainties, nx, nx, layers;
 if !use_random_policy
     model_data = JLD2.load(model_path)
     if haskey(model_data, "model_state")
-        Flux.loadmodel!(models, model_data["model_state"])
+        Flux.loadmodel!(models, normalize_recur_state(model_data["model_state"]))
         println("Loaded trained model weights")
     else
         println("Warning: Could not find model_state in file, using random weights")

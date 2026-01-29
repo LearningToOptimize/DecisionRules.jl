@@ -56,7 +56,7 @@ function build_atlas_subproblems(;
     perturbation_frequency::Int = 1,
     perturbation_indices::Union{Nothing, Vector{Int}} = nothing,
     num_scenarios::Int = 10,
-    penalty::Float64 = 1e3,
+    penalty::Float64 = 10.0,
     penalty_l1::Union{Nothing, Float64} = nothing,
     penalty_l2::Union{Nothing, Float64} = nothing,
     optimizer = nothing,

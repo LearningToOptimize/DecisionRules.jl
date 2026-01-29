@@ -103,12 +103,38 @@ mutable struct SaveBest <: Function
     best_loss::Float64
     model_path::String
 end
+
+"""
+    normalize_recur_state(state)
+
+Return a copy of a `Flux.state` object where any Recur-like nodes have their
+`state` field set to `cell.state0`. This avoids `Flux.loadmodel!` tie errors
+when loading into freshly constructed recurrent layers.
+"""
+function normalize_recur_state(state)
+    if state isa NamedTuple
+        vals = map(normalize_recur_state, values(state))
+        nt = NamedTuple{keys(state)}(vals)
+        if (:cell in keys(nt)) && (:state in keys(nt)) &&
+           (getproperty(nt, :cell) isa NamedTuple) && (:state0 in keys(getproperty(nt, :cell)))
+            ks = keys(nt)
+            newvals = map(k -> (k === :state ? getproperty(nt.cell, :state0) : getproperty(nt, k)), ks)
+            return NamedTuple{ks}(newvals)
+        end
+        return nt
+    elseif state isa Tuple
+        return map(normalize_recur_state, state)
+    else
+        return state
+    end
+end
+
 function (callback::SaveBest)(iter, model, loss)
     if loss < callback.best_loss
         m = model |> cpu
         @info "best model change" callback.best_loss loss
         callback.best_loss = loss
-        model_state = Flux.state(m)
+        model_state = normalize_recur_state(Flux.state(m))
         jldsave(callback.model_path; model_state=model_state)
     end
     return false
