@@ -28,8 +28,9 @@ model_path = nothing  # Set to path of trained model, or nothing to use latest
 # Problem parameters (should match training)
 N = 50                          # Number of time steps
 h = 0.01                        # Time step  
-perturbation_scale = 0.05       # Scale of random perturbations
-num_scenarios = 10              # Number of scenarios to simulate
+perturbation_scale = 1.5       # Scale of random perturbations
+num_scenarios = 1              # Number of scenarios to simulate
+perturbation_frequency = 5     # Frequency of perturbations (every k stages)
 
 # Visualization options
 animate_robot = true            # Whether to animate in MeshCat
@@ -87,6 +88,7 @@ println("Control dimension: $nu")
     h = h,
     perturbation_scale = perturbation_scale,
     num_scenarios = num_scenarios,
+    perturbation_frequency = perturbation_frequency,
 )
 
 # ============================================================================
@@ -133,8 +135,8 @@ for s in 1:num_scenarios
     # Sample perturbations
     perturbation_sample = DecisionRules.sample(uncertainty_samples)
     
-    # Record perturbations for this scenario
-    all_perturbations[s] = [p[1] for p in perturbation_sample]  # First (and only) perturbation per stage
+    # Record perturbations for this scenario (first perturbation per stage)
+    all_perturbations[s] = [stage_u[1][2] for stage_u in perturbation_sample]
     
     # Simulate using the policy
     try

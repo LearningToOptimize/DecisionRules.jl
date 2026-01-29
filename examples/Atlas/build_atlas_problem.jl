@@ -30,7 +30,7 @@ end
 Build a multi-stage stochastic optimization problem for Atlas robot balancing.
 
 The problem minimizes deviation from a reference state while subject to:
-- Discrete-time dynamics with stochastic perturbations
+- Discrete-time dynamics with stochastic perturbations (applied every `perturbation_frequency` stages)
 - Torque limits on all joints
 
 # Penalty arguments
@@ -53,6 +53,7 @@ function build_atlas_subproblems(;
     h::Float64 = 0.01,
     N::Int = 100,
     perturbation_scale::Float64 = 0.1,
+    perturbation_frequency::Int = 1,
     perturbation_indices::Union{Nothing, Vector{Int}} = nothing,
     num_scenarios::Int = 10,
     penalty::Float64 = 1e3,
@@ -77,6 +78,10 @@ function build_atlas_subproblems(;
             "hsllib" => HSL_jll.libhsl_path,
             "linear_solver" => "ma27"
         ))
+    end
+
+    if perturbation_frequency < 1
+        error("perturbation_frequency must be >= 1")
     end
     
     # Default perturbation indices: perturb velocity states
@@ -240,204 +245,15 @@ function build_atlas_subproblems(;
         state_params_out[t] = [(target_x[i], x[i]) for i in 1:nx]
         
         # Generate uncertainty samples (random perturbations)
-        uncertainty_samples[t] = [(w[i], perturbation_scale * randn(num_scenarios)) for i in 1:n_perturb]
+        if (t - 1) % perturbation_frequency == 0
+            uncertainty_samples[t] = [(w[i], perturbation_scale * randn(num_scenarios)) for i in 1:n_perturb]
+        else
+            uncertainty_samples[t] = [(w[i], zeros(num_scenarios)) for i in 1:n_perturb]
+        end
     end
     
     initial_state = copy(x_ref)
     
     return subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples, 
            X_vars, U_vars, x_ref, u_ref, atlas
-end
-
-
-"""
-    build_atlas_deterministic_equivalent(; kwargs...)
-
-Build a deterministic equivalent formulation for the Atlas balancing problem.
-This creates a single large optimization problem instead of decomposed subproblems.
-
-# Penalty arguments
-- `penalty`: Legacy argument for L1 norm penalty (backwards compatible)
-- `penalty_l1`: Penalty for L1 norm (NormOneCone). If provided, creates L1 deviation constraint.
-- `penalty_l2`: Penalty for L2 norm (SecondOrderCone). If provided, creates L2 deviation constraint.
-- If both `penalty_l1` and `penalty_l2` are provided, both norms are used with separate penalties.
-"""
-function build_atlas_deterministic_equivalent(;
-    atlas::Atlas = Atlas(),
-    x_ref::Union{Nothing, Vector{Float64}} = nothing,
-    u_ref::Union{Nothing, Vector{Float64}} = nothing,
-    h::Float64 = 0.01,
-    N::Int = 100,
-    perturbation_scale::Float64 = 0.1,
-    perturbation_indices::Union{Nothing, Vector{Int}} = nothing,
-    num_scenarios::Int = 10,
-    penalty::Float64 = 1e3,
-    penalty_l1::Union{Nothing, Float64} = nothing,
-    penalty_l2::Union{Nothing, Float64} = nothing,
-)
-    # Handle penalty arguments: if penalty_l1/penalty_l2 not specified, use legacy penalty for L1
-    if isnothing(penalty_l1) && isnothing(penalty_l2)
-        penalty_l1 = penalty
-    end
-    
-    # Load reference state if not provided
-    if isnothing(x_ref) || isnothing(u_ref)
-        @load joinpath(@__DIR__, "atlas_ref.jld2") x_ref u_ref
-    end
-    
-    # Default perturbation indices
-    if isnothing(perturbation_indices)
-        perturbation_indices = [atlas.nq + 5]
-    end
-    
-    nx = atlas.nx
-    nu = atlas.nu
-    n_perturb = length(perturbation_indices)
-    
-    # Create model
-    det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
-        "print_level" => 0,
-        "hsllib" => HSL_jll.libhsl_path,
-        "linear_solver" => "ma27"
-    ))
-    
-    # State and control variables for all stages
-    @variable(det_equivalent, X[t=1:N, i=1:nx], start = x_ref[i])
-    @variable(det_equivalent, -atlas.torque_limits[i] <= U[t=1:N-1, i=1:nu] <= atlas.torque_limits[i], start = u_ref[i])
-    
-    # Perturbed state variables
-    @variable(det_equivalent, X_perturbed[t=1:N-1, i=1:nx], start = x_ref[i])
-    
-    # Target parameters (policy outputs)
-    @variable(det_equivalent, target[t=1:N-1, i=1:nx] ∈ MOI.Parameter(x_ref[i]))
-    
-    # Perturbation parameters
-    @variable(det_equivalent, w[t=1:N-1, i=1:n_perturb] ∈ MOI.Parameter(0.0))
-    
-    # Deviation variable
-    @variable(det_equivalent, norm_deficit >= 0)
-    
-    # Fix initial condition
-    for i in 1:nx
-        fix(X[1, i], x_ref[i]; force=true)
-    end
-    
-    # Perturbation constraints
-    for t in 1:N-1
-        for i in 1:nx
-            perturb_idx = findfirst(==(i), perturbation_indices)
-            if !isnothing(perturb_idx)
-                @constraint(det_equivalent, X_perturbed[t, i] == X[t, i] + w[t, perturb_idx])
-            else
-                @constraint(det_equivalent, X_perturbed[t, i] == X[t, i])
-            end
-        end
-    end
-    
-    # Objective
-    @variable(det_equivalent, cost >= 0)
-    
-    # Create norm constraints based on penalty arguments
-    use_l1 = !isnothing(penalty_l1)
-    use_l2 = !isnothing(penalty_l2)
-    deviation_expr = vec([target[t,i] - X[t+1,i] for t in 1:N-1, i in 1:nx])
-    deviation_dim = (N-1) * nx
-    
-    if use_l1 && use_l2
-        # Both L1 and L2 squared norms
-        @variable(det_equivalent, norm_l1 >= 0)
-        @variable(det_equivalent, norm_l2_sq >= 0)  # L2 squared (sum of squares)
-        @constraint(det_equivalent, [norm_l1; deviation_expr] in MOI.NormOneCone(1 + deviation_dim))
-        @constraint(det_equivalent, norm_l2_sq >= sum(deviation_expr[i]^2 for i in 1:deviation_dim))
-        @constraint(det_equivalent, norm_deficit >= penalty_l1 * norm_l1 + penalty_l2 * norm_l2_sq)
-        deficit_coef = 1.0
-    elseif use_l1
-        # L1 norm only
-        @constraint(det_equivalent, [norm_deficit; deviation_expr] in MOI.NormOneCone(1 + deviation_dim))
-        deficit_coef = penalty_l1
-    elseif use_l2
-        # L2 squared norm only (sum of squares)
-        @constraint(det_equivalent, norm_deficit >= sum(deviation_expr[i]^2 for i in 1:deviation_dim))
-        deficit_coef = penalty_l2
-    else
-        error("At least one of penalty_l1 or penalty_l2 must be specified")
-    end
-    
-    @constraint(det_equivalent, cost >= sum((X[t,i] - x_ref[i])^2 for t in 2:N, i in 1:nx))
-    @objective(det_equivalent, Min, 
-        cost +
-        deficit_coef * norm_deficit
-    )
-    
-    # Build VectorNonlinearOracle (same as subproblems)
-    VNO_dim = 2*nx + nu
-    
-    jacobian_structure = Tuple{Int,Int}[]
-    append!(jacobian_structure, map(i -> (i, i), 1:nx))
-    for i in 1:nx, j in 1:(nx + nu)
-        push!(jacobian_structure, (i, j + nx))
-    end
-    
-    hessian_lagrangian_structure = [
-        (i, j)
-        for i in nx+1:VNO_dim
-        for j in nx+1:VNO_dim
-    ]
-    
-    local_atlas = atlas
-    local_h = h
-    local_nx = nx
-    local_nu = nu
-    
-    VNO = MOI.VectorNonlinearOracle(;
-        dimension = VNO_dim,
-        l = zeros(nx),
-        u = zeros(nx),
-        eval_f = (ret, z) -> begin
-            ret[1:local_nx] .= z[1:local_nx] - atlas_dynamics(local_atlas, local_h, z[local_nx+1:VNO_dim]...)
-            return
-        end,
-        jacobian_structure = jacobian_structure,
-        eval_jacobian = (ret, z) -> begin
-            dyn_jac = ForwardDiff.jacobian(
-                xu -> atlas_dynamics(local_atlas, local_h, xu...), 
-                z[local_nx+1:VNO_dim]
-            )
-            jnnz = length(jacobian_structure)
-            ret[1:local_nx] .= ones(local_nx)
-            ret[local_nx+1:jnnz] .= -reshape(dyn_jac', local_nx * (local_nx + local_nu))
-            return
-        end,
-        hessian_lagrangian_structure = hessian_lagrangian_structure,
-        eval_hessian_lagrangian = (ret, z, λ) -> begin
-            hess = ForwardDiff.hessian(
-                xu -> dot(λ, atlas_dynamics(local_atlas, local_h, xu...)), 
-                z[local_nx+1:VNO_dim]
-            )
-            hnnz = length(hessian_lagrangian_structure)
-            ret[1:hnnz] .= -reshape(hess, hnnz)
-            return
-        end
-    )
-    
-    # Dynamics constraints
-    for t in 1:N-1
-        vars = vcat(X[t+1, :], X_perturbed[t, :], U[t, :])
-        @constraint(det_equivalent, vars in VNO)
-    end
-    
-    # Generate uncertainty samples
-    uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, N-1)
-    for t in 1:N-1
-        uncertainty_samples[t] = [(w[t, i], perturbation_scale * randn(num_scenarios)) for i in 1:n_perturb]
-    end
-    
-    # State parameters for DecisionRules.jl
-    state_params_in = [collect(X[t, :]) for t in 1:N-1]
-    state_params_out = [[(target[t,i], X[t+1,i]) for i in 1:nx] for t in 1:N-1]
-    
-    initial_state = copy(x_ref)
-    
-    return det_equivalent, state_params_in, state_params_out, initial_state, uncertainty_samples,
-           X, U, x_ref, u_ref, atlas
 end
