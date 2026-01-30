@@ -53,6 +53,12 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Op
     "linear_solver" => "ma27"
 ))
 
+diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
+    "print_level" => 0,
+    "hsllib" => HSL_jll.libhsl_path,
+    "linear_solver" => "ma27"
+))
+
 @time subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples,
       _, _, x_ref, u_ref, atlas = build_atlas_subproblems(;
     N = N,
@@ -128,13 +134,8 @@ windows = DecisionRules.setup_shooting_windows(
     Float64.(initial_state),
     uncertainty_samples;
     window_size=window_size,
-    optimizer_factory=diff_optimizer,
+    model_factory=diff_model,
 )
-
-# loop over windows and set diffopt backend
-for window in windows
-    MOI.set(window.model, DiffOpt.ModelConstructor(), DiffOpt.NonLinearProgram.Model)
-end
 
 # ============================================================================
 # Initial Evaluation

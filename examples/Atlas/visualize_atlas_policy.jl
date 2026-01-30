@@ -23,7 +23,7 @@ include(joinpath(Atlas_dir, "atlas_visualization.jl"))
 # ============================================================================
 
 # Model to load (modify this path to your trained model)
-model_path = "./models/atlas-balancing-deteq-N10-2026-01-28T17:53:58.216.jld2"  # Set to path of trained model, or nothing to use latest
+model_path = "./models/atlas-balancing-deteq-N10-2026-01-29T12:52:04.657.jld2"  # Set to path of trained model, or nothing to use latest
 
 # Problem parameters (should match training)
 N = 50                          # Number of time steps

@@ -91,7 +91,7 @@ windows = DecisionRules.setup_shooting_windows(
     Float64.(initial_state_w),
     uncert_w;
     window_size=window_size,
-    optimizer_factory=diff_optimizer,
+    model_factory=diff_optimizer,
 )
 
 uncertainties_w = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]

@@ -426,7 +426,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "verbose" => 0))
+                subproblems[t] = DiffOpt.diff_model(Ipopt.Optimizer)
                 @variable(subproblems[t], x[1:3] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -454,7 +454,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=window_size,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(Ipopt.Optimizer)
+                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
             )
             
             @test length(windows) == 3  # 6 stages / 2 window_size = 3 windows
@@ -479,7 +479,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=4,  # 6 stages / 4 = 2 windows, last window has 2 stages
-                optimizer_factory=() -> DiffOpt.diff_optimizer(Ipopt.Optimizer)
+                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
             )
             
             @test length(windows_odd) == 2
@@ -535,7 +535,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "verbose" => 0))
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -562,7 +562,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(Ipopt.Optimizer)
+                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
             )
             
             @test length(windows) == 1  # Only one window for 2 stages with window_size=2
@@ -630,7 +630,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer)
+                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer)
             )
 
             window = windows[1]
@@ -662,7 +662,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "verbose" => 0))
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -688,7 +688,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(Ipopt.Optimizer)
+                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
             )
             
             window = windows[1]
@@ -733,7 +733,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "verbose" => 0))
+                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -760,7 +760,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(Ipopt.Optimizer)
+                model_factory=() -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
             )
             
             @test length(windows) == 2
@@ -808,7 +808,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "verbose" => 0))
+                subproblems[t] = DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -834,7 +834,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(Ipopt.Optimizer)
+                model_factory=() -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
             )
             
             # Set uncertainty values
@@ -899,7 +899,7 @@ end
                 Float64.(initial_state),
                 uncertainty_samples;
                 window_size=2,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer)
+                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer)
             )
 
             # Policy expects flat [u1, u2, state] input
@@ -952,7 +952,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
+                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer),
             )
 
             DecisionRules.train_multiple_shooting(
@@ -1068,7 +1068,7 @@ end
                 Float64.(initial_state),
                 uncertainty_samples_w;
                 window_size=6,
-                optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
+                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer),
             )
             # Variable count checks
             stage_var_count = sum(length.(all_variables.(subproblems_s)))

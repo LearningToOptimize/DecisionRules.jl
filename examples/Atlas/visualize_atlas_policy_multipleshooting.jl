@@ -80,6 +80,12 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Op
     "linear_solver" => "ma27"
 ))
 
+diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
+    "print_level" => 0,
+    "hsllib" => HSL_jll.libhsl_path,
+    "linear_solver" => "ma27"
+))
+
 @time subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples,
       _, _, _, _, _ = build_atlas_subproblems(;
     atlas = atlas,
@@ -101,7 +107,7 @@ windows = DecisionRules.setup_shooting_windows(
     Float64.(initial_state),
     uncertainty_samples;
     window_size=window_size,
-    optimizer_factory=diff_optimizer,
+    model_factory=diff_model,
 )
 
 println("Atlas state dimension: $nx")
