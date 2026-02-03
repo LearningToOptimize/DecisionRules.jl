@@ -49,6 +49,12 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Op
     "linear_solver" => "ma27"
 ))
 
+diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
+    "print_level" => 0,
+    "hsllib" => HSL_jll.libhsl_path,
+    "linear_solver" => "ma27"
+))
+
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name), formulation_file;
     num_stages=num_stages,
@@ -105,7 +111,7 @@ windows = DecisionRules.setup_shooting_windows(
     Float64.(initial_state),
     uncertainty_samples;
     window_size=window_size,
-    optimizer_factory=diff_optimizer,
+    model_factory=diff_model,
 )
 
 objective_values = [begin

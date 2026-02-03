@@ -478,7 +478,7 @@ end
 
 """
     setup_shooting_windows(subproblems, state_params_in, state_params_out, initial_state,
-                           uncertainties; window_size, optimizer_factory=nothing)
+                           uncertainties; window_size, model_factory=() -> JuMP.Model())
 
 Build window models for multiple shooting.
 
@@ -492,7 +492,7 @@ function setup_shooting_windows(
     initial_state::Vector{Float64},
     uncertainties;  # typically Vector{Vector{Tuple{VariableRef,Vector{Float64}}}} or similar
     window_size::Int,
-    optimizer_factory=nothing,
+    model_factory=() -> JuMP.Model(),
 ) where {U}
 
     num_stages = length(subproblems)
@@ -510,10 +510,7 @@ function setup_shooting_windows(
         window_state_params_out = [state_params_out[t] for t in stage_range]
         window_uncertainties = uncertainties[stage_range]
 
-        window_model = JuMP.Model()
-        if optimizer_factory !== nothing
-            set_optimizer(window_model, optimizer_factory)
-        end
+        window_model = model_factory()
 
         # Build window equivalent model without mutating the originals.
         window_model,

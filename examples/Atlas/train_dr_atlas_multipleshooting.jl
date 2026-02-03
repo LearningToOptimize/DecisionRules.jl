@@ -1,8 +1,5 @@
 # Train DecisionRules.jl policy for Atlas Robot Balancing
-# Using Deterministic Equivalent Formulation
-#
-# This script trains a neural network policy using the deterministic equivalent
-# formulation (single large optimization problem) instead of decomposed subproblems.
+# Using multiple shooting (windowed decomposition)
 
 using Flux
 using DecisionRules
@@ -13,6 +10,7 @@ import Ipopt, HSL_jll
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
+import MathOptInterface as MOI
 
 Atlas_dir = dirname(@__FILE__)
 include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
@@ -22,17 +20,18 @@ include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
 # ============================================================================
 
 # Problem parameters
-N = 10                          # Number of time steps
+N = 50                          # Number of time steps
 h = 0.01                        # Time step
 perturbation_scale = 1.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
 penalty = 10.0                   # Penalty for state deviation
 perturbation_frequency = 5      # Frequency of perturbations (every k stages)
+window_size = 5                 # Multiple shooting window length
 
 # Training parameters
 num_epochs = 1
 num_batches = 100
-num_train_per_batch = 1
+_num_train_per_batch = 1
 layers = Int64[64, 64]
 activation = sigmoid
 optimizers = [Flux.Adam(0.001)]
@@ -40,16 +39,27 @@ optimizers = [Flux.Adam(0.001)]
 # Save paths
 model_dir = joinpath(Atlas_dir, "models")
 mkpath(model_dir)
-save_file = "atlas-balancing-deteq-N$(N)-$(now())"
+save_file = "atlas-balancing-shooting-N$(N)-w$(window_size)-$(now())"
 
 # ============================================================================
-# Build Deterministic Equivalent Problem
+# Build Subproblems
 # ============================================================================
 
-println("Building Atlas deterministic equivalent problem...")
+println("Building Atlas subproblems...")
 
-# First build subproblems to get the structure
-@time subproblems, state_params_in_sub, state_params_out_sub, initial_state, uncertainty_samples,
+diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Optimizer,
+    "print_level" => 0,
+    "hsllib" => HSL_jll.libhsl_path,
+    "linear_solver" => "ma27"
+))
+
+diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
+    "print_level" => 0,
+    "hsllib" => HSL_jll.libhsl_path,
+    "linear_solver" => "ma27"
+))
+
+@time subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples,
       _, _, x_ref, u_ref, atlas = build_atlas_subproblems(;
     N = N,
     h = h,
@@ -57,24 +67,7 @@ println("Building Atlas deterministic equivalent problem...")
     num_scenarios = num_scenarios,
     penalty = penalty,
     perturbation_frequency = perturbation_frequency,
-)
-
-# Build deterministic equivalent
-det_equivalent = DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma97",
-    # "mu_target" => 1e-8,
-))
-
-# Convert subproblems to deterministic equivalent using DecisionRules
-det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent!(
-    det_equivalent, 
-    subproblems, 
-    state_params_in_sub, 
-    state_params_out_sub, 
-    initial_state, 
-    uncertainty_samples
+    optimizer = diff_optimizer,
 )
 
 nx = atlas.nx
@@ -85,6 +78,7 @@ println("Atlas state dimension: $nx")
 println("Atlas control dimension: $nu")
 println("Number of perturbations: $n_perturb")
 println("Number of stages: $(N-1)")
+println("Window size: $window_size")
 
 # ============================================================================
 # Logging
@@ -99,12 +93,14 @@ lg = WandbLogger(
         "perturbation_scale" => perturbation_scale,
         "num_scenarios" => num_scenarios,
         "penalty" => penalty,
+        "perturbation_frequency" => perturbation_frequency,
+        "window_size" => window_size,
         "layers" => layers,
         "activation" => string(activation),
         "optimizer" => string(optimizers),
         "nx" => nx,
         "nu" => nu,
-        "formulation" => "deterministic_equivalent",
+        "training_method" => "multiple_shooting",
     )
 )
 
@@ -120,7 +116,7 @@ end
 # Policy architecture: LSTM processes perturbations, Dense combines with previous state
 # This design is memory-efficient and allows the LSTM to focus on temporal patterns
 n_uncertainties = length(uncertainty_samples[1])
-models = state_conditioned_policy(n_uncertainties, nx, nx, layers; 
+models = state_conditioned_policy(n_uncertainties, nx, nx, layers;
                                    activation=activation, encoder_type=Flux.LSTM)
 
 println("Model architecture: StateConditionedPolicy")
@@ -128,34 +124,51 @@ println("  Encoder (LSTM): $n_uncertainties -> $(layers)")
 println("  Combiner (Dense): $(layers[end]) + $nx -> $nx")
 
 # ============================================================================
+# Setup multiple shooting windows
+# ============================================================================
+
+windows = DecisionRules.setup_shooting_windows(
+    subproblems,
+    state_params_in,
+    state_params_out,
+    Float64.(initial_state),
+    uncertainty_samples;
+    window_size=window_size,
+    model_factory=diff_model,
+)
+
+# ============================================================================
 # Initial Evaluation
 # ============================================================================
 
 println("\nEvaluating initial policy...")
 Random.seed!(8788)
-objective_values = [simulate_multistage(
-    det_equivalent, state_params_in_sub, state_params_out_sub, 
-    initial_state, DecisionRules.sample(uncertainty_samples_det), 
-    models;
-) for _ in 1:2]
+objective_values = [begin
+    uncertainty_sample = DecisionRules.sample(uncertainty_samples)
+    uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
+    DecisionRules.simulate_multiple_shooting(
+        windows,
+        models,
+        Float32.(initial_state),
+        uncertainty_sample,
+        uncertainties_vec
+    )
+end for _ in 1:2]
+
 best_obj = mean(objective_values)
 println("Initial objective: $best_obj")
 
-# for testing visualization. fill x with visited states
-# X[2:end] = [value.([var[2] for var in stage]) for stage in state_params_out_sub]
-# calculate distance from reference
-# dist = sum((X[t][i] - x_ref[i])^2 for i in 1:length(x_ref) for t in 1:length(X))
-
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
+convergence_criterium = StallingCriterium(200, best_obj, 0)
 
 # ============================================================================
 # Hyperparameter Adjustment
 # ============================================================================
 
 adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
-    if iter % 500 == 0
-        num_train_per_batch = min(num_train_per_batch * 2, 8)
+    if iter % 2100 == 0
+        num_train_per_batch = num_train_per_batch * 2
     end
     return num_train_per_batch
 end
@@ -164,47 +177,30 @@ end
 # Training
 # ============================================================================
 
-println("\nStarting training with deterministic equivalent...")
+println("\nStarting training with multiple shooting...")
 println("Epochs: $num_epochs, Batches per epoch: $num_batches")
 
-for epoch in 1:num_epochs
-    println("\n=== Epoch $epoch ===")
-    _num_train_per_batch = num_train_per_batch
-    
-    train_multistage(
-        models, 
-        initial_state, 
-        det_equivalent, 
-        state_params_in_sub, 
-        state_params_out_sub, 
-        uncertainty_samples_det;
-        num_batches = num_batches,
-        num_train_per_batch = _num_train_per_batch,
-        optimizer = optimizers[min(epoch, length(optimizers))],
-        record_loss = (iter, model, loss, tag) -> begin
+for iter in 1:num_epochs
+    num_train_per_batch = _num_train_per_batch
+    train_multiple_shooting(
+        models,
+        initial_state,
+        windows,
+        () -> uncertainty_samples;
+        num_batches=num_batches,
+        num_train_per_batch=num_train_per_batch,
+        optimizer=optimizers[floor(Int, min(iter, length(optimizers)))],
+        record_loss=(iter, model, loss, tag) -> begin
             if tag == "metrics/training_loss"
                 save_control(iter, model, loss)
+                record_loss(iter, model, loss, tag)
+                return convergence_criterium(iter, model, loss)
             end
             return record_loss(iter, model, loss, tag)
         end,
-        adjust_hyperparameters = adjust_hyperparameters
+        adjust_hyperparameters=adjust_hyperparameters
     )
 end
-
-# ============================================================================
-# Final Evaluation
-# ============================================================================
-
-println("\n=== Final Evaluation ===")
-Random.seed!(8788)
-objective_values = [simulate_multistage(
-    det_equivalent, state_params_in_sub, state_params_out_sub, 
-    initial_state, DecisionRules.sample(uncertainty_samples_det), 
-    models;
-) for _ in 1:10]
-
-println("Final objective: $(mean(objective_values)) ± $(std(objective_values))")
-println("Best objective during training: $(save_control.best_loss)")
 
 # Finish logging
 close(lg)

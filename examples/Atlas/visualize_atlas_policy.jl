@@ -23,13 +23,14 @@ include(joinpath(Atlas_dir, "atlas_visualization.jl"))
 # ============================================================================
 
 # Model to load (modify this path to your trained model)
-model_path = nothing  # Set to path of trained model, or nothing to use latest
+model_path = "./models/atlas-balancing-deteq-N10-2026-01-29T12:52:04.657.jld2"  # Set to path of trained model, or nothing to use latest
 
 # Problem parameters (should match training)
 N = 50                          # Number of time steps
 h = 0.01                        # Time step  
-perturbation_scale = 0.05       # Scale of random perturbations
-num_scenarios = 10              # Number of scenarios to simulate
+perturbation_scale = 1.5       # Scale of random perturbations
+num_scenarios = 1              # Number of scenarios to simulate
+perturbation_frequency = 5     # Frequency of perturbations (every k stages)
 
 # Visualization options
 animate_robot = true            # Whether to animate in MeshCat
@@ -87,6 +88,7 @@ println("Control dimension: $nu")
     h = h,
     perturbation_scale = perturbation_scale,
     num_scenarios = num_scenarios,
+    perturbation_frequency = perturbation_frequency,
 )
 
 # ============================================================================
@@ -97,19 +99,16 @@ println("Control dimension: $nu")
 layers = [64, 64]
 activation = sigmoid
 
-models = Chain(
-    Dense(nx, layers[1], activation),
-    x -> reshape(x, :, 1),
-    Flux.LSTM(layers[1] => layers[2]),
-    x -> x[:, end],
-    Dense(layers[2], nx)
+n_uncertainties = length(uncertainty_samples[1])
+models = state_conditioned_policy(n_uncertainties, nx, nx, layers; 
+    activation=activation, encoder_type=Flux.LSTM
 )
 
 if !use_random_policy
     # Load trained weights
     model_data = JLD2.load(model_path)
     if haskey(model_data, "model_state")
-        Flux.loadmodel!(models, model_data["model_state"])
+        Flux.loadmodel!(models, normalize_recur_state(model_data["model_state"]))
         println("Loaded trained model weights")
     else
         println("Warning: Could not find model_state in file, using random weights")
@@ -133,8 +132,8 @@ for s in 1:num_scenarios
     # Sample perturbations
     perturbation_sample = DecisionRules.sample(uncertainty_samples)
     
-    # Record perturbations for this scenario
-    all_perturbations[s] = [p[1] for p in perturbation_sample]  # First (and only) perturbation per stage
+    # Record perturbations for this scenario (first perturbation per stage)
+    all_perturbations[s] = [stage_u[1][2] for stage_u in perturbation_sample]
     
     # Simulate using the policy
     try

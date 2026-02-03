@@ -130,10 +130,23 @@ policy = Chain(
     Dense(64, length(initial_state)),
 )
 
+windows = DecisionRules.setup_shooting_windows(
+    subproblems,
+    state_params_in,
+    state_params_out,
+    Float64.(initial_state),
+    uncertainty_samples;
+    window_size=24,
+    model_factory=() -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(
+        SCS.Optimizer,
+        "verbose" => 0,
+    )),
+)
+
 DecisionRules.train_multiple_shooting(
     policy,
     initial_state,
-    subproblems,
+    windows,
     state_params_in,
     state_params_out,
     uncertainty_sampler;
@@ -141,32 +154,6 @@ DecisionRules.train_multiple_shooting(
     num_batches=100,
     num_train_per_batch=32,
     optimizer=Flux.Adam(1e-3),
-    optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
-)
-```
-
-If you want lower-level control, you can pre-build the window models once:
-
-```julia
-windows = DecisionRules.setup_shooting_windows(
-    subproblems,
-    state_params_in,
-    state_params_out,
-    Float64.(initial_state),
-    uncertainties_structure;
-    window_size=24,
-    optimizer_factory=() -> DiffOpt.diff_optimizer(SCS.Optimizer),
-)
-
-uncertainty_sample = uncertainty_sampler()
-uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
-
-obj = DecisionRules.simulate_multiple_shooting(
-    windows,
-    policy,
-    Float32.(initial_state),
-    uncertainty_sample,
-    uncertainties_vec,
 )
 ```
 
