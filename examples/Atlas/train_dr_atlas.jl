@@ -20,11 +20,12 @@ include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
 # ============================================================================
 
 # Problem parameters
-N = 11                          # Number of time steps
+N = 10                          # Number of time steps
 h = 0.01                        # Time step
-perturbation_scale = 0.05       # Scale of random perturbations
+perturbation_scale = 0.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
-penalty = 1e3                   # Penalty for state deviation
+penalty = 10.0                   # Penalty for state deviation
+perturbation_frequency = 1      # Frequency of perturbations (every k stages)
 
 # Training parameters
 num_epochs = 1
@@ -38,6 +39,17 @@ optimizers = [Flux.Adam(0.001)]
 model_dir = joinpath(Atlas_dir, "models")
 mkpath(model_dir)
 save_file = "atlas-balancing-N$(N)-$(now())"
+# Warm start options:
+# - set to `nothing` to train from random initialization
+# - set to "latest" to use the most recent deterministic-equivalent model in `model_dir`
+# - set to a run name (with or without `.jld2`) or a full path
+#   e.g. "atlas-balancing-deteq-N50-2026-02-02T21:16:37.554"
+warmstart_model = "atlas-balancing-deteq-N50-2026-02-08T14:25:13.534"
+# CLI override:
+# julia --project=. examples/Atlas/train_dr_atlas.jl <warmstart_model>
+if !isempty(ARGS)
+    warmstart_model = ARGS[1]
+end
 
 # ============================================================================
 # Build Problem
@@ -51,6 +63,7 @@ println("Building Atlas subproblems...")
     perturbation_scale = perturbation_scale,
     num_scenarios = num_scenarios,
     penalty = penalty,
+    perturbation_frequency = perturbation_frequency,
 )
 
 nx = atlas.nx
@@ -75,11 +88,14 @@ lg = WandbLogger(
         "perturbation_scale" => perturbation_scale,
         "num_scenarios" => num_scenarios,
         "penalty" => penalty,
+        "perturbation_frequency" => perturbation_frequency,
         "layers" => layers,
         "activation" => string(activation),
         "optimizer" => string(optimizers),
         "nx" => nx,
         "nu" => nu,
+        "formulation" => "stagewise_decomposition",
+        "warmstart_model" => isnothing(warmstart_model) ? "none" : string(warmstart_model),
     )
 )
 
@@ -97,6 +113,47 @@ end
 n_uncertainties = length(uncertainty_samples[1])
 models = state_conditioned_policy(n_uncertainties, nx, nx, layers; 
                                    activation=activation, encoder_type=Flux.LSTM)
+
+function resolve_warmstart_path(warmstart_model, model_dir)
+    isnothing(warmstart_model) && return nothing
+
+    if warmstart_model == "latest"
+        model_files = filter(
+            f -> endswith(f, ".jld2") && startswith(f, "atlas-balancing-deteq"),
+            readdir(model_dir),
+        )
+        isempty(model_files) && return nothing
+        model_files_full = [joinpath(model_dir, f) for f in model_files]
+        return model_files_full[argmax([mtime(f) for f in model_files_full])]
+    end
+
+    candidates = String[warmstart_model]
+    push!(candidates, joinpath(model_dir, warmstart_model))
+    if !endswith(warmstart_model, ".jld2")
+        push!(candidates, warmstart_model * ".jld2")
+        push!(candidates, joinpath(model_dir, warmstart_model * ".jld2"))
+    end
+
+    for candidate in candidates
+        isfile(candidate) && return candidate
+    end
+    return nothing
+end
+
+warmstart_model_path = resolve_warmstart_path(warmstart_model, model_dir)
+if isnothing(warmstart_model)
+    println("Warm start: disabled (random initialization)")
+elseif isnothing(warmstart_model_path)
+    error("Warm start model not found: $(warmstart_model)")
+else
+    model_data = JLD2.load(warmstart_model_path)
+    if haskey(model_data, "model_state")
+        Flux.loadmodel!(models, normalize_recur_state(model_data["model_state"]))
+        println("Warm start: loaded model weights from $warmstart_model_path")
+    else
+        error("Warm start model is missing `model_state`: $warmstart_model_path")
+    end
+end
 
 println("Model architecture: StateConditionedPolicy")
 println("  Encoder (LSTM): $n_uncertainties -> $(layers)")
