@@ -1,6 +1,5 @@
 using DecisionRules
 using Test
-using SCS
 using Ipopt
 using JuMP
 import MathOptInterface as MOI
@@ -23,20 +22,20 @@ function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val
     @constraint(subproblem, state_out_var == state_in + uncertainty - x)
     @constraint(subproblem, x + y >= d)
     @constraint(subproblem, _deficit == state_out_var - state_out)
-    @constraint(subproblem, [norm_deficit; _deficit] in SecondOrderCone())
+    @constraint(subproblem, [norm_deficit; _deficit] in MOI.NormOneCone(2))
     @objective(subproblem, Min, 30 * y + norm_deficit * 10^4)
     return subproblem, state_in, state_out, state_out_var, uncertainty
 end
 
 @testset "DecisionRules.jl" begin
     @testset "pdual at infeasibility" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)), state_out_val=9.0)
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer), state_out_val=9.0)
         optimize!(subproblem1)
         @test DecisionRules.pdual(state_in_1) ≈ -1.0e4 rtol=1.0e-1
         @test DecisionRules.pdual(state_out_1) ≈ 1.0e4 rtol=1.0e-1
     end
 
-    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)))
+    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
 
     optimize!(subproblem1)
 
@@ -80,8 +79,8 @@ end
     end
 
     @testset "simulate_multistage (per-stage)" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)))
-        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)))
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
@@ -137,7 +136,7 @@ end
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
-            DiffOpt.nonlinear_diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0)),
+            DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
             subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples
         )
 
@@ -176,7 +175,7 @@ end
         # ∂obj/∂p = -1 * 1 = -1 (since p appears with coef 1 in RHS equivalent: x - p >= 0)
         # But in our formulation: x >= p => x - p >= 0, so coef of p is -1
         # dual contribution = -(-1) * 1 = 1
-        model1 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model1 = Model(Ipopt.Optimizer)
         @variable(model1, x1 >= 0)
         @variable(model1, p1 in MOI.Parameter(2.0))
         @constraint(model1, con1, x1 - p1 >= 0)
@@ -187,7 +186,7 @@ end
         # Test 2: Parameter in objective
         # min x + 2*p  s.t. x >= 1
         # ∂obj/∂p = 2 (from objective directly, minimization)
-        model2 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model2 = Model(Ipopt.Optimizer)
         @variable(model2, x2 >= 0)
         @variable(model2, p2 in MOI.Parameter(3.0))
         @constraint(model2, x2 >= 1)
@@ -199,7 +198,7 @@ end
         # min x + p  s.t. x >= 2*p
         # At optimality x* = 2p, constraint dual = 1
         # ∂obj/∂p = 1 (from obj) + (-(-2) * 1) = 1 + 2 = 3
-        model3 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model3 = Model(Ipopt.Optimizer)
         @variable(model3, x3 >= 0)
         @variable(model3, p3 in MOI.Parameter(1.0))
         @constraint(model3, con3, x3 - 2 * p3 >= 0)
@@ -210,7 +209,7 @@ end
         # Test 4: Maximization problem
         # max -x + p  s.t. x >= 1
         # Equivalent to min x - p, so ∂obj/∂p = -(-1) = 1 for max
-        model4 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model4 = Model(Ipopt.Optimizer)
         @variable(model4, x4 >= 0)
         @variable(model4, p4 in MOI.Parameter(1.0))
         @constraint(model4, x4 >= 1)
@@ -219,7 +218,7 @@ end
         @test compute_parameter_dual(model4, p4) ≈ -1.0 rtol=1.0e-2
 
         # Test 5: SOC constraint with parameter (similar to existing pdual tests)
-        model5 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model5 = Model(Ipopt.Optimizer)
         @variable(model5, x5 >= 0.0)
         @variable(model5, 0.0 <= y5 <= 8.0)
         @variable(model5, 0.0 <= state_out_var5 <= 8.0)
@@ -231,7 +230,7 @@ end
         @constraint(model5, state_out_var5 == state_in5 + uncertainty5 - x5)
         @constraint(model5, x5 + y5 >= 10)
         @constraint(model5, _deficit5 == state_out_var5 - state_out5)
-        @constraint(model5, [norm_deficit5; _deficit5] in SecondOrderCone())
+        @constraint(model5, [norm_deficit5; _deficit5] in MOI.NormOneCone(2))
         @objective(model5, Min, 30 * y5 + norm_deficit5 * 10^4)
         optimize!(model5)
         @test compute_parameter_dual(model5, state_in5) ≈ -30.0 rtol=1.0e-1
@@ -240,7 +239,7 @@ end
 
     @testset "create_deficit!" begin
         # Test 1: L1 norm only (default/legacy behavior)
-        model1 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model1 = Model(Ipopt.Optimizer)
         @variable(model1, x1)
         @variable(model1, state[1:3])
         @variable(model1, target[1:3])
@@ -256,11 +255,11 @@ end
             fix(target[i], 0.5 * i)  # deficit = 0.5 * i for each
         end
         optimize!(model1)
-        @test termination_status(model1) == MOI.OPTIMAL
+        @test termination_status(model1) == MOI.LOCALLY_SOLVED
         @test value(norm_deficit1) ≈ 3.0 rtol=1.0e-2  # L1 norm = |0.5| + |1.0| + |1.5| = 3.0
         
         # Test 2: L2 squared norm only (sum of squares)
-        model2 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model2 = Model(Ipopt.Optimizer)
         @variable(model2, x2)
         @variable(model2, state2[1:3])
         @variable(model2, target2[1:3])
@@ -275,12 +274,12 @@ end
             fix(target2[i], 0.5 * i)
         end
         optimize!(model2)
-        @test termination_status(model2) == MOI.OPTIMAL
+        @test termination_status(model2) == MOI.LOCALLY_SOLVED
         # L2 squared = 0.5^2 + 1.0^2 + 1.5^2 = 3.5
         @test value(norm_deficit2) ≈ 3.5 rtol=1.0e-2
         
         # Test 3: Both L1 and L2 squared norms
-        model3 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model3 = Model(Ipopt.Optimizer)
         @variable(model3, x3)
         @variable(model3, state3[1:3])
         @variable(model3, target3[1:3])
@@ -295,13 +294,13 @@ end
             fix(target3[i], 0.5 * i)
         end
         optimize!(model3)
-        @test termination_status(model3) == MOI.OPTIMAL
+        @test termination_status(model3) == MOI.LOCALLY_SOLVED
         # Combined: 100 * 3.0 + 50 * 3.5 = 300 + 175 = 475
         expected_combined = 100.0 * 3.0 + 50.0 * 3.5
         @test value(norm_deficit3) ≈ expected_combined rtol=1.0e-2
         
         # Test 4: Verify backward compatibility with legacy 'penalty' argument
-        model4 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model4 = Model(Ipopt.Optimizer)
         @variable(model4, x4)
         @objective(model4, Min, x4)
         fix(x4, 1.0)
@@ -309,10 +308,10 @@ end
         @test length(_deficit4) == 2
         # Should create L1 norm constraint (backwards compatible)
         optimize!(model4)
-        @test termination_status(model4) == MOI.OPTIMAL
+        @test termination_status(model4) == MOI.LOCALLY_SOLVED
         
         # Test 5: Verify objective contribution with L1 norm
-        model5 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model5 = Model(Ipopt.Optimizer)
         @variable(model5, y5 >= 0)
         @objective(model5, Min, 10 * y5)
         @constraint(model5, y5 >= 1)  # Forces y5 = 1
@@ -320,13 +319,13 @@ end
         @constraint(model5, _deficit5[1] == 2.0)  # Fixed deficit
         @constraint(model5, _deficit5[2] == 3.0)  # Fixed deficit
         optimize!(model5)
-        @test termination_status(model5) == MOI.OPTIMAL
+        @test termination_status(model5) == MOI.LOCALLY_SOLVED
         @test value(norm_deficit5) ≈ 5.0 rtol=1.0e-2  # L1 = 2 + 3 = 5
         # Total objective = 10 * 1 + 100 * 5 = 510
         @test objective_value(model5) ≈ 510.0 rtol=1.0e-2
         
         # Test 6: Verify objective contribution with L2 squared norm
-        model6 = Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+        model6 = Model(Ipopt.Optimizer)
         @variable(model6, y6 >= 0)
         @objective(model6, Min, 10 * y6)
         @constraint(model6, y6 >= 1)
@@ -334,7 +333,7 @@ end
         @constraint(model6, _deficit6[1] == 3.0)
         @constraint(model6, _deficit6[2] == 4.0)
         optimize!(model6)
-        @test termination_status(model6) == MOI.OPTIMAL
+        @test termination_status(model6) == MOI.LOCALLY_SOLVED
         @test value(norm_deficit6) ≈ 25.0 rtol=1.0e-2  # L2 squared = 9 + 16 = 25
         # Total objective = 10 * 1 + 100 * 25 = 2510
         @test objective_value(model6) ≈ 2510.0 rtol=1.0e-2
@@ -608,7 +607,7 @@ end
             state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
-            subproblems[1] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            subproblems[1] = DiffOpt.diff_model(Ipopt.Optimizer)
             @variable(subproblems[1], x)
             @variable(subproblems[1], state_in)
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.1))
@@ -630,7 +629,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer)
+                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer)
             )
 
             window = windows[1]
@@ -874,7 +873,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                subproblems[t] = DiffOpt.diff_model(Ipopt.Optimizer)
                 @variable(subproblems[t], x)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], u1 in MOI.Parameter(0.1))
@@ -883,7 +882,6 @@ end
                 @variable(subproblems[t], state_out_var)
                 @constraint(subproblems[t], state_out_var == state_in + u1 + u2)
                 @constraint(subproblems[t], x == state_out_var)
-                @constraint(subproblems[t], state_out_var == state_out)
                 @objective(subproblems[t], Min, x)
 
                 state_params_in[t] = [state_in]
@@ -899,7 +897,7 @@ end
                 Float64.(initial_state),
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer)
+                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer)
             )
 
             # Policy expects flat [u1, u2, state] input
@@ -926,7 +924,7 @@ end
             state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
-            subproblems[1] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            subproblems[1] = DiffOpt.diff_model(Ipopt.Optimizer)
             @variable(subproblems[1], x)
             @variable(subproblems[1], state_in in MOI.Parameter(0.0))
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.0))
@@ -952,7 +950,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer),
+                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer),
             )
 
             DecisionRules.train_multiple_shooting(
@@ -977,7 +975,7 @@ end
                 uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
                 for t in 1:num_stages
-                    subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+                    subproblems[t] = DiffOpt.diff_model(Ipopt.Optimizer)
                     @variable(subproblems[t], reservoir_in)
                     @variable(subproblems[t], reservoir_out)
                     @variable(subproblems[t], inflow)
@@ -1035,7 +1033,7 @@ end
             # Deterministic equivalent
             subproblems_d, state_in_d, state_out_d, uncertainty_samples_d =
                 build_consistent_subproblems(num_stages)
-            det_model = JuMP.Model(optimizer_with_attributes(SCS.Optimizer, "verbose" => 0))
+            det_model = JuMP.Model(Ipopt.Optimizer)
             det_model, uncertainty_samples_d = DecisionRules.deterministic_equivalent!(
                 det_model,
                 subproblems_d,
@@ -1068,7 +1066,7 @@ end
                 Float64.(initial_state),
                 uncertainty_samples_w;
                 window_size=6,
-                model_factory=() -> DiffOpt.conic_diff_model(SCS.Optimizer),
+                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer),
             )
             # Variable count checks
             stage_var_count = sum(length.(all_variables.(subproblems_s)))
