@@ -17,7 +17,7 @@ jobs:
 
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1'
+          version: '1.10'
 
       - name: Install CompatHelper
         shell: julia --color=yes {0}
