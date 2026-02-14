@@ -1,25 +1,26 @@
 name: TagBot
 on:
   issue_comment:
-    types:
-      - created
+    types: [created]
   workflow_dispatch:
     inputs:
       lookback:
         default: 3
+
 permissions:
   actions: read
   checks: read
-  contents: write
+  contents: write        # required to push tags / create releases
   deployments: read
   issues: read
   discussions: read
   packages: read
   pages: read
-  pull-requests: read
+  pull-requests: write   # allow opening PRs if TagBot needs to
   repository-projects: read
   security-events: read
   statuses: read
+
 jobs:
   TagBot:
     if: github.event_name == 'workflow_dispatch' || github.actor == 'JuliaTagBot'
@@ -28,4 +29,4 @@ jobs:
       - uses: JuliaRegistries/TagBot@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ssh: ${{ secrets.DOCUMENTER_KEY }}
+          # ssh: ${{ secrets.DOCUMENTER_KEY }}   # REMOVE this line unless you actually set this secret
