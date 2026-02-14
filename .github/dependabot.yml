@@ -1,7 +1,13 @@
-# https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
 version: 2
 updates:
+  # 1) Julia deps: updates Project.toml compat bounds (and may update Manifest if you commit it)
+  - package-ecosystem: "julia"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # 2) GitHub Actions: keeps actions like checkout/setup-julia/cache up to date
   - package-ecosystem: "github-actions"
-    directory: "/" # Location of package manifests
+    directory: "/"
     schedule:
       interval: "weekly"
