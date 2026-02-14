@@ -1,7 +1,7 @@
 name = "DecisionRules"
 uuid = "47937410-f832-486f-8300-12c95b225dfc"
-authors = ["Andrew <arosemberg3@gatech.edu> and contributors"]
 version = "1.0.0-DEV"
+authors = ["Andrew <arosemberg3@gatech.edu> and contributors"]
 
 [deps]
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
@@ -24,6 +24,7 @@ ChainRulesCore = "1.25.2"
 DiffOpt = "0.5.4"
 FillArrays = "1.14.0"
 Flux = "0.14.21"
+Functors = "0.5"
 JLD2 = "0.6.3"
 JuMP = "1.29.4"
 MathOptInterface = "1.48.0"
