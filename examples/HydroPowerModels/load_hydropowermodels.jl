@@ -2,6 +2,7 @@ using JuMP
 using CSV
 using Tables
 using JSON
+import MathOptInterface as MOI
 
 function find_reservoirs_and_inflow(model::JuMP.Model)
     reservoir_in = find_variables(model, ["reservoir", "_in"])
@@ -57,7 +58,7 @@ function read_inflow(file::String, nHyd::Int; num_stages=nothing)
     return vector_inflows, nCen, num_stages
 end
 
-function build_hydropowermodels(case_folder::AbstractString, subproblem_file::AbstractString; num_stages=nothing, penalty=nothing, penalty_l1=nothing, penalty_l2=nothing, optimizer=nothing)
+function build_hydropowermodels(case_folder::AbstractString, subproblem_file::AbstractString; num_stages=nothing, penalty=nothing, penalty_l1=nothing, penalty_l2=nothing, optimizer=nothing, model_builder=nothing)
     hydro_file = JSON.parsefile(joinpath(case_folder, "hydro.json"))["Hydrogenerators"]
     nHyd = length(hydro_file)
     vector_inflows, nCen, num_stages = read_inflow(joinpath(case_folder, "inflows.csv"), nHyd; num_stages=num_stages)
@@ -72,6 +73,11 @@ function build_hydropowermodels(case_folder::AbstractString, subproblem_file::Ab
     for t in 1:num_stages
         subproblems[t] = JuMP.read_from_file(joinpath(case_folder, subproblem_file); use_nlp_block = false)
         # Set optimizer if provided (for DiffOpt support)
+        if !isnothing(model_builder)
+            model_aux = model_builder()
+            MOI.copy_to(backend(model_aux), subproblems[t])
+            subproblems[t] = model_aux
+        end
         if !isnothing(optimizer)
             set_optimizer(subproblems[t], optimizer)
         end

@@ -16,6 +16,7 @@ using Ipopt, HSL_jll # Gurobi, MosekTools, Ipopt, MadNLP
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
+using MadDiff, MadNLP
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -49,16 +50,18 @@ penalty_l1 = :auto
 # Build MSP using subproblems (not deterministic equivalent)
 
 # Define the DiffOpt optimizer for subproblems
-diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Optimizer, 
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma27"
-))
+# diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Optimizer, 
+#     "print_level" => 0,
+#     "hsllib" => HSL_jll.libhsl_path,
+#     "linear_solver" => "ma27"
+# ))
+
+model_builder = () -> MadDiff.nonlinear_diff_model(MadNLP.Optimizer)
 
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
     joinpath(HydroPowerModels_dir, case_name), formulation_file; 
     num_stages=num_stages,
-    optimizer=diff_optimizer,
+    model_builder=model_builder,
     penalty_l1=penalty_l1,
     penalty_l2=penalty_l2
 )

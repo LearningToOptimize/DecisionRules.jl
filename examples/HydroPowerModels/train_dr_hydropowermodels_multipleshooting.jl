@@ -8,6 +8,7 @@ using Ipopt, HSL_jll
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
+using MadDiff, MadNLP
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -49,11 +50,13 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Op
     "linear_solver" => "ma27"
 ))
 
-diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma27"
-))
+# diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
+#     "print_level" => 0,
+#     "hsllib" => HSL_jll.libhsl_path,
+#     "linear_solver" => "ma27"
+# ))
+
+diff_model = () -> MadDiff.diff_optimizer(MadNLP.Optimizer)
 
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name), formulation_file;
