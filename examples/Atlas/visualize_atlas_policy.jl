@@ -23,14 +23,14 @@ include(joinpath(Atlas_dir, "atlas_visualization.jl"))
 # ============================================================================
 
 # Model to load (modify this path to your trained model)
-model_path = "./models/atlas-balancing-deteq-N50-2026-02-09T18:53:00.104.jld2"  # Set to path of trained model, or nothing to use latest
+model_path = "./models/atlas-balancing-deteq-N10-2026-02-15T19:49:47.739.jld2"  # Set to path of trained model, or nothing to use latest
 
 # Problem parameters (should match training)
-N = 50                          # Number of time steps
+N = 300                          # Number of time steps
 h = 0.01                        # Time step  
-perturbation_scale = 1.5       # Scale of random perturbations
+perturbation_scale = 0.5       # Scale of random perturbations
 num_scenarios = 1              # Number of scenarios to simulate
-perturbation_frequency = 5     # Frequency of perturbations (every k stages)
+perturbation_frequency = 1000     # Frequency of perturbations (every k stages)
 
 # Visualization options
 animate_robot = true            # Whether to animate in MeshCat

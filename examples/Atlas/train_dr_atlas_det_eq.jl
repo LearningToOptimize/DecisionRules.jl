@@ -8,6 +8,7 @@ using Flux
 using DecisionRules
 using Random
 using Statistics
+using LinearAlgebra
 using JuMP
 import Ipopt, HSL_jll
 using Wandb, Dates, Logging
@@ -22,20 +23,34 @@ include(joinpath(Atlas_dir, "build_atlas_problem.jl"))
 # ============================================================================
 
 # Problem parameters
-N = 50                          # Number of time steps
+N = 10                          # Number of time steps
 h = 0.01                        # Time step
-perturbation_scale = 1.5       # Scale of random perturbations
+perturbation_scale = 0.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
 penalty = 10.0                   # Penalty for state deviation
-perturbation_frequency = 5      # Frequency of perturbations (every k stages)
+perturbation_frequency = 301      # Frequency of perturbations (every k stages)
 
 # Training parameters
-num_epochs = 1
-num_batches = 100
+num_epochs = 10
+num_batches = 10
 num_train_per_batch = 1
 layers = Int64[64, 64]
 activation = sigmoid
 optimizers = [Flux.Adam(0.001)]
+
+# Initial-state augmentation via short policy rollouts
+# If enabled, each eligible epoch starts training from a reachable state obtained
+# by rolling out the current policy for a small random number of stages.
+enable_rollout_initial_state_augmentation = true
+rollout_start_epoch = 1
+rollout_every_epochs = 1
+rollout_max_horizon_fraction = 10.0
+
+if enable_rollout_initial_state_augmentation
+    rollout_every_epochs < 1 && error("rollout_every_epochs must be >= 1")
+    (rollout_max_horizon_fraction <= 0) &&
+        error("rollout_max_horizon_fraction must be in (0, 1]")
+end
 
 # Save paths
 model_dir = joinpath(Atlas_dir, "models")
@@ -46,7 +61,7 @@ save_file = "atlas-balancing-deteq-N$(N)-$(now())"
 # - set to "latest" to use the most recent deterministic-equivalent model in `model_dir`
 # - set to a run name (with or without `.jld2`) or a full path
 #   e.g. "atlas-balancing-deteq-N50-2026-02-02T21:16:37.554"
-warmstart_model = "atlas-balancing-deteq-N50-2026-02-08T14:25:13.534"
+warmstart_model = "atlas-balancing-deteq-N5-2026-02-14T23:37:16.303"
 # CLI override:
 # julia --project=. examples/Atlas/train_dr_atlas_det_eq.jl <warmstart_model>
 if !isempty(ARGS)
@@ -59,9 +74,21 @@ end
 
 println("Building Atlas deterministic equivalent problem...")
 
-# First build subproblems to get the structure
-@time subproblems, state_params_in_sub, state_params_out_sub, initial_state, uncertainty_samples,
+# Build one subproblem set dedicated to deterministic-equivalent construction.
+# `deterministic_equivalent!` mutates this data.
+@time subproblems_det, state_params_in_det, state_params_out_det, initial_state, uncertainty_samples_det_builder,
       _, _, x_ref, u_ref, atlas = build_atlas_subproblems(;
+    N = N,
+    h = h,
+    perturbation_scale = perturbation_scale,
+    num_scenarios = num_scenarios,
+    penalty = penalty,
+    perturbation_frequency = perturbation_frequency,
+)
+
+# Build a second, independent subproblem set used only for rollout-based initial-state generation.
+@time rollout_subproblems, rollout_state_params_in, rollout_state_params_out, rollout_initial_state, rollout_uncertainty_samples,
+      _, _, _, _, _ = build_atlas_subproblems(;
     N = N,
     h = h,
     perturbation_scale = perturbation_scale,
@@ -81,16 +108,16 @@ det_equivalent = DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Op
 # Convert subproblems to deterministic equivalent using DecisionRules
 det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent!(
     det_equivalent, 
-    subproblems, 
-    state_params_in_sub, 
-    state_params_out_sub, 
+    subproblems_det, 
+    state_params_in_det, 
+    state_params_out_det, 
     initial_state, 
-    uncertainty_samples
+    uncertainty_samples_det_builder
 )
 
 nx = atlas.nx
 nu = atlas.nu
-n_perturb = length(uncertainty_samples[1])  # Number of perturbation parameters
+n_perturb = length(rollout_uncertainty_samples[1])  # Number of perturbation parameters
 
 println("Atlas state dimension: $nx")
 println("Atlas control dimension: $nu")
@@ -117,6 +144,10 @@ lg = WandbLogger(
         "nu" => nu,
         "formulation" => "deterministic_equivalent",
         "warmstart_model" => isnothing(warmstart_model) ? "none" : string(warmstart_model),
+        "enable_rollout_initial_state_augmentation" => enable_rollout_initial_state_augmentation,
+        "rollout_start_epoch" => rollout_start_epoch,
+        "rollout_every_epochs" => rollout_every_epochs,
+        "rollout_max_horizon_fraction" => rollout_max_horizon_fraction,
     )
 )
 
@@ -131,7 +162,7 @@ end
 
 # Policy architecture: LSTM processes perturbations, Dense combines with previous state
 # This design is memory-efficient and allows the LSTM to focus on temporal patterns
-n_uncertainties = length(uncertainty_samples[1])
+n_uncertainties = length(rollout_uncertainty_samples[1])
 models = state_conditioned_policy(n_uncertainties, nx, nx, layers; 
                                    activation=activation, encoder_type=Flux.LSTM)
 
@@ -187,7 +218,7 @@ println("  Combiner (Dense): $(layers[end]) + $nx -> $nx")
 println("\nEvaluating initial policy...")
 Random.seed!(8788)
 objective_values = [simulate_multistage(
-    det_equivalent, state_params_in_sub, state_params_out_sub, 
+    det_equivalent, state_params_in_det, state_params_out_det, 
     initial_state, DecisionRules.sample(uncertainty_samples_det), 
     models;
 ) for _ in 1:2]
@@ -195,7 +226,7 @@ best_obj = mean(objective_values)
 println("Initial objective: $best_obj")
 
 # for testing visualization. fill x with visited states
-# X[2:end] = [value.([var[2] for var in stage]) for stage in state_params_out_sub]
+# X[2:end] = [value.([var[2] for var in stage]) for stage in state_params_out_det]
 # calculate distance from reference
 # dist = sum((X[t][i] - x_ref[i])^2 for i in 1:length(x_ref) for t in 1:length(X))
 
@@ -213,6 +244,44 @@ adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
     return num_train_per_batch
 end
 
+function rollout_reachable_initial_state(
+    model,
+    nominal_initial_state::Vector{Float64},
+    subproblems::Vector{JuMP.Model},
+    state_params_in,
+    state_params_out,
+    uncertainty_samples,
+    rollout_steps::Int,
+)
+    uncertainty_sample = DecisionRules.sample(uncertainty_samples)
+    max_stages = min(rollout_steps, length(subproblems), length(uncertainty_sample))
+    state_in = copy(nominal_initial_state)
+    Flux.reset!(model)
+
+    for stage in 1:max_stages
+        uncertainty_stage = uncertainty_sample[stage]
+        uncertainty_vec = [u[2] for u in uncertainty_stage]
+        state_out_target = Float64.(model(vcat(uncertainty_vec, state_in)))
+        DecisionRules.simulate_stage(
+            subproblems[stage],
+            state_params_in[stage],
+            state_params_out[stage],
+            uncertainty_stage,
+            state_in,
+            state_out_target,
+        )
+        state_in = Float64.(DecisionRules.get_next_state(
+            subproblems[stage],
+            state_params_in[stage],
+            state_params_out[stage],
+            state_in,
+            state_out_target,
+        ))
+    end
+
+    return state_in
+end
+
 # ============================================================================
 # Training
 # ============================================================================
@@ -223,13 +292,41 @@ println("Epochs: $num_epochs, Batches per epoch: $num_batches")
 for epoch in 1:num_epochs
     println("\n=== Epoch $epoch ===")
     _num_train_per_batch = num_train_per_batch
+    epoch_initial_state = copy(initial_state)
+
+    if enable_rollout_initial_state_augmentation &&
+       epoch >= rollout_start_epoch &&
+       ((epoch - rollout_start_epoch) % rollout_every_epochs == 0)
+        max_rollout_steps = max(1, floor(Int, rollout_max_horizon_fraction * (N - 1)))
+        rollout_steps = rand(1:max_rollout_steps)
+        try
+            epoch_initial_state = rollout_reachable_initial_state(
+                models,
+                rollout_initial_state,
+                rollout_subproblems,
+                rollout_state_params_in,
+                rollout_state_params_out,
+                rollout_uncertainty_samples,
+                rollout_steps,
+            )
+            rollout_state_shift = norm(epoch_initial_state .- initial_state)
+            println("  Rollout augmentation active: steps=$rollout_steps, ||x0_epoch - x0_nominal||₂=$(round(rollout_state_shift, digits=4))")
+            Wandb.log(lg, Dict(
+                "metrics/rollout_steps" => rollout_steps,
+                "metrics/rollout_state_shift_l2" => rollout_state_shift,
+            ))
+        catch err
+            @warn "Rollout initial-state update failed; falling back to nominal initial_state." exception=(err, catch_backtrace())
+            epoch_initial_state = copy(initial_state)
+        end
+    end
     
     train_multistage(
         models, 
-        initial_state, 
+        epoch_initial_state, 
         det_equivalent, 
-        state_params_in_sub, 
-        state_params_out_sub, 
+        state_params_in_det, 
+        state_params_out_det, 
         uncertainty_samples_det;
         num_batches = num_batches,
         num_train_per_batch = _num_train_per_batch,
@@ -251,7 +348,7 @@ end
 println("\n=== Final Evaluation ===")
 Random.seed!(8788)
 objective_values = [simulate_multistage(
-    det_equivalent, state_params_in_sub, state_params_out_sub, 
+    det_equivalent, state_params_in_det, state_params_out_det, 
     initial_state, DecisionRules.sample(uncertainty_samples_det), 
     models;
 ) for _ in 1:10]
