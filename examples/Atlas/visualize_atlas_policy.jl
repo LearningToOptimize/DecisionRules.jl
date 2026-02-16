@@ -35,6 +35,14 @@ perturbation_frequency = 1000     # Frequency of perturbations (every k stages)
 # Visualization options
 animate_robot = true            # Whether to animate in MeshCat
 save_plots = true               # Whether to save plots to file
+show_perturbation_cause_in_meshcat = true
+meshcat_cause_arrow_scale = 2.0
+meshcat_cause_show_threshold = 1e-6
+meshcat_cause_linger_seconds = 2.0
+meshcat_cause_min_arrow_length = 0.40
+meshcat_cause_shaft_radius = 0.08
+meshcat_cause_impact_distance = 0.18
+meshcat_cause_retreat_distance = 0.35
 
 # ============================================================================
 # Load Model
@@ -74,6 +82,7 @@ atlas = Atlas()
 
 nx = atlas.nx
 nu = atlas.nu
+perturbation_idx = atlas.nq + 5
 
 println("State dimension: $nx")
 println("Control dimension: $nu")
@@ -87,6 +96,7 @@ println("Control dimension: $nu")
     N = N,
     h = h,
     perturbation_scale = perturbation_scale,
+    perturbation_indices = [perturbation_idx],
     num_scenarios = num_scenarios,
     perturbation_frequency = perturbation_frequency,
 )
@@ -301,8 +311,27 @@ if animate_robot
         
         # Convert to format expected by animate!
         X_animate = all_states[best_scenario]
-        
-        animate!(atlas, mvis, X_animate, Δt=h)
+
+        if show_perturbation_cause_in_meshcat
+            animate_with_perturbation_cause!(
+                atlas,
+                mvis,
+                X_animate,
+                all_perturbations[best_scenario];
+                Δt = h,
+                arrow_scale = meshcat_cause_arrow_scale,
+                show_threshold = meshcat_cause_show_threshold,
+                linger_seconds = meshcat_cause_linger_seconds,
+                min_arrow_length = meshcat_cause_min_arrow_length,
+                shaft_radius = meshcat_cause_shaft_radius,
+                perturbation_state_index = perturbation_idx,
+                impact_distance = meshcat_cause_impact_distance,
+                retreat_distance = meshcat_cause_retreat_distance,
+            )
+            println("MeshCat overlay: collision-style perturbation cause enabled (impactor appears at contact and retreats over linger window).")
+        else
+            animate!(atlas, mvis, X_animate, Δt=h)
+        end
         
         println("\nAnimation ready! Open MeshCat visualizer to view.")
         println("Best scenario objective: $(all_objectives[best_scenario])")
@@ -320,8 +349,6 @@ println("="^60)
 # Simulate open-loop (just use reference control, no feedback)
 openloop_objectives = Float64[]
 openloop_final_deviations = Float64[]
-
-perturbation_idx = atlas.nq + 5
 
 for s in 1:num_scenarios
     Random.seed!(s * 100 + 42)

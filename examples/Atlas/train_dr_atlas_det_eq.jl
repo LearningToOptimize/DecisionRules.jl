@@ -28,7 +28,7 @@ h = 0.01                        # Time step
 perturbation_scale = 0.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
 penalty = 10.0                   # Penalty for state deviation
-perturbation_frequency = 301      # Frequency of perturbations (every k stages)
+perturbation_frequency = 5      # Frequency of perturbations (every k stages)
 
 # Training parameters
 num_epochs = 10
@@ -61,7 +61,7 @@ save_file = "atlas-balancing-deteq-N$(N)-$(now())"
 # - set to "latest" to use the most recent deterministic-equivalent model in `model_dir`
 # - set to a run name (with or without `.jld2`) or a full path
 #   e.g. "atlas-balancing-deteq-N50-2026-02-02T21:16:37.554"
-warmstart_model = "atlas-balancing-deteq-N5-2026-02-14T23:37:16.303"
+warmstart_model = "atlas-balancing-deteq-N10-2026-02-15T19:49:47.739"
 # CLI override:
 # julia --project=. examples/Atlas/train_dr_atlas_det_eq.jl <warmstart_model>
 if !isempty(ARGS)
