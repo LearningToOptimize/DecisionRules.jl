@@ -29,7 +29,7 @@ JuMP = "1.29.4"
 MathOptInterface = "1.48.0"
 ParametricOptInterface = "0.14.1"
 Zygote = "0.6.77"
-julia = "~1.9, ~1.10"
+julia = "~1.9, 1.10"
 
 [extras]
 CUDA_Runtime_jll = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"

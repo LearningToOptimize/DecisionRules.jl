@@ -73,11 +73,20 @@ function build_atlas_subproblems(;
     
     # Default optimizer
     if isnothing(optimizer)
-        optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Optimizer, 
-            "print_level" => 0,
-            "hsllib" => HSL_jll.libhsl_path,
-            "linear_solver" => "ma27"
-        ))
+        optimizer = () -> begin
+            m = DiffOpt.diff_optimizer(
+                optimizer_with_attributes(
+                    Ipopt.Optimizer,
+                    "print_level" => 0,
+                    "hsllib" => HSL_jll.libhsl_path,
+                    "linear_solver" => "ma27",
+                ),
+            )
+            # Atlas dynamics are encoded with a VectorNonlinearOracle constraint.
+            # Force the nonlinear DiffOpt backend so reverse differentiation works.
+            MOI.set(m, DiffOpt.ModelConstructor(), DiffOpt.NonLinearProgram.Model)
+            return m
+        end
     end
 
     if perturbation_frequency < 1
