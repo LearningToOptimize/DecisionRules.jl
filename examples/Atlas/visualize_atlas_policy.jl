@@ -28,9 +28,9 @@ model_path = "./models/atlas-balancing-deteq-N10-2026-02-15T19:49:47.739.jld2"  
 # Problem parameters (should match training)
 N = 300                          # Number of time steps
 h = 0.01                        # Time step  
-perturbation_scale = 0.5       # Scale of random perturbations
+perturbation_scale = 1.5       # Scale of random perturbations
 num_scenarios = 1              # Number of scenarios to simulate
-perturbation_frequency = 50     # Frequency of perturbations (every k stages)
+perturbation_frequency = 1000     # Frequency of perturbations (every k stages)
 
 # Visualization options
 animate_robot = true            # Whether to animate in MeshCat

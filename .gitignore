@@ -49,3 +49,4 @@ Manifest.toml
 examples/**/.CondaPkg/*
 *.bson
 *.err
+*.tsv

@@ -28,7 +28,7 @@ h = 0.01                        # Time step
 perturbation_scale = 0.5       # Scale of random perturbations
 num_scenarios = 10              # Number of uncertainty samples per stage
 penalty = 10.0                   # Penalty for state deviation
-perturbation_frequency = 5      # Frequency of perturbations (every k stages)
+perturbation_frequency = 1000      # Frequency of perturbations (every k stages)
 
 # Training parameters
 num_epochs = 10
@@ -44,7 +44,7 @@ optimizers = [Flux.Adam(0.001)]
 enable_rollout_initial_state_augmentation = true
 rollout_start_epoch = 1
 rollout_every_epochs = 1
-rollout_max_horizon_fraction = 10.0
+rollout_max_horizon_fraction = 20.0
 
 if enable_rollout_initial_state_augmentation
     rollout_every_epochs < 1 && error("rollout_every_epochs must be >= 1")
