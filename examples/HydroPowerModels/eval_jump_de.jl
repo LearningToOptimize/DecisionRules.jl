@@ -28,7 +28,7 @@ include(joinpath(SCRIPT_DIR, "load_hydropowermodels.jl"))
 
 const NUM_STAGES  = 12
 const SEED        = 42
-const FORMULATION = "ACPPowerModel"
+const FORMULATION = "DCPPowerModel"
 const TARGET_FRAC = 0.6      # constant target = TARGET_FRAC × max_volume
 
 # ── Build subproblems ──────────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ const TARGET_FRAC = 0.6      # constant target = TARGET_FRAC × max_volume
 sub, state_in, state_out, uncert, initial_state, max_volume = build_hydropowermodels(
     CASE_DIR, FORMULATION * ".mof.json";
     num_stages = NUM_STAGES,
+    penalty_l2 = :auto,
 )
 nHyd = length(initial_state)
 @info "  nHyd=$nHyd  num_stages=$NUM_STAGES"
