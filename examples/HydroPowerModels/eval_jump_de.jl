@@ -28,7 +28,7 @@ include(joinpath(SCRIPT_DIR, "load_hydropowermodels.jl"))
 
 const NUM_STAGES  = 12
 const SEED        = 42
-const FORMULATION = "DCPPowerModel"
+const FORMULATION = "ACPPowerModel"
 const TARGET_FRAC = 0.6      # constant target = TARGET_FRAC × max_volume
 
 # ── Build subproblems ──────────────────────────────────────────────────────────
