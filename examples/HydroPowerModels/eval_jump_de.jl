@@ -26,7 +26,7 @@ const EXA_CASE_DIR = "/storage/home/hcoda1/9/arosemberg3/scratch/DecisionRulesEx
 
 include(joinpath(SCRIPT_DIR, "load_hydropowermodels.jl"))
 
-const NUM_STAGES  = 12
+const NUM_STAGES  = 96
 const SEED        = 42
 const FORMULATION = "ACPPowerModel"
 const TARGET_FRAC = 0.6      # constant target = TARGET_FRAC × max_volume
