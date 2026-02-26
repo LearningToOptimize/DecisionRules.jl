@@ -27,7 +27,7 @@ Flux = "0.14.21"
 JLD2 = "0.6.3"
 JuMP = "1.29.4"
 MathOptInterface = "1.48.0"
-ParametricOptInterface = "0.14.1"
+ParametricOptInterface = "0.14.1, 0.15"
 Zygote = "0.6.77"
 julia = "~1.9, 1.10"
 
