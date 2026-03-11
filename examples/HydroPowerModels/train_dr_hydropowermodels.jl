@@ -9,6 +9,12 @@ using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
 using JuMP
+import CUDA # if error run CUDA.set_runtime_version!(v"12.1.0")
+# CUDA.set_runtime_version!(v"12.1.0")
+using MadNLP 
+using MadNLPGPU
+using KernelAbstractions
+using CUDSS_jll
 
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
@@ -49,17 +55,20 @@ subproblems, state_params_in, state_params_out, uncertainty_samples, initial_sta
     penalty_l2=penalty_l2
 )
 
-# det_equivalent = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, 
+# ipopt
+# det_equivalent = JuMP.Model(optimizer_with_attributes(Ipopt.Optimizer, 
 #     "print_level" => 0,
 #     "hsllib" => HSL_jll.libhsl_path,
 #     "linear_solver" => "ma27"
 # ))
 
-det_equivalent = JuMP.Model(optimizer_with_attributes(Ipopt.Optimizer, 
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma27"
-))
+# MadNLP solver with MadNLPGPU.CUDSSSolver as linear solver
+det_equivalent = Model(MadNLP.Optimizer)      # for sparse problems
+
+set_optimizer_attribute(det_equivalent, "array_type", CUDA.CuArray)
+set_optimizer_attribute(det_equivalent, "linear_solver", MadNLPGPU.CUDSSSolver)
+set_optimizer_attribute(det_equivalent, "print_level", MadNLP.ERROR)
+set_optimizer_attribute(det_equivalent, "barrier", MadNLP.LOQOUpdate())
 
 det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
     det_equivalent, subproblems, state_params_in, state_params_out, 
@@ -96,7 +105,7 @@ end
 # Policy architecture: LSTM processes uncertainty, Dense combines with previous state
 num_uncertainties = length(uncertainty_samples[1])
 models = state_conditioned_policy(num_uncertainties, num_hydro, num_hydro, layers; 
-                                   activation=activation, encoder_type=dense)
+                                   activation=activation, encoder_type=Flux.LSTM)
 
 # Load pretrained Model
 if !isnothing(pre_trained_model)
@@ -107,7 +116,7 @@ end
 
 # Initial evaluation
 Random.seed!(8788)
-objective_values = [simulate_multistage(
+@time objective_values = [simulate_multistage(
     det_equivalent, state_params_in, state_params_out, 
     initial_state, DecisionRules.sample(uncertainty_samples), 
     models;
