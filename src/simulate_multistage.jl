@@ -339,19 +339,31 @@ function sample(uncertainty_samples::Vector{Vector{Tuple{VariableRef, Vector{T}}
     [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
 end
 
-function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model}, 
-    state_params_in, state_params_out, uncertainty_sampler; 
+function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
+    state_params_in, state_params_out, uncertainty_sampler;
     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
     record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
         return false
     end,
-    get_objective_no_target_deficit=get_objective_no_target_deficit
+    get_objective_no_target_deficit=get_objective_no_target_deficit,
+    penalty_schedule=nothing
 )
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
 
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(subproblems))
+    current_multiplier = NaN
+
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(subproblems, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
@@ -393,20 +405,32 @@ function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
     end
 end
 
-function train_multistage(model, initial_state, det_equivalent::JuMP.Model, 
-    state_params_in, state_params_out, uncertainty_sampler; 
+function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
+    state_params_in, state_params_out, uncertainty_sampler;
     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
     record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
         return false
     end,
-    get_objective_no_target_deficit=get_objective_no_target_deficit
+    get_objective_no_target_deficit=get_objective_no_target_deficit,
+    penalty_schedule=nothing
 )
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
     num_stages = length(state_params_in)
 
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(det_equivalent))
+    current_multiplier = NaN
+
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(det_equivalent, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]

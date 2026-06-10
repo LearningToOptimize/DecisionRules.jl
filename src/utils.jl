@@ -99,6 +99,124 @@ function create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalt
     return norm_deficit, _deficit
 end
 
+"""
+    default_annealed_schedule(num_batches::Int)
+
+Build the default annealed target-penalty schedule over `num_batches` training batches:
+multipliers `0.1 -> 1.0 -> 10.0 -> 30.0` with phase lengths proportional to `2/2/4/16`
+of the horizon (the last phase takes the remainder; every phase keeps at least one batch).
+For `num_batches < 4` the last `num_batches` multipliers are used, one batch each, so the
+run always ends at the strong-penalty phase.
+
+Returns a `Vector{Tuple{Int,Int,Float64}}` of `(first_batch, last_batch, multiplier)`
+entries suitable for the `penalty_schedule` keyword of [`train_multistage`](@ref) and
+`train_multiple_shooting`. Multipliers are applied **relative to the penalty the model
+was built with** (the objective coefficient of the `norm_deficit` variables created by
+[`create_deficit!`](@ref)), so with `penalty=:auto` the effective penalty is
+`multiplier * max |objective coefficient|`.
+"""
+function default_annealed_schedule(num_batches::Int)
+    num_batches >= 1 || throw(ArgumentError("num_batches must be >= 1"))
+    multipliers = [0.1, 1.0, 10.0, 30.0]
+    n = length(multipliers)
+    if num_batches < n
+        mults = multipliers[(n - num_batches + 1):n]
+        return [(i, i, mults[i]) for i in 1:num_batches]
+    end
+    # Phase lengths proportional to 2/2/4/16 over 24; remainder goes to the last phase.
+    lengths = [max(1, round(Int, num_batches * f)) for f in (2 / 24, 2 / 24, 4 / 24)]
+    excess = sum(lengths) + 1 - num_batches
+    i = length(lengths)
+    while excess > 0 && i >= 1
+        take = min(lengths[i] - 1, excess)
+        lengths[i] -= take
+        excess -= take
+        i -= 1
+    end
+    push!(lengths, num_batches - sum(lengths))
+    schedule = Vector{Tuple{Int,Int,Float64}}(undef, n)
+    lo = 1
+    for k in 1:n
+        hi = lo + lengths[k] - 1
+        schedule[k] = (lo, hi, multipliers[k])
+        lo = hi + 1
+    end
+    return schedule
+end
+
+function _validate_penalty_schedule(schedule)
+    isempty(schedule) && throw(ArgumentError("penalty_schedule must not be empty"))
+    expected_lo = 1
+    for (lo, hi, mult) in schedule
+        lo == expected_lo || throw(ArgumentError(
+            "penalty_schedule phases must be contiguous starting at batch 1; got phase ($lo, $hi, $mult) where first_batch $expected_lo was expected"))
+        lo <= hi || throw(ArgumentError("penalty_schedule phase ($lo, $hi, $mult) has first_batch > last_batch"))
+        (isfinite(mult) && mult > 0) || throw(ArgumentError("penalty_schedule multipliers must be finite and positive; got $mult"))
+        expected_lo = hi + 1
+    end
+    return schedule
+end
+
+_resolve_penalty_schedule(::Nothing, num_batches::Int) = nothing
+function _resolve_penalty_schedule(penalty_schedule::Symbol, num_batches::Int)
+    penalty_schedule === :default_annealed && return default_annealed_schedule(num_batches)
+    throw(ArgumentError("unknown penalty_schedule symbol :$penalty_schedule; use :default_annealed, an explicit vector of (first_batch, last_batch, multiplier) tuples, or nothing"))
+end
+_resolve_penalty_schedule(penalty_schedule, num_batches::Int) = _validate_penalty_schedule(penalty_schedule)
+
+function _penalty_multiplier_for(schedule, iter::Int)
+    for (lo, hi, mult) in schedule
+        lo <= iter <= hi && return mult
+    end
+    return schedule[end][3]  # past the final phase: hold the last multiplier
+end
+
+function _linear_objective_coefficient(model::JuMP.Model, variable::VariableRef)
+    obj = objective_function(model)
+    if obj isa GenericAffExpr
+        return get(obj.terms, variable, 0.0)
+    elseif obj isa GenericQuadExpr
+        return get(obj.aff.terms, variable, 0.0)
+    end
+    throw(ArgumentError("penalty_schedule requires an affine or quadratic objective; got $(typeof(obj))"))
+end
+
+function _deficit_penalty_bases(model::JuMP.Model; deficit_name::AbstractString="norm_deficit")
+    bases = Dict{VariableRef,Float64}()
+    for variable in all_variables(model)
+        if occursin(deficit_name, JuMP.name(variable))
+            coef = _linear_objective_coefficient(model, variable)
+            iszero(coef) || (bases[variable] = coef)
+        end
+    end
+    return bases
+end
+
+function _deficit_penalty_bases(models::Vector{JuMP.Model}; deficit_name::AbstractString="norm_deficit")
+    return [_deficit_penalty_bases(model; deficit_name=deficit_name) for model in models]
+end
+
+function _check_deficit_penalty_bases(bases)
+    total = bases isa Dict ? length(bases) : sum(length, bases)
+    total > 0 || throw(ArgumentError(
+        "penalty_schedule was given but no variable matching \"norm_deficit\" with a nonzero objective coefficient was found; build the model(s) with create_deficit! (or equivalent) to use a penalty schedule"))
+    return bases
+end
+
+function _apply_deficit_penalty_multiplier!(model::JuMP.Model, bases::Dict{VariableRef,Float64}, multiplier::Real)
+    for (variable, base) in bases
+        set_objective_coefficient(model, variable, multiplier * base)
+    end
+    return model
+end
+
+function _apply_deficit_penalty_multiplier!(models::Vector{JuMP.Model}, bases::Vector, multiplier::Real)
+    for (model, base) in zip(models, bases)
+        _apply_deficit_penalty_multiplier!(model, base, multiplier)
+    end
+    return models
+end
+
 mutable struct SaveBest <: Function
     best_loss::Float64
     model_path::String

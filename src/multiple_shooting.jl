@@ -655,8 +655,14 @@ function train_multiple_shooting(
         return false
     end,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
+    penalty_schedule=nothing,
 )
     opt_state = Flux.setup(optimizer, model)
+
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    window_models = [win.model for win in windows]
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(window_models))
+    current_multiplier = NaN
 
     # We only need the uncertainty *structure* here.
     base_uncertainty = uncertainty_sampler()
@@ -669,6 +675,13 @@ function train_multiple_shooting(
     initial_state_f32 = Float32.(initial_state)
 
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(window_models, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
 
         objective = 0.0
