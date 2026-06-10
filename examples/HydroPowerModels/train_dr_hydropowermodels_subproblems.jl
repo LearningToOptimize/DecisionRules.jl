@@ -45,6 +45,9 @@ optimizers= [Flux.Adam()] # Flux.Adam(0.01), Flux.Descent(0.1), Flux.RMSProp(0.0
 pre_trained_model = nothing #joinpath(HydroPowerModels_dir, case_name, formulation, "models", "case3-ACPPowerModel-h48-2024-05-18T10:16:25.117.jld2")
 penalty_l2 = :auto
 penalty_l1 = :auto
+# Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
+# to train with the constant penalties the models were built with.
+penalty_schedule = :default_annealed
 
 # Build MSP using subproblems (not deterministic equivalent)
 
@@ -79,6 +82,7 @@ lg = WandbLogger(
         "training_method" => "subproblems",
         "penalty_l1" => string(penalty_l1),
         "penalty_l2" => string(penalty_l2),
+        "penalty_schedule" => string(penalty_schedule),
         "num_epochs" => string(num_epochs),
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),
@@ -116,32 +120,25 @@ model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
 convergence_criterium = StallingCriterium(100, best_obj, 0)
 
-adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
-    if iter % 2100 == 0
-        num_train_per_batch = num_train_per_batch * 2
-    end
-    return num_train_per_batch
-end
-
-# Train Model using subproblems (not deterministic equivalent)
-for iter in 1:num_epochs
-    num_train_per_batch = _num_train_per_batch
-    train_multistage(models, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples; 
-        num_batches=num_batches,
-        num_train_per_batch=num_train_per_batch,
-        optimizer=optimizers[floor(min(iter, length(optimizers)))],
-        record_loss= (iter, model, loss, tag) -> begin
-            if tag == "metrics/training_loss"
-                save_control(iter, model, loss)
-                record_loss(iter, model, loss, tag)
-                return convergence_criterium(iter, model, loss)
-            end
-            return record_loss(iter, model, loss, tag)
-        end,
-        # ensure_feasibility=(x_out, x_in, uncertainty) -> ensure_feasibility(x_out, x_in, uncertainty, max_volume),
-        adjust_hyperparameters=adjust_hyperparameters
-    )
-end
+# Train Model using subproblems (not deterministic equivalent).
+# A single call over num_epochs*num_batches batches so the penalty schedule spans the whole
+# run (this also keeps one optimizer state throughout, and a `true` return from the record
+# callback now stops the whole run).
+train_multistage(models, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples;
+    num_batches=num_epochs * num_batches,
+    num_train_per_batch=_num_train_per_batch,
+    optimizer=first(optimizers),
+    record_loss= (iter, model, loss, tag) -> begin
+        if tag == "metrics/training_loss"
+            save_control(iter, model, loss)
+            record_loss(iter, model, loss, tag)
+            return convergence_criterium(iter, model, loss)
+        end
+        return record_loss(iter, model, loss, tag)
+    end,
+    # ensure_feasibility=(x_out, x_in, uncertainty) -> ensure_feasibility(x_out, x_in, uncertainty, max_volume),
+    penalty_schedule=penalty_schedule
+)
 
 # Finish the run
 close(lg)
