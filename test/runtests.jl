@@ -339,6 +339,295 @@ end
         @test objective_value(model6) ≈ 2510.0 rtol=1.0e-2
     end
 
+    @testset "penalty schedule (annealing)" begin
+        @testset "default_annealed_schedule" begin
+            @test default_annealed_schedule(24) == [(1, 2, 0.1), (3, 4, 1.0), (5, 8, 10.0), (9, 24, 30.0)]
+            @test default_annealed_schedule(20) == [(1, 2, 0.1), (3, 4, 1.0), (5, 7, 10.0), (8, 20, 30.0)]
+            @test default_annealed_schedule(4) == [(1, 1, 0.1), (2, 2, 1.0), (3, 3, 10.0), (4, 4, 30.0)]
+            # Fewer batches than multipliers: keep the last multipliers, always end at 30x
+            @test default_annealed_schedule(2) == [(1, 1, 10.0), (2, 2, 30.0)]
+            @test default_annealed_schedule(1) == [(1, 1, 30.0)]
+            @test_throws ArgumentError default_annealed_schedule(0)
+            # Every phase covered, contiguous from batch 1
+            for n in (4, 5, 6, 24, 100, 3000)
+                sched = default_annealed_schedule(n)
+                @test sched[1][1] == 1
+                @test sched[end][2] == n
+                @test all(sched[k+1][1] == sched[k][2] + 1 for k in 1:length(sched)-1)
+            end
+        end
+
+        @testset "schedule resolution and validation" begin
+            sched = default_annealed_schedule(4)
+            @test DecisionRules._penalty_multiplier_for(sched, 1) == 0.1
+            @test DecisionRules._penalty_multiplier_for(sched, 4) == 30.0
+            @test DecisionRules._penalty_multiplier_for(sched, 99) == 30.0  # past-end hold
+            @test DecisionRules._resolve_penalty_schedule(nothing, 10) === nothing
+            @test DecisionRules._resolve_penalty_schedule(:default_annealed, 24) == default_annealed_schedule(24)
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(:not_a_schedule, 10)
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([], 10)                              # empty
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(2, 3, 1.0)], 10)                   # starts after 1
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(1, 2, 1.0), (4, 5, 2.0)], 10)      # gap
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(1, 3, 1.0), (3, 5, 2.0)], 10)      # overlap
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(1, 2, -1.0)], 10)                  # nonpositive
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(2, 1, 1.0)], 10)                   # lo > hi
+        end
+
+        @testset "deficit penalty scaling across create_deficit! modes" begin
+            # L1-only: penalty is the objective coefficient of norm_deficit
+            ml1 = Model()
+            @variable(ml1, yl1 >= 0)
+            @objective(ml1, Min, 10 * yl1)
+            ndl1, _ = create_deficit!(ml1, 2; penalty_l1=100.0)
+            bases = DecisionRules._deficit_penalty_bases(ml1)
+            @test bases == Dict(ndl1 => 100.0)
+            DecisionRules._apply_deficit_penalty_multiplier!(ml1, bases, 10.0)
+            @test coefficient(objective_function(ml1), ndl1) ≈ 1000.0
+            DecisionRules._apply_deficit_penalty_multiplier!(ml1, bases, 1.0)
+            @test coefficient(objective_function(ml1), ndl1) ≈ 100.0
+
+            # L2-only: same entry point
+            ml2 = Model()
+            @variable(ml2, yl2 >= 0)
+            @objective(ml2, Min, 10 * yl2)
+            ndl2, _ = create_deficit!(ml2, 2; penalty_l2=100.0)
+            DecisionRules._apply_deficit_penalty_multiplier!(ml2, DecisionRules._deficit_penalty_bases(ml2), 0.5)
+            @test coefficient(objective_function(ml2), ndl2) ≈ 50.0
+
+            # Both-mode: penalties live in the linking constraint; the objective coefficient
+            # of norm_deficit is 1.0 and scaling it scales L1 and L2 uniformly
+            mb = Model()
+            @variable(mb, yb >= 0)
+            @objective(mb, Min, 10 * yb)
+            ndb, _ = create_deficit!(mb, 2; penalty_l1=100.0, penalty_l2=50.0)
+            basesb = DecisionRules._deficit_penalty_bases(mb)
+            @test basesb == Dict(ndb => 1.0)
+            DecisionRules._apply_deficit_penalty_multiplier!(mb, basesb, 30.0)
+            @test coefficient(objective_function(mb), ndb) ≈ 30.0
+
+            # No matching variable with a schedule active is an error, not a silent no-op
+            mnone = Model()
+            @variable(mnone, ynone >= 0)
+            @objective(mnone, Min, ynone)
+            @test_throws ArgumentError DecisionRules._check_deficit_penalty_bases(
+                DecisionRules._deficit_penalty_bases(mnone))
+        end
+
+        @testset "train_multistage penalty_schedule end-to-end" begin
+            # nothing (default) leaves coefficients untouched
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sps = [sp1, sp2]
+            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+            nd1 = variable_by_name(sp1, "norm_deficit")
+            nd2 = variable_by_name(sp2, "norm_deficit")
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            train_multistage(m, [5.0], sps, spi, spo, usamples; num_batches=2, num_train_per_batch=1)
+            @test coefficient(objective_function(sp1), nd1) ≈ 1.0e4
+            @test coefficient(objective_function(sp2), nd2) ≈ 1.0e4
+
+            # Explicit two-phase schedule crosses a boundary on DiffOpt models and the final
+            # coefficients hold the last multiplier times the built base
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=4, num_train_per_batch=1,
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
+            @test coefficient(objective_function(sp1), nd1) ≈ 3.0e4
+            @test coefficient(objective_function(sp2), nd2) ≈ 3.0e4
+        end
+
+        @testset "deterministic-equivalent overload applies the schedule to the copies" begin
+            sp1, si1, so1, sov1, u1 = build_subproblem(10)
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
+            sps = [sp1, sp2]
+            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+            det_equivalent, usamples = DecisionRules.deterministic_equivalent!(
+                DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
+                sps, spi, spo, [5.0], usamples)
+            nd_copies = [v for v in all_variables(det_equivalent) if occursin("norm_deficit", JuMP.name(v))]
+            @test length(nd_copies) == 2  # one renamed copy per stage
+            @test all(coefficient(objective_function(det_equivalent), v) ≈ 1.0e4 for v in nd_copies)
+            Random.seed!(222)
+            m = Chain(Dense(2, 10), Dense(10, 1))
+            train_multistage(m, [5.0], det_equivalent, spi, spo, usamples;
+                num_batches=4, num_train_per_batch=1,
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
+            @test all(coefficient(objective_function(det_equivalent), v) ≈ 3.0e4 for v in nd_copies)
+        end
+
+        @testset "train_multiple_shooting applies the schedule to the window models" begin
+            sp, si, so, sov, u = build_subproblem(10)
+            spi = Vector{Vector{Any}}(undef, 1); spi .= [[si]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 1)
+            spo .= [[(so, sov)]]
+            usamples = [[(u, [2.0])]]
+            windows = DecisionRules.setup_shooting_windows(
+                [sp], spi, spo, [5.0], usamples;
+                window_size=1,
+                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            wm = windows[1].model
+            nd_window = [v for v in all_variables(wm) if occursin("norm_deficit", JuMP.name(v))]
+            @test length(nd_window) == 1
+            @test coefficient(objective_function(wm), nd_window[1]) ≈ 1.0e4
+            model = Dense(2, 1; bias=false)
+            model.weight .= 0.5f0
+            DecisionRules.train_multiple_shooting(model, [5.0], windows, () -> usamples;
+                num_batches=4, num_train_per_batch=1, optimizer=Flux.Descent(0.0),
+                record_loss=(iter, m, loss, tag) -> false,
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
+            @test coefficient(objective_function(wm), nd_window[1]) ≈ 3.0e4
+        end
+    end
+
+    @testset "sample logger and per-batch record" begin
+        function build_two_stage()
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sps = [sp1, sp2]
+            spi = Vector{Vector{Any}}(undef, 2)
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+            return sps, spi, spo, usamples
+        end
+
+        @testset "default path caches both metrics per sample" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            recorded = []
+            sl = SampleLog()
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=2, num_train_per_batch=2, sample_log=sl,
+                record=(sample_log, iter, model) -> begin
+                    push!(recorded, (iter,
+                        copy(sample_log.objectives),
+                        copy(sample_log.objectives_no_deficit),
+                        sum(objective_value, sps) == sample_log.objectives[end],
+                        DecisionRules.get_objective_no_target_deficit(sps) == sample_log.objectives_no_deficit[end]))
+                    return false
+                end)
+            @test length(recorded) == 2
+            for (iter, objs, objs_nd, obj_matches, nd_matches) in recorded
+                @test length(objs) == 2 && length(objs_nd) == 2   # cache cleared per batch
+                @test all(isfinite, objs) && all(isfinite, objs_nd)
+                @test all(objs_nd .<= objs .+ 1.0e-6)             # slack penalty is nonnegative
+                @test obj_matches                                  # cache equals re-read of the live models
+                @test nd_matches
+            end
+            @test default_record(sl, 1, m) == false
+        end
+
+        @testset "deterministic-equivalent overload caches per sample" begin
+            sps, spi, spo, usamples = build_two_stage()
+            det_equivalent, usamples_det = DecisionRules.deterministic_equivalent!(
+                DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
+                sps, spi, spo, [5.0], usamples)
+            Random.seed!(222)
+            m = Chain(Dense(2, 10), Dense(10, 1))
+            recorded = []
+            train_multistage(m, [5.0], det_equivalent, spi, spo, usamples_det;
+                num_batches=2, num_train_per_batch=2,
+                record=(sample_log, iter, model) -> begin
+                    push!(recorded, (length(sample_log.objectives),
+                        sample_log.objectives[end] == objective_value(det_equivalent),
+                        sample_log.objectives_no_deficit[end] ==
+                            DecisionRules.get_objective_no_target_deficit(det_equivalent)))
+                    return false
+                end)
+            @test length(recorded) == 2
+            for (n, obj_matches, nd_matches) in recorded
+                @test n == 2          # cache cleared per batch
+                @test obj_matches     # cache equals re-read of the live det-eq model
+                @test nd_matches
+            end
+        end
+
+        @testset "per-sample hook fires with the live models" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            hook_calls = []
+            sl = SampleLog(on_sample=(s, models, log) -> push!(hook_calls, (s, termination_status(models[1]))))
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=1, num_train_per_batch=3, sample_log=sl,
+                record=(sample_log, iter, model) -> false)
+            @test [c[1] for c in hook_calls] == [1, 2, 3]
+            @test all(c[2] == MOI.LOCALLY_SOLVED for c in hook_calls)
+        end
+
+        @testset "record early-stop contract" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            batches_seen = Ref(0)
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=5, num_train_per_batch=1,
+                record=(sample_log, iter, model) -> begin
+                    batches_seen[] += 1
+                    return true
+                end)
+            @test batches_seen[] == 1
+        end
+
+        @testset "deprecated record_loss adapter" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            calls = []
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=2, num_train_per_batch=1,
+                record_loss=(iter, model, loss, tag) -> begin
+                    push!(calls, tag)
+                    return false
+                end)
+            @test calls == ["metrics/loss", "metrics/training_loss", "metrics/loss", "metrics/training_loss"]
+            # a stop requested on the first call short-circuits the second, as historically
+            calls2 = []
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=3, num_train_per_batch=1,
+                record_loss=(iter, model, loss, tag) -> begin
+                    push!(calls2, tag)
+                    return true
+                end)
+            @test calls2 == ["metrics/loss"]
+            @test_throws ArgumentError train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=1, num_train_per_batch=1,
+                record=(sample_log, iter, model) -> false,
+                record_loss=(iter, model, loss, tag) -> false)
+        end
+
+        @testset "RolloutEvaluation on a fixed scenario set" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            scenarios = [DecisionRules.sample(usamples) for _ in 1:2]
+            # A policy on the reachable frontier: y <= 8 with x + y >= 10 forces x >= 2,
+            # so the largest reachable state_out is state_in + uncertainty - 2. The policy
+            # input is [uncertainty..., previous_state...], hence the target below is
+            # exactly reachable at every stage and the violation share is ~0 by
+            # construction.
+            reachable_policy = x -> [x[1] + x[2] - 2.0]
+            rollout_eval = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=1)
+            @test rollout_eval(1, reachable_policy) === nothing
+            @test isfinite(rollout_eval.last_objective_no_deficit)
+            @test abs(rollout_eval.last_violation_share) < 1.0e-4
+            # stride: no evaluation on off-stride batches
+            rollout_eval2 = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=2)
+            rollout_eval2(1, reachable_policy)
+            @test isnan(rollout_eval2.last_objective_no_deficit)
+            @test_throws ArgumentError RolloutEvaluation(sps, spi, spo, [5.0], []; stride=1)
+            @test isnan(DecisionRules._target_violation_share(0.0, 0.0))
+            @test DecisionRules._target_violation_share(200.0, 150.0) ≈ 0.25
+        end
+    end
+
     @testset "StateConditionedPolicy" begin
         # Test construction
         n_uncertainty = 5
@@ -368,7 +657,18 @@ end
             @test length(next_state) == n_output
             prev_state = next_state
         end
-        
+
+        # Test the encoder's recurrent state is carried across calls: repeating the
+        # same input twice in a row must give different outputs (state changed after
+        # the first call), and Flux.reset! must restore the initial-state output.
+        Flux.reset!(policy)
+        repeated_input = rand(Float32, n_uncertainty + n_state)
+        out1 = policy(repeated_input)
+        out2 = policy(repeated_input)
+        @test out1 != out2
+        Flux.reset!(policy)
+        @test policy(repeated_input) ≈ out1
+
         # Test gradient computation with Flux.gradient
         function test_loss(m, n_uncertainty, n_state)
             Flux.reset!(m)
@@ -613,9 +913,11 @@ end
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.1))
             @variable(subproblems[1], state_out)
             @variable(subproblems[1], state_out_var)
+            # Extra free variable so Ipopt has >=1 degree of freedom (n_vars > n_eq_constraints);
+            # otherwise it throws TOO_FEW_DOF before attempting to solve.
+            @variable(subproblems[1], _dof_slack)
             @constraint(subproblems[1], state_out_var == state_in + uncertainty)
             @constraint(subproblems[1], x == state_out_var)
-            @constraint(subproblems[1], state_out_var == state_out)
             @objective(subproblems[1], Min, x)
 
             state_params_in[1] = [state_in]
@@ -930,9 +1232,11 @@ end
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.0))
             @variable(subproblems[1], state_out in MOI.Parameter(0.0))
             @variable(subproblems[1], state_out_var)
+            # Extra free variable so Ipopt has >=1 degree of freedom (n_vars > n_eq_constraints);
+            # otherwise it throws TOO_FEW_DOF before attempting to solve.
+            @variable(subproblems[1], _dof_slack)
             @constraint(subproblems[1], x == state_in + uncertainty)
             @constraint(subproblems[1], state_out_var == x)
-            @constraint(subproblems[1], state_out_var == state_out)
             @objective(subproblems[1], Min, x)
 
             state_params_in[1] = [state_in]

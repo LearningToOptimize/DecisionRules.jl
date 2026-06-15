@@ -13,7 +13,13 @@ Create a multi-layer neural network with the specified architecture.
 - `activation`: Activation function (default: Flux.relu)
 - `dense`: Layer type (Dense, LSTM, etc.)
 """
-function dense_multilayer_nn(num_inputs::Int, num_outputs::Int, layers::Vector{Int}; activation=Flux.relu, dense=Dense)
+function dense_multilayer_nn(
+    num_inputs::Int,
+    num_outputs::Int,
+    layers::Vector{Int};
+    activation = Flux.relu,
+    dense = Dense,
+)
     if length(layers) == 0
         if dense == LSTM
             return dense(num_inputs, num_outputs)
@@ -21,11 +27,11 @@ function dense_multilayer_nn(num_inputs::Int, num_outputs::Int, layers::Vector{I
         return dense(num_inputs, num_outputs, activation)
     end
     midlayers = []
-    for i in 1:length(layers) - 1
+    for i = 1:(length(layers)-1)
         if dense == LSTM
-            push!(midlayers, dense(layers[i], layers[i + 1]))
+            push!(midlayers, dense(layers[i], layers[i+1]))
         else
-            push!(midlayers, dense(layers[i], layers[i + 1], activation))
+            push!(midlayers, dense(layers[i], layers[i+1], activation))
         end
     end
     first_layer = if dense == LSTM
@@ -82,24 +88,30 @@ end
     StateConditionedPolicy
 
 A policy architecture that separates temporal encoding from state conditioning:
-- LSTM/RNN: Encodes only the uncertainty sequence (temporal dependencies)
-- Dense: Combines LSTM output with previous state to produce next state
+- `encoder`: a recurrent cell (`LSTMCell`/`GRUCell`/`RNNCell`, or a `Chain` of them)
+  that encodes only the uncertainty sequence (temporal dependencies)
+- `combiner`: a `Dense` layer that combines the encoder output with the previous
+  state to produce the next state
 
-This design allows the LSTM to work independently of the state recurrence,
-making it more memory-efficient and compatible with the original training loop.
+Flux's recurrent cells are stateless (Flux >= 0.16): each call returns
+`(output, new_state)` instead of mutating an internal `Recur`. `StateConditionedPolicy`
+therefore carries the encoder's recurrent state itself in `state`, threading it through
+one call per stage. Call `Flux.reset!` to clear it (back to `Flux.initialstates`) at the
+start of a rollout.
 
 Input format: [uncertainty..., previous_state...]
 """
-struct StateConditionedPolicy{E, C}
-    encoder::E          # LSTM/RNN that processes uncertainty only
+mutable struct StateConditionedPolicy{E,C,S}
+    encoder::E          # Recurrent cell, or Chain of cells, that processes uncertainty only
     combiner::C         # Dense that combines encoder output with previous state
+    state::S            # Encoder recurrent state, carried across calls
     n_uncertainty::Int  # Number of uncertainty dimensions
     n_state::Int        # Number of state dimensions
 end
 
-# Use Functors.@functor with explicit trainable fields (excludes n_uncertainty, n_state)
+# Use Functors.@functor with explicit trainable fields (excludes state, n_uncertainty, n_state)
 # We use Functors.@functor instead of Flux.@layer to avoid MutableTangent issues with LSTM
-Functors.@functor StateConditionedPolicy (encoder, combiner,)
+Functors.@functor StateConditionedPolicy (encoder, combiner)
 
 """
     materialize_tangent(x)
@@ -140,26 +152,71 @@ function materialize_tangent(ref::Base.RefValue)
     return materialize_tangent(ref[])
 end
 
+"""
+    _as_cell(layer)
+
+Return the underlying recurrent cell of `layer`. `Flux.LSTM`/`GRU`/`RNN` wrap a cell
+(`LSTMCell`/`GRUCell`/`RNNCell`) in a `.cell` field; if `layer` has no such field it is
+already a cell and is returned unchanged.
+"""
+_as_cell(layer) = hasfield(typeof(layer), :cell) ? layer.cell : layer
+
+"""
+    _init_recurrent_state(encoder)
+
+Return the initial recurrent state for `encoder`: `Flux.initialstates(encoder)` for a
+single cell, or a tuple of per-layer initial states for a `Chain` of cells.
+"""
+_init_recurrent_state(cell) = Flux.initialstates(cell)
+_init_recurrent_state(chain::Chain) = map(_init_recurrent_state, chain.layers)
+
+"""
+    _step_encoder(encoder, x, state) -> (output, new_state)
+
+Advance `encoder` by one step on input `x` from recurrent `state`, returning the
+output and the updated state. For a `Chain` of cells, each layer's output feeds the
+next and each layer's state is threaded independently.
+"""
+_step_encoder(cell, x, state) = cell(x, state)
+_step_encoder(chain::Chain, x, states::Tuple) =
+    _step_encoder_layers(chain.layers, x, states)
+
+_step_encoder_layers(::Tuple{}, x, ::Tuple{}) = x, ()
+function _step_encoder_layers(layers::Tuple, x, states::Tuple)
+    out, new_state = _step_encoder(first(layers), x, first(states))
+    rest_out, rest_states = _step_encoder_layers(Base.tail(layers), out, Base.tail(states))
+    return rest_out, (new_state, rest_states...)
+end
+
 function (m::StateConditionedPolicy)(x)
     # Split input into uncertainty and previous state
     uncertainty = x[1:m.n_uncertainty]
-    prev_state = x[m.n_uncertainty+1:end]
-    
-    # Encode uncertainty through LSTM (temporal encoding)
-    encoded = m.encoder(uncertainty)
-    
+    prev_state = x[(m.n_uncertainty+1):end]
+
+    # Encode uncertainty through the recurrent encoder, carrying state across calls
+    encoded, new_state = _step_encoder(m.encoder, uncertainty, m.state)
+    m.state = new_state
+
     # Combine encoded uncertainty with previous state
     combined = vcat(encoded, prev_state)
-    
+
     # Output next state prediction
     return m.combiner(combined)
 end
 
-# Reset hidden state of the encoder (for LSTM/RNN)
-Flux.reset!(m::StateConditionedPolicy) = Flux.reset!(m.encoder)
+"""
+    Flux.reset!(m::StateConditionedPolicy)
+
+Reset the encoder's recurrent state to `Flux.initialstates`, e.g. before starting a
+new rollout.
+"""
+function Flux.reset!(m::StateConditionedPolicy)
+    m.state = _init_recurrent_state(m.encoder)
+    return nothing
+end
 
 """
-    state_conditioned_policy(n_uncertainty, n_state, n_output, layers; 
+    state_conditioned_policy(n_uncertainty, n_state, n_output, layers;
                              activation=Flux.relu, encoder_type=Flux.LSTM)
 
 Create a StateConditionedPolicy with the specified architecture.
@@ -170,35 +227,48 @@ Create a StateConditionedPolicy with the specified architecture.
 - `n_output::Int`: Number of output dimensions (typically same as n_state)
 - `layers::Vector{Int}`: Hidden layer sizes for the encoder
 - `activation`: Activation function for dense layers (default: relu)
-- `encoder_type`: Type of encoder (LSTM, RNN, GRU) (default: LSTM)
+- `encoder_type`: Recurrent layer/cell type (`LSTM`, `GRU`, `RNN`, or their `*Cell`
+  variants; default: `Flux.LSTM`). Must support `Flux.initialstates` and the stateful
+  `(x, state) -> (output, new_state)` call (Flux >= 0.16).
 
 # Architecture
 - Encoder: encoder_type(n_uncertainty => layers[1]) -> ... -> layers[end]
 - Combiner: Dense(layers[end] + n_state => n_output)
 """
-function state_conditioned_policy(n_uncertainty::Int, n_state::Int, n_output::Int, layers::Vector{Int}; 
-                                  activation=Flux.relu, encoder_type=Flux.LSTM)
-    # Build encoder (LSTM stack that processes uncertainty)
+function state_conditioned_policy(
+    n_uncertainty::Int,
+    n_state::Int,
+    n_output::Int,
+    layers::Vector{Int};
+    activation = Flux.relu,
+    encoder_type = Flux.LSTM,
+)
+    # Build encoder (stack of recurrent cells that process uncertainty)
     if length(layers) == 0
-        encoder = encoder_type(n_uncertainty => n_state)
+        encoder = _as_cell(encoder_type(n_uncertainty => n_state))
         encoder_output_dim = n_state
     elseif length(layers) == 1
-        encoder = encoder_type(n_uncertainty => layers[1])
+        encoder = _as_cell(encoder_type(n_uncertainty => layers[1]))
         encoder_output_dim = layers[1]
     else
-        encoder_layers = []
-        push!(encoder_layers, encoder_type(n_uncertainty => layers[1]))
-        for i in 1:length(layers)-1
-            push!(encoder_layers, encoder_type(layers[i] => layers[i+1]))
+        encoder_layers = [_as_cell(encoder_type(n_uncertainty => layers[1]))]
+        for i = 1:(length(layers)-1)
+            push!(encoder_layers, _as_cell(encoder_type(layers[i] => layers[i+1])))
         end
         encoder = Chain(encoder_layers...)
         encoder_output_dim = layers[end]
     end
-    
+
     # Build combiner (Dense that combines encoder output with previous state)
     # Input: [encoded_uncertainty, previous_state]
     # Output: next_state
     combiner = Dense(encoder_output_dim + n_state => n_output, activation)
-    
-    return StateConditionedPolicy(encoder, combiner, n_uncertainty, n_state)
+
+    return StateConditionedPolicy(
+        encoder,
+        combiner,
+        _init_recurrent_state(encoder),
+        n_uncertainty,
+        n_state,
+    )
 end

@@ -39,6 +39,9 @@ optimizers = [Flux.Adam()]
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = nothing
+# Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
+# to train with the constant penalties the models were built with.
+penalty_schedule = :default_annealed
 
 # Build MSP using subproblems (not deterministic equivalent)
 
@@ -69,6 +72,7 @@ num_hydro = length(initial_state)
 lg = WandbLogger(
     project = "RL",
     name = save_file,
+    save_code = false,
     config = Dict(
         "layers" => layers,
         "activation" => string(activation),
@@ -78,6 +82,7 @@ lg = WandbLogger(
         "window_size" => string(window_size),
         "penalty_l1" => string(penalty_l1),
         "penalty_l2" => string(penalty_l2),
+        "penalty_schedule" => string(penalty_schedule),
         "num_epochs" => string(num_epochs),
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),
@@ -132,35 +137,28 @@ model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
 convergence_criterium = StallingCriterium(200, best_obj, 0)
 
-adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
-    if iter % 2100 == 0
-        num_train_per_batch = num_train_per_batch * 2
-    end
-    return num_train_per_batch
-end
-
-# Train Model using multiple shooting
-for iter in 1:num_epochs
-    num_train_per_batch = _num_train_per_batch
-    train_multiple_shooting(
-        models,
-        initial_state,
-        windows,
-        () -> uncertainty_samples;
-        num_batches=num_batches,
-        num_train_per_batch=num_train_per_batch,
-        optimizer=optimizers[floor(Int, min(iter, length(optimizers)))],
-        record_loss=(iter, model, loss, tag) -> begin
-            if tag == "metrics/training_loss"
-                save_control(iter, model, loss)
-                record_loss(iter, model, loss, tag)
-                return convergence_criterium(iter, model, loss)
-            end
-            return record_loss(iter, model, loss, tag)
-        end,
-        adjust_hyperparameters=adjust_hyperparameters
-    )
-end
+# Train Model using multiple shooting.
+# A single call over num_epochs*num_batches batches so the penalty schedule spans the whole
+# run (this also keeps one optimizer state throughout, and a `true` return from the record
+# callback now stops the whole run).
+train_multiple_shooting(
+    models,
+    initial_state,
+    windows,
+    () -> uncertainty_samples;
+    num_batches=num_epochs * num_batches,
+    num_train_per_batch=_num_train_per_batch,
+    optimizer=first(optimizers),
+    record_loss=(iter, model, loss, tag) -> begin
+        if tag == "metrics/training_loss"
+            save_control(iter, model, loss)
+            record_loss(iter, model, loss, tag)
+            return convergence_criterium(iter, model, loss)
+        end
+        return record_loss(iter, model, loss, tag)
+    end,
+    penalty_schedule=penalty_schedule
+)
 
 # Finish the run
 close(lg)

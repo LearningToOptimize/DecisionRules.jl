@@ -108,6 +108,7 @@ save_control = SaveBest(100, model_path)
 lg = WandbLogger(
     project = "HydroPowerModels",
     name = save_file,
+    save_code = false,
     config = Dict(
         "Supervised" => "Yes",
         "optimizer" => "Adam"

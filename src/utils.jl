@@ -99,6 +99,184 @@ function create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalt
     return norm_deficit, _deficit
 end
 
+"""
+    default_annealed_schedule(num_batches::Int)
+
+Build the default annealed target-penalty schedule over `num_batches` training batches:
+multipliers `0.1 -> 1.0 -> 10.0 -> 30.0` with phase lengths proportional to `2/2/4/16`
+of the horizon (the last phase takes the remainder; every phase keeps at least one batch).
+For `num_batches < 4` the last `num_batches` multipliers are used, one batch each, so the
+run always ends at the strong-penalty phase.
+
+Returns a `Vector{Tuple{Int,Int,Float64}}` of `(first_batch, last_batch, multiplier)`
+entries suitable for the `penalty_schedule` keyword of [`train_multistage`](@ref) and
+`train_multiple_shooting`. Multipliers are applied **relative to the penalty the model
+was built with** (the objective coefficient of the `norm_deficit` variables created by
+[`create_deficit!`](@ref)), so with `penalty=:auto` the effective penalty is
+`multiplier * max |objective coefficient|`.
+"""
+function default_annealed_schedule(num_batches::Int)
+    num_batches >= 1 || throw(ArgumentError("num_batches must be >= 1"))
+    multipliers = [0.1, 1.0, 10.0, 30.0]
+    n = length(multipliers)
+    if num_batches < n
+        mults = multipliers[(n - num_batches + 1):n]
+        return [(i, i, mults[i]) for i in 1:num_batches]
+    end
+    # Phase lengths proportional to 2/2/4/16 over 24; remainder goes to the last phase.
+    lengths = [max(1, round(Int, num_batches * f)) for f in (2 / 24, 2 / 24, 4 / 24)]
+    excess = sum(lengths) + 1 - num_batches
+    i = length(lengths)
+    while excess > 0 && i >= 1
+        take = min(lengths[i] - 1, excess)
+        lengths[i] -= take
+        excess -= take
+        i -= 1
+    end
+    push!(lengths, num_batches - sum(lengths))
+    schedule = Vector{Tuple{Int,Int,Float64}}(undef, n)
+    lo = 1
+    for k in 1:n
+        hi = lo + lengths[k] - 1
+        schedule[k] = (lo, hi, multipliers[k])
+        lo = hi + 1
+    end
+    return schedule
+end
+
+"""
+    _validate_penalty_schedule(schedule) -> typeof(schedule)
+
+Validate an explicit `penalty_schedule`, a `Vector` of `(first_batch, last_batch,
+multiplier)` tuples: phases must be non-empty, contiguous, start at batch 1, satisfy
+`first_batch <= last_batch`, and have finite positive multipliers. Return `schedule`
+unchanged, or throw `ArgumentError` describing the first violation found.
+"""
+function _validate_penalty_schedule(schedule)
+    isempty(schedule) && throw(ArgumentError("penalty_schedule must not be empty"))
+    expected_lo = 1
+    for (lo, hi, mult) in schedule
+        lo == expected_lo || throw(ArgumentError(
+            "penalty_schedule phases must be contiguous starting at batch 1; got phase ($lo, $hi, $mult) where first_batch $expected_lo was expected"))
+        lo <= hi || throw(ArgumentError("penalty_schedule phase ($lo, $hi, $mult) has first_batch > last_batch"))
+        (isfinite(mult) && mult > 0) || throw(ArgumentError("penalty_schedule multipliers must be finite and positive; got $mult"))
+        expected_lo = hi + 1
+    end
+    return schedule
+end
+
+"""
+    _resolve_penalty_schedule(penalty_schedule, num_batches::Int)
+
+Resolve the `penalty_schedule` keyword of [`train_multistage`](@ref) and
+`train_multiple_shooting` into a `Vector{Tuple{Int,Int,Float64}}` of `(first_batch,
+last_batch, multiplier)` phases, or `nothing` if penalty scaling is disabled:
+
+- `nothing` returns `nothing` (no scaling);
+- `:default_annealed` returns [`default_annealed_schedule`](@ref)`(num_batches)`;
+- any other value is checked with [`_validate_penalty_schedule`](@ref) and returned
+  as-is.
+"""
+_resolve_penalty_schedule(::Nothing, num_batches::Int) = nothing
+function _resolve_penalty_schedule(penalty_schedule::Symbol, num_batches::Int)
+    penalty_schedule === :default_annealed && return default_annealed_schedule(num_batches)
+    throw(ArgumentError("unknown penalty_schedule symbol :$penalty_schedule; use :default_annealed, an explicit vector of (first_batch, last_batch, multiplier) tuples, or nothing"))
+end
+_resolve_penalty_schedule(penalty_schedule, num_batches::Int) = _validate_penalty_schedule(penalty_schedule)
+
+"""
+    _penalty_multiplier_for(schedule, iter::Int) -> Float64
+
+Return the multiplier of the phase containing batch `iter`. If `iter` is past the
+schedule's last phase, return that phase's multiplier (hold the final value steady).
+"""
+function _penalty_multiplier_for(schedule, iter::Int)
+    for (lo, hi, mult) in schedule
+        lo <= iter <= hi && return mult
+    end
+    return schedule[end][3]
+end
+
+"""
+    _linear_objective_coefficient(model::JuMP.Model, variable::VariableRef) -> Float64
+
+Return `variable`'s linear coefficient in `model`'s objective, or `0.0` if `variable`
+does not appear in it. Supports affine and quadratic objectives (quadratic terms are
+ignored); throw `ArgumentError` for any other objective type.
+"""
+function _linear_objective_coefficient(model::JuMP.Model, variable::VariableRef)
+    obj = objective_function(model)
+    if obj isa GenericAffExpr
+        return get(obj.terms, variable, 0.0)
+    elseif obj isa GenericQuadExpr
+        return get(obj.aff.terms, variable, 0.0)
+    end
+    throw(ArgumentError("penalty_schedule requires an affine or quadratic objective; got $(typeof(obj))"))
+end
+
+"""
+    _deficit_penalty_bases(model::JuMP.Model; deficit_name="norm_deficit") -> Dict{VariableRef,Float64}
+    _deficit_penalty_bases(models::Vector{JuMP.Model}; deficit_name="norm_deficit") -> Vector{Dict{VariableRef,Float64}}
+
+Capture the current objective coefficient of every deficit variable as the multiplier
+base for [`_apply_deficit_penalty_multiplier!`](@ref). A variable counts as a deficit
+variable if `deficit_name` occurs in its name and its linear objective coefficient
+(see [`_linear_objective_coefficient`](@ref)) is nonzero.
+
+Must be called **before** any `penalty_schedule` multiplier is applied, so the
+captured coefficients reflect the as-built penalties.
+"""
+function _deficit_penalty_bases(model::JuMP.Model; deficit_name::AbstractString="norm_deficit")
+    bases = Dict{VariableRef,Float64}()
+    for variable in all_variables(model)
+        if occursin(deficit_name, JuMP.name(variable))
+            coef = _linear_objective_coefficient(model, variable)
+            iszero(coef) || (bases[variable] = coef)
+        end
+    end
+    return bases
+end
+
+function _deficit_penalty_bases(models::Vector{JuMP.Model}; deficit_name::AbstractString="norm_deficit")
+    return [_deficit_penalty_bases(model; deficit_name=deficit_name) for model in models]
+end
+
+"""
+    _check_deficit_penalty_bases(bases) -> typeof(bases)
+
+Return `bases` (from [`_deficit_penalty_bases`](@ref)) unchanged if it has at least one
+entry; otherwise throw `ArgumentError`, since a `penalty_schedule` would then have
+nothing to scale.
+"""
+function _check_deficit_penalty_bases(bases)
+    total = bases isa Dict ? length(bases) : sum(length, bases)
+    total > 0 || throw(ArgumentError(
+        "penalty_schedule was given but no variable matching \"norm_deficit\" with a nonzero objective coefficient was found; build the model(s) with create_deficit! (or equivalent) to use a penalty schedule"))
+    return bases
+end
+
+"""
+    _apply_deficit_penalty_multiplier!(model::JuMP.Model, bases::Dict{VariableRef,Float64}, multiplier::Real) -> JuMP.Model
+    _apply_deficit_penalty_multiplier!(models::Vector{JuMP.Model}, bases::Vector, multiplier::Real) -> Vector{JuMP.Model}
+
+Mutate `model` (or each model in `models`) in place, setting every deficit variable's
+objective coefficient to `multiplier * base` using the bases from
+[`_deficit_penalty_bases`](@ref). Return the mutated model(s).
+"""
+function _apply_deficit_penalty_multiplier!(model::JuMP.Model, bases::Dict{VariableRef,Float64}, multiplier::Real)
+    for (variable, base) in bases
+        set_objective_coefficient(model, variable, multiplier * base)
+    end
+    return model
+end
+
+function _apply_deficit_penalty_multiplier!(models::Vector{JuMP.Model}, bases::Vector, multiplier::Real)
+    for (model, base) in zip(models, bases)
+        _apply_deficit_penalty_multiplier!(model, base, multiplier)
+    end
+    return models
+end
+
 mutable struct SaveBest <: Function
     best_loss::Float64
     model_path::String
@@ -156,6 +334,197 @@ function (callback::StallingCriterium)(iter, model, loss)
         return true
     end
     return false
+end
+
+"""
+    SampleLog(; on_sample=(s, models, sample_log) -> nothing,
+              objective_no_deficit_fn=get_objective_no_target_deficit)
+
+Per-sample logger with local cache state for the training loops, patterned after
+[`SaveBest`](@ref SaveBest). During each batch the training loop calls
+`sample_log(s, det_equivalent_or_subproblems)` right after sample `s` has been simulated
+(successful solves only; a failed solve throws exactly as before). The default behavior
+caches, per sample, the full objective (`objective_value`) and the objective excluding
+the target-slack penalty term (`objective_no_deficit_fn`). The cache is cleared at the
+start of every batch and handed to the per-batch `record(sample_log, iter, model)`
+callback.
+
+`on_sample` is an optional hook called as `on_sample(s, models, sample_log)` after the
+default caching. It receives the live JuMP model(s), so it can inspect termination
+statuses or dump the details of a suspicious sample for debugging — without paying any
+per-sample logging cost in the default configuration.
+"""
+mutable struct SampleLog <: Function
+    on_sample::Function
+    objective_no_deficit_fn::Function
+    objectives::Vector{Float64}
+    objectives_no_deficit::Vector{Float64}
+end
+
+function SampleLog(; on_sample=(s, models, sample_log) -> nothing,
+                   objective_no_deficit_fn=get_objective_no_target_deficit)
+    return SampleLog(on_sample, objective_no_deficit_fn, Float64[], Float64[])
+end
+
+function Base.empty!(sample_log::SampleLog)
+    empty!(sample_log.objectives)
+    empty!(sample_log.objectives_no_deficit)
+    return sample_log
+end
+
+_reset_sample_log!(sample_log::SampleLog) = empty!(sample_log)
+_reset_sample_log!(sample_log) = sample_log
+
+_total_objective_value(model::JuMP.Model) = objective_value(model)
+function _total_objective_value(models::Vector{JuMP.Model})
+    total = 0.0
+    for model in models
+        total += objective_value(model)
+    end
+    return total
+end
+
+function (sample_log::SampleLog)(s::Int, models)
+    push!(sample_log.objectives, _total_objective_value(models))
+    push!(sample_log.objectives_no_deficit, sample_log.objective_no_deficit_fn(models))
+    sample_log.on_sample(s, models, sample_log)
+    return nothing
+end
+
+# Sequential accumulation keeps the same floating-point summation order as the
+# historical `loss += ...; loss /= n` pattern inside the training loops.
+function _sequential_mean(values)
+    total = 0.0
+    for v in values
+        total += v
+    end
+    return total / length(values)
+end
+
+"""
+    default_record(sample_log, iter, model)
+
+Default per-batch recording callback: prints the same two per-batch lines as the
+historical `record_loss` default (`metrics/loss` = mean objective excluding the
+target-slack penalty, then `metrics/training_loss` = mean full objective) and returns
+`false` (training continues). Return `true` from a custom `record` to stop training.
+"""
+function default_record(sample_log::SampleLog, iter, model)
+    println("tag: metrics/loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives_no_deficit))")
+    println("tag: metrics/training_loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives))")
+    return false
+end
+
+"""
+    _record_loss_adapter(record_loss)
+
+Adapt the deprecated 4-argument `record_loss(iter, model, loss, tag)` callback to the
+`record(sample_log, iter, model)` interface, reproducing the historical two-call
+contract: `record_loss` is called first with `tag = "metrics/loss"`, and only if that
+returns `false` is it called again with `tag = "metrics/training_loss"`. Return the
+result of whichever call is made last.
+"""
+function _record_loss_adapter(record_loss)
+    return function (sample_log::SampleLog, iter, model)
+        record_loss(iter, model, _sequential_mean(sample_log.objectives_no_deficit), "metrics/loss") && return true
+        return record_loss(iter, model, _sequential_mean(sample_log.objectives), "metrics/training_loss")
+    end
+end
+
+"""
+    _resolve_record(record, record_loss)
+
+Resolve the `record`/`record_loss` keywords of the training loops into a single
+per-batch callback. Return `record` unchanged if `record_loss` is `nothing`;
+otherwise require `record === default_record` and return
+[`_record_loss_adapter`](@ref)`(record_loss)`. Throw `ArgumentError` if both a custom
+`record` and a `record_loss` are given.
+"""
+function _resolve_record(record, record_loss)
+    isnothing(record_loss) && return record
+    record === default_record || throw(ArgumentError("pass either `record` or the deprecated `record_loss`, not both"))
+    return _record_loss_adapter(record_loss)
+end
+
+"""
+    _target_violation_share(objective::Real, objective_no_deficit::Real) -> Float64
+
+Return the target-violation share, `(objective - objective_no_deficit) / objective`.
+Return `NaN` if either input is nonfinite or `abs(objective) <= 1e-12` (share
+undefined).
+"""
+function _target_violation_share(objective::Real, objective_no_deficit::Real)
+    slack = objective - objective_no_deficit
+    (isfinite(objective) && isfinite(slack) && abs(objective) > 1e-12) || return NaN
+    return slack / objective
+end
+
+"""
+    RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
+                      scenarios; stride=1)
+
+Evaluation helper that assesses the policy with a **stage-wise rollout** (the
+deployment semantics of a target-trajectory policy) on a fixed held-out scenario set.
+Deterministic-equivalent evaluation re-optimizes all stages jointly and can absorb
+stage-wise-unfollowable targets through the slack penalty, silently overstating policy
+quality; the rollout metric is the guard that detects this.
+
+`scenarios` must be a vector of **materialized** scenarios, sampled once before
+training (e.g. `[DecisionRules.sample(uncertainty_samples) for _ in 1:n]`), so every
+evaluation uses the same fixed set. `subproblems` may be the training subproblems (all
+stage parameters are rewritten on every solve) or a separately built copy; when
+training on a deterministic equivalent, pass the stage-wise subproblems here.
+
+Call `evaluation(iter, model)`, e.g. from within a `record` callback. Every `stride`
+calls it rolls the policy out over the fixed set and reports:
+
+- `metrics/rollout_objective_no_deficit`: the rollout objective excluding the
+  target-slack penalty term (the operational cost), and
+- `metrics/rollout_target_violation_share`: the realized slack penalty divided by the
+  full rollout objective (`NaN` when undefined).
+
+Policy comparisons should only be trusted when the violation share is small
+(≤ ~0.05); a larger share means the policy's targets are not followable stage by stage
+and the reported cost is not what deployment would realize. The latest values are kept
+in `last_objective_no_deficit` / `last_violation_share` for custom logging. Calls on
+batches that are not a multiple of `stride` are a no-op and leave the cached values
+unchanged.
+"""
+mutable struct RolloutEvaluation <: Function
+    subproblems::Vector{JuMP.Model}
+    state_params_in
+    state_params_out
+    initial_state
+    scenarios::Vector
+    stride::Int
+    last_objective_no_deficit::Float64
+    last_violation_share::Float64
+end
+
+function RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
+                           scenarios; stride=1)
+    isempty(scenarios) && throw(ArgumentError(
+        "scenarios must be a nonempty vector of materialized scenarios; sample them once before training so every evaluation uses the same fixed set"))
+    stride >= 1 || throw(ArgumentError("stride must be >= 1"))
+    return RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
+        collect(scenarios), stride, NaN, NaN)
+end
+
+function (evaluation::RolloutEvaluation)(iter, model)
+    iter % evaluation.stride == 0 || return nothing
+    total = 0.0
+    total_no_deficit = 0.0
+    for scenario in evaluation.scenarios
+        total += simulate_multistage(evaluation.subproblems, evaluation.state_params_in,
+            evaluation.state_params_out, evaluation.initial_state, scenario, model)
+        total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
+    end
+    objective = total / length(evaluation.scenarios)
+    evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
+    evaluation.last_violation_share = _target_violation_share(objective, evaluation.last_objective_no_deficit)
+    println("tag: metrics/rollout_objective_no_deficit, Iter: $iter, Loss: $(evaluation.last_objective_no_deficit)")
+    println("tag: metrics/rollout_target_violation_share, Iter: $iter, Loss: $(evaluation.last_violation_share)")
+    return nothing
 end
 
 function var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int)

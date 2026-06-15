@@ -1,4 +1,5 @@
 [![Build Status](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![codecov](https://codecov.io/gh/LearningToOptimize/DecisionRules.jl/graph/badge.svg)](https://app.codecov.io/gh/LearningToOptimize/DecisionRules.jl)
 
 # DecisionRules.jl
 
@@ -156,6 +157,36 @@ DecisionRules.train_multiple_shooting(
     optimizer=Flux.Adam(1e-3),
 )
 ```
+
+## Evaluation: stage-wise rollout and target-violation share
+
+Evaluating a trained policy only through the deterministic equivalent can overstate its quality: the coupled solve re-optimizes all stages jointly and absorbs targets that are not followable stage by stage through the slack penalty — exactly what deployment cannot do. The stage-wise rollout is the deployment semantics of a target-trajectory policy, so report it as the headline metric, together with a target-violation measure.
+
+The training loops record metrics through a per-sample `SampleLog` cache and a per-batch `record(sample_log, iter, model)` callback. `RolloutEvaluation` is a ready-made helper that evaluates the policy stage-wise on a fixed held-out scenario set; call it from within `record`:
+
+```julia
+using DecisionRules, Random
+
+# Materialize a FIXED held-out evaluation set once, before training
+Random.seed!(1234)
+eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:8]
+
+rollout_eval = RolloutEvaluation(
+    subproblems, state_params_in, state_params_out, initial_state, eval_scenarios;
+    stride=25,  # evaluate every 25 batches
+)
+
+train_multistage(policy, initial_state, det, state_in_det, state_out_det, uncertainty_sampler;
+    num_batches=100,
+    record=(sample_log, iter, model) -> begin
+        rollout_eval(iter, model)
+        return false
+    end)
+```
+
+Each evaluation reports (a) the rollout objective **excluding** the target-slack penalty term (the operational cost) and (b) the **target-violation share** — the realized slack penalty divided by the full objective. Policy comparisons are only trustworthy when the violation share is small (≤ ~0.05): a larger share means the policy's targets are not followable stage by stage and the reported cost is not what deployment would realize. When training drives the violation share to ~0, the deterministic-equivalent and rollout views are expected to coincide; the rollout metric is the guard that detects when they don't.
+
+Per-sample debugging hooks can be attached with `SampleLog(on_sample=(s, models, log) -> ...)`; the training loop calls the hook after each sample's solve with the live JuMP model(s). The previous `record_loss=(iter, model, loss, tag) -> ...` keyword keeps working as a deprecated adapter.
 
 ## Examples and tests
 

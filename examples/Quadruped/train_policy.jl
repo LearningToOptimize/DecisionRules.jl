@@ -519,6 +519,7 @@ function main()
     lg = WandbLogger(
         project = "QuadrupedPolicy",
         name = run_name,
+        save_code = false,
         config = Dict(
             "state_dim" => config.state_dim,
             "action_dim" => config.action_dim,

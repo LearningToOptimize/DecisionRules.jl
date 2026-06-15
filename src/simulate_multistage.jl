@@ -339,36 +339,47 @@ function sample(uncertainty_samples::Vector{Vector{Tuple{VariableRef, Vector{T}}
     [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
 end
 
-function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model}, 
-    state_params_in, state_params_out, uncertainty_sampler; 
+function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
+    state_params_in, state_params_out, uncertainty_sampler;
     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
-    record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
-        return false
-    end,
-    get_objective_no_target_deficit=get_objective_no_target_deficit
+    record_loss=nothing,
+    get_objective_no_target_deficit=get_objective_no_target_deficit,
+    sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
+    record=default_record,
+    penalty_schedule=nothing
 )
+    record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
 
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(subproblems))
+    current_multiplier = NaN
+
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(subproblems, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
         objective = 0.0
-        eval_loss = 0.0
+        _reset_sample_log!(sample_log)
         grads = Flux.gradient(model) do m
             for s in 1:num_train_per_batch
                 Flux.reset!(m)
                 objective += simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples[s], m)
-                eval_loss += get_objective_no_target_deficit(subproblems)
+                @ignore_derivatives sample_log(s, subproblems)
             end
             objective /= num_train_per_batch
-            eval_loss /= num_train_per_batch
             return objective
         end
-        record_loss(iter, model, eval_loss, "metrics/loss") && break
-        record_loss(iter, model, objective, "metrics/training_loss") && break
+        record(sample_log, iter, model) && break
 
         # Update the parameters so as to reduce the objective,
         # according the chosen optimisation rule:
@@ -393,20 +404,33 @@ function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
     end
 end
 
-function train_multistage(model, initial_state, det_equivalent::JuMP.Model, 
-    state_params_in, state_params_out, uncertainty_sampler; 
+function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
+    state_params_in, state_params_out, uncertainty_sampler;
     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
-    record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
-        return false
-    end,
-    get_objective_no_target_deficit=get_objective_no_target_deficit
+    record_loss=nothing,
+    get_objective_no_target_deficit=get_objective_no_target_deficit,
+    sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
+    record=default_record,
+    penalty_schedule=nothing
 )
+    record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
     num_stages = length(state_params_in)
 
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(det_equivalent))
+    current_multiplier = NaN
+
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(det_equivalent, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
@@ -416,7 +440,7 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
         # Calculate the gradient of the objective
         # with respect to the parameters within the model:
         objective = 0.0
-        eval_loss = 0.0
+        _reset_sample_log!(sample_log)
         # try
             grads = Flux.gradient(model) do m
                 for s in 1:num_train_per_batch
@@ -431,17 +455,15 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
                     # Combine initial state with predicted states
                     states = vcat([init_state], predicted_states)
                     objective += simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainty_samples[s], states)
-                    eval_loss += get_objective_no_target_deficit(det_equivalent)
+                    @ignore_derivatives sample_log(s, det_equivalent)
                 end
                 objective /= num_train_per_batch
-                eval_loss /= num_train_per_batch
                 return objective
             end
         # catch
             # continue;
         # end
-        record_loss(iter, model, eval_loss, "metrics/loss") && break
-        record_loss(iter, model, objective, "metrics/training_loss") && break
+        record(sample_log, iter, model) && break
 
         # Update the parameters so as to reduce the objective,
         # according the chosen optimisation rule:
