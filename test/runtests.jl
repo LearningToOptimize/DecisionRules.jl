@@ -913,9 +913,11 @@ end
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.1))
             @variable(subproblems[1], state_out)
             @variable(subproblems[1], state_out_var)
+            # Extra free variable so Ipopt has >=1 degree of freedom (n_vars > n_eq_constraints);
+            # otherwise it throws TOO_FEW_DOF before attempting to solve.
+            @variable(subproblems[1], _dof_slack)
             @constraint(subproblems[1], state_out_var == state_in + uncertainty)
             @constraint(subproblems[1], x == state_out_var)
-            @constraint(subproblems[1], state_out_var == state_out)
             @objective(subproblems[1], Min, x)
 
             state_params_in[1] = [state_in]
