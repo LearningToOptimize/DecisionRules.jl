@@ -707,11 +707,48 @@ end
         @test length(output_single) == n_output
         
         # Test empty layers (edge case)
-        policy_empty = state_conditioned_policy(n_uncertainty, n_state, n_output, Int[]; 
+        policy_empty = state_conditioned_policy(n_uncertainty, n_state, n_output, Int[];
                                                  activation=Base.identity, encoder_type=Flux.LSTM)
         Flux.reset!(policy_empty)
         output_empty = policy_empty(rand(Float32, n_uncertainty + n_state))
         @test length(output_empty) == n_output
+
+        # Regression: Float64 input must not break Zygote gradient through LSTM
+        # (solver feeds Float64 into a Float32 LSTM; without _state_eltype cast the
+        # recurrent state drifts to Float64 and triggers a Zygote codegen bug)
+        @testset "Float64 input regression" begin
+            policy_f64 = state_conditioned_policy(n_uncertainty, n_state, n_output, [8];
+                activation=sigmoid, encoder_type=Flux.LSTM)
+
+            Flux.reset!(policy_f64)
+            input_f64 = rand(Float64, n_uncertainty + n_state)
+            out_f64 = policy_f64(input_f64)
+            @test length(out_f64) == n_output
+            @test eltype(out_f64) == Float32
+
+            function f64_loss(m)
+                Flux.reset!(m)
+                total = 0.0
+                prev = rand(Float64, n_state)
+                for _ in 1:3
+                    u = rand(Float64, n_uncertainty)
+                    next = m(vcat(u, prev))
+                    total += sum(next)
+                    prev = Float64.(next)
+                end
+                return total
+            end
+
+            loss_val, grads_f64 = Flux.withgradient(policy_f64) do m
+                f64_loss(m)
+            end
+            @test isfinite(loss_val)
+            @test grads_f64[1] !== nothing
+            @test grads_f64[1].encoder !== nothing
+
+            opt_f64 = Flux.setup(Flux.Adam(0.01), policy_f64)
+            Flux.update!(opt_f64, policy_f64, grads_f64[1])
+        end
     end
 
     @testset "Multiple Shooting" begin
@@ -1738,6 +1775,35 @@ end
             @test all(coefficient(objective_function(det_eq), v) ≈ 3.0e4 for v in nd_copies)
         end
 
+        @testset "StateConditionedPolicy + MadNLP det_eq training" begin
+            sp1, si1, so1, sov1, u1 = build_subproblem(10)
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
+            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+
+            det_eq = Model(MadNLP.Optimizer)
+            set_optimizer_attribute(det_eq, "print_level", MadNLP.ERROR)
+            set_optimizer_attribute(det_eq, "tol", 1e-6)
+            det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
+                det_eq, [sp1, sp2], spi, spo, [5.0], usamples)
+
+            Random.seed!(222)
+            policy = state_conditioned_policy(1, 1, 1, [8];
+                activation=sigmoid, encoder_type=Flux.LSTM)
+            obj_before = DecisionRules.simulate_multistage(
+                det_eq, spi, spo, [5.0],
+                sample(usamples_det), policy)
+            train_multistage(policy, [5.0], det_eq, spi, spo, usamples_det;
+                num_batches=4, num_train_per_batch=1,
+                penalty_schedule=:default_annealed)
+            obj_after = DecisionRules.simulate_multistage(
+                det_eq, spi, spo, [5.0],
+                sample(usamples_det), policy)
+            @test isfinite(obj_after)
+        end
+
         @testset "full training pipeline with MadNLP det_eq" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
             sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
@@ -1770,13 +1836,14 @@ end
 
     @testset "GPU (CUDA) solver" begin
         gpu_available = try
-            @eval import CUDA
+            @eval using CUDA
             CUDA.functional()
         catch
             false
         end
 
         if gpu_available
+            @eval using CUDSS
             @eval using MadNLPGPU
 
             @testset "MadNLP+CUDSS GPU solve and duals" begin
