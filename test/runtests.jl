@@ -468,15 +468,13 @@ end
             # exactly reachable at every stage and the violation share is ~0 by
             # construction.
             reachable_policy = x -> [x[1] + x[2] - 2.0]
-            rollout_eval = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=1,
-                record=(sample_log, iter, model) -> false)
-            @test rollout_eval(SampleLog(), 1, reachable_policy) == false
+            rollout_eval = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=1)
+            @test rollout_eval(1, reachable_policy) === nothing
             @test isfinite(rollout_eval.last_objective_no_deficit)
             @test abs(rollout_eval.last_violation_share) < 1.0e-4
             # stride: no evaluation on off-stride batches
-            rollout_eval2 = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=2,
-                record=(sample_log, iter, model) -> false)
-            rollout_eval2(SampleLog(), 1, reachable_policy)
+            rollout_eval2 = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=2)
+            rollout_eval2(1, reachable_policy)
             @test isnan(rollout_eval2.last_objective_no_deficit)
             @test_throws ArgumentError RolloutEvaluation(sps, spi, spo, [5.0], []; stride=1)
             @test isnan(DecisionRules._target_violation_share(0.0, 0.0))

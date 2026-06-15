@@ -161,7 +161,7 @@ DecisionRules.train_multiple_shooting(
 
 Evaluating a trained policy only through the deterministic equivalent can overstate its quality: the coupled solve re-optimizes all stages jointly and absorbs targets that are not followable stage by stage through the slack penalty — exactly what deployment cannot do. The stage-wise rollout is the deployment semantics of a target-trajectory policy, so report it as the headline metric, together with a target-violation measure.
 
-The training loops record metrics through a per-sample `SampleLog` cache and a per-batch `record(sample_log, iter, model)` callback. `RolloutEvaluation` is a ready-made `record` implementation that evaluates the policy stage-wise on a fixed held-out scenario set:
+The training loops record metrics through a per-sample `SampleLog` cache and a per-batch `record(sample_log, iter, model)` callback. `RolloutEvaluation` is a ready-made helper that evaluates the policy stage-wise on a fixed held-out scenario set; call it from within `record`:
 
 ```julia
 using DecisionRules, Random
@@ -176,7 +176,11 @@ rollout_eval = RolloutEvaluation(
 )
 
 train_multistage(policy, initial_state, det, state_in_det, state_out_det, uncertainty_sampler;
-    num_batches=100, record=rollout_eval)
+    num_batches=100,
+    record=(sample_log, iter, model) -> begin
+        rollout_eval(iter, model)
+        return false
+    end)
 ```
 
 Each evaluation reports (a) the rollout objective **excluding** the target-slack penalty term (the operational cost) and (b) the **target-violation share** — the realized slack penalty divided by the full objective. Policy comparisons are only trustworthy when the violation share is small (≤ ~0.05): a larger share means the policy's targets are not followable stage by stage and the reported cost is not what deployment would realize. When training drives the violation share to ~0, the deterministic-equivalent and rollout views are expected to coincide; the rollout metric is the guard that detects when they don't.

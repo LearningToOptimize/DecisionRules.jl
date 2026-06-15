@@ -269,11 +269,11 @@ end
 
 """
     RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
-                      scenarios; stride=1, record=default_record)
+                      scenarios; stride=1)
 
-Ready-made `record` callback that evaluates the policy with a **stage-wise rollout**
-(the deployment semantics of a target-trajectory policy) on a fixed held-out scenario
-set. Deterministic-equivalent evaluation re-optimizes all stages jointly and can absorb
+Evaluation helper that assesses the policy with a **stage-wise rollout** (the
+deployment semantics of a target-trajectory policy) on a fixed held-out scenario set.
+Deterministic-equivalent evaluation re-optimizes all stages jointly and can absorb
 stage-wise-unfollowable targets through the slack penalty, silently overstating policy
 quality; the rollout metric is the guard that detects this.
 
@@ -283,7 +283,8 @@ evaluation uses the same fixed set. `subproblems` may be the training subproblem
 stage parameters are rewritten on every solve) or a separately built copy; when
 training on a deterministic equivalent, pass the stage-wise subproblems here.
 
-Every `stride` batches the callback reports, over the fixed set:
+Call `evaluation(iter, model)`, e.g. from within a `record` callback. Every `stride`
+calls it rolls the policy out over the fixed set and reports:
 
 - `metrics/rollout_objective_no_deficit`: the rollout objective excluding the
   target-slack penalty term (the operational cost), and
@@ -293,10 +294,9 @@ Every `stride` batches the callback reports, over the fixed set:
 Policy comparisons should only be trusted when the violation share is small
 (≤ ~0.05); a larger share means the policy's targets are not followable stage by stage
 and the reported cost is not what deployment would realize. The latest values are kept
-in `last_objective_no_deficit` / `last_violation_share` for custom logging.
-
-The wrapped `record` callback (default [`default_record`](@ref default_record)) runs
-first each batch and its return value decides early stopping.
+in `last_objective_no_deficit` / `last_violation_share` for custom logging. Calls on
+batches that are not a multiple of `stride` are a no-op and leave the cached values
+unchanged.
 """
 mutable struct RolloutEvaluation <: Function
     subproblems::Vector{JuMP.Model}
@@ -305,37 +305,34 @@ mutable struct RolloutEvaluation <: Function
     initial_state
     scenarios::Vector
     stride::Int
-    record::Function
     last_objective_no_deficit::Float64
     last_violation_share::Float64
 end
 
 function RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
-                           scenarios; stride=1, record=default_record)
+                           scenarios; stride=1)
     isempty(scenarios) && throw(ArgumentError(
         "scenarios must be a nonempty vector of materialized scenarios; sample them once before training so every evaluation uses the same fixed set"))
     stride >= 1 || throw(ArgumentError("stride must be >= 1"))
     return RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
-        collect(scenarios), stride, record, NaN, NaN)
+        collect(scenarios), stride, NaN, NaN)
 end
 
-function (evaluation::RolloutEvaluation)(sample_log, iter, model)
-    stop = evaluation.record(sample_log, iter, model)
-    if iter % evaluation.stride == 0
-        total = 0.0
-        total_no_deficit = 0.0
-        for scenario in evaluation.scenarios
-            total += simulate_multistage(evaluation.subproblems, evaluation.state_params_in,
-                evaluation.state_params_out, evaluation.initial_state, scenario, model)
-            total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
-        end
-        objective = total / length(evaluation.scenarios)
-        evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
-        evaluation.last_violation_share = _target_violation_share(objective, evaluation.last_objective_no_deficit)
-        println("tag: metrics/rollout_objective_no_deficit, Iter: $iter, Loss: $(evaluation.last_objective_no_deficit)")
-        println("tag: metrics/rollout_target_violation_share, Iter: $iter, Loss: $(evaluation.last_violation_share)")
+function (evaluation::RolloutEvaluation)(iter, model)
+    iter % evaluation.stride == 0 || return nothing
+    total = 0.0
+    total_no_deficit = 0.0
+    for scenario in evaluation.scenarios
+        total += simulate_multistage(evaluation.subproblems, evaluation.state_params_in,
+            evaluation.state_params_out, evaluation.initial_state, scenario, model)
+        total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
     end
-    return stop
+    objective = total / length(evaluation.scenarios)
+    evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
+    evaluation.last_violation_share = _target_violation_share(objective, evaluation.last_objective_no_deficit)
+    println("tag: metrics/rollout_objective_no_deficit, Iter: $iter, Loss: $(evaluation.last_objective_no_deficit)")
+    println("tag: metrics/rollout_target_violation_share, Iter: $iter, Loss: $(evaluation.last_violation_share)")
+    return nothing
 end
 
 function var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int)

@@ -120,8 +120,7 @@ convergence_criterium = StallingCriterium(100, best_obj, 0)
 Random.seed!(8789)
 eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:num_eval_scenarios]
 rollout_evaluation = RolloutEvaluation(subproblems, state_params_in, state_params_out,
-    initial_state, eval_scenarios; stride=eval_every,
-    record=(sample_log, iter, model) -> false)
+    initial_state, eval_scenarios; stride=eval_every)
 
 adjust_hyperparameters = (iter, opt_state, num_train_per_batch) -> begin
     if iter % 2100 == 0
@@ -143,7 +142,7 @@ for iter in 1:num_epochs
                 "metrics/loss" => mean(sample_log.objectives_no_deficit),
                 "metrics/training_loss" => training_loss,
             ))
-            rollout_evaluation(sample_log, iter, model)
+            rollout_evaluation(iter, model)
             if iter % eval_every == 0
                 Wandb.log(lg, Dict(
                     "metrics/rollout_objective_no_deficit" => rollout_evaluation.last_objective_no_deficit,
