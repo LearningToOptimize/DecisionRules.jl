@@ -346,13 +346,25 @@ function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
     record_loss=nothing,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
     sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
-    record=default_record
+    record=default_record,
+    penalty_schedule=nothing
 )
     record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
 
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(subproblems))
+    current_multiplier = NaN
+
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(subproblems, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
@@ -399,14 +411,26 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
     record_loss=nothing,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
     sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
-    record=default_record
+    record=default_record,
+    penalty_schedule=nothing
 )
     record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
     num_stages = length(state_params_in)
 
+    schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
+    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(det_equivalent))
+    current_multiplier = NaN
+
     for iter in 1:num_batches
+        if !isnothing(schedule)
+            multiplier = _penalty_multiplier_for(schedule, iter)
+            if multiplier != current_multiplier
+                _apply_deficit_penalty_multiplier!(det_equivalent, penalty_bases, multiplier)
+                current_multiplier = multiplier
+            end
+        end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]

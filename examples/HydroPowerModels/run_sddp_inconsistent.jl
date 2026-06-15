@@ -84,6 +84,7 @@ end
 lg = WandbLogger(
     project = "HydroPowerModels",
     name = save_file,
+    save_code = false,
 )
 
 # global num_trys = 0

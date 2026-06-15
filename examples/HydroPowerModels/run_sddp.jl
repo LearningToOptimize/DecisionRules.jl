@@ -74,6 +74,7 @@ end
 lg = WandbLogger(
     project = "HydroPowerModels",
     name = save_file,
+    save_code = false,
 )
 
 # ## Train
