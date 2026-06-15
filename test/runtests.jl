@@ -657,7 +657,18 @@ end
             @test length(next_state) == n_output
             prev_state = next_state
         end
-        
+
+        # Test the encoder's recurrent state is carried across calls: repeating the
+        # same input twice in a row must give different outputs (state changed after
+        # the first call), and Flux.reset! must restore the initial-state output.
+        Flux.reset!(policy)
+        repeated_input = rand(Float32, n_uncertainty + n_state)
+        out1 = policy(repeated_input)
+        out2 = policy(repeated_input)
+        @test out1 != out2
+        Flux.reset!(policy)
+        @test policy(repeated_input) ≈ out1
+
         # Test gradient computation with Flux.gradient
         function test_loss(m, n_uncertainty, n_state)
             Flux.reset!(m)
@@ -1219,9 +1230,11 @@ end
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.0))
             @variable(subproblems[1], state_out in MOI.Parameter(0.0))
             @variable(subproblems[1], state_out_var)
+            # Extra free variable so Ipopt has >=1 degree of freedom (n_vars > n_eq_constraints);
+            # otherwise it throws TOO_FEW_DOF before attempting to solve.
+            @variable(subproblems[1], _dof_slack)
             @constraint(subproblems[1], x == state_in + uncertainty)
             @constraint(subproblems[1], state_out_var == x)
-            @constraint(subproblems[1], state_out_var == state_out)
             @objective(subproblems[1], Min, x)
 
             state_params_in[1] = [state_in]
