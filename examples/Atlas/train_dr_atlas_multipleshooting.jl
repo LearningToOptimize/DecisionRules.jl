@@ -87,6 +87,7 @@ println("Window size: $window_size")
 lg = WandbLogger(
     project = "DecisionRules-Atlas",
     name = save_file,
+    save_code = false,
     config = Dict(
         "N" => N,
         "h" => h,

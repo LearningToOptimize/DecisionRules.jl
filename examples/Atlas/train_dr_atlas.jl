@@ -82,6 +82,7 @@ println("Number of stages: $(N-1)")
 lg = WandbLogger(
     project = "DecisionRules-Atlas",
     name = save_file,
+    save_code = false,
     config = Dict(
         "N" => N,
         "h" => h,

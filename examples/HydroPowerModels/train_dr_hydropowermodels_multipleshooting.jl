@@ -72,6 +72,7 @@ num_hydro = length(initial_state)
 lg = WandbLogger(
     project = "RL",
     name = save_file,
+    save_code = false,
     config = Dict(
         "layers" => layers,
         "activation" => string(activation),
