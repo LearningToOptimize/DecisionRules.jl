@@ -339,6 +339,149 @@ end
         @test objective_value(model6) ≈ 2510.0 rtol=1.0e-2
     end
 
+    @testset "sample logger and per-batch record" begin
+        function build_two_stage()
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sps = [sp1, sp2]
+            spi = Vector{Vector{Any}}(undef, 2)
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+            return sps, spi, spo, usamples
+        end
+
+        @testset "default path caches both metrics per sample" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            recorded = []
+            sl = SampleLog()
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=2, num_train_per_batch=2, sample_log=sl,
+                record=(sample_log, iter, model) -> begin
+                    push!(recorded, (iter,
+                        copy(sample_log.objectives),
+                        copy(sample_log.objectives_no_deficit),
+                        sum(objective_value, sps) == sample_log.objectives[end],
+                        DecisionRules.get_objective_no_target_deficit(sps) == sample_log.objectives_no_deficit[end]))
+                    return false
+                end)
+            @test length(recorded) == 2
+            for (iter, objs, objs_nd, obj_matches, nd_matches) in recorded
+                @test length(objs) == 2 && length(objs_nd) == 2   # cache cleared per batch
+                @test all(isfinite, objs) && all(isfinite, objs_nd)
+                @test all(objs_nd .<= objs .+ 1.0e-6)             # slack penalty is nonnegative
+                @test obj_matches                                  # cache equals re-read of the live models
+                @test nd_matches
+            end
+            @test default_record(sl, 1, m) == false
+        end
+
+        @testset "deterministic-equivalent overload caches per sample" begin
+            sps, spi, spo, usamples = build_two_stage()
+            det_equivalent, usamples_det = DecisionRules.deterministic_equivalent!(
+                DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
+                sps, spi, spo, [5.0], usamples)
+            Random.seed!(222)
+            m = Chain(Dense(2, 10), Dense(10, 1))
+            recorded = []
+            train_multistage(m, [5.0], det_equivalent, spi, spo, usamples_det;
+                num_batches=2, num_train_per_batch=2,
+                record=(sample_log, iter, model) -> begin
+                    push!(recorded, (length(sample_log.objectives),
+                        sample_log.objectives[end] == objective_value(det_equivalent),
+                        sample_log.objectives_no_deficit[end] ==
+                            DecisionRules.get_objective_no_target_deficit(det_equivalent)))
+                    return false
+                end)
+            @test length(recorded) == 2
+            for (n, obj_matches, nd_matches) in recorded
+                @test n == 2          # cache cleared per batch
+                @test obj_matches     # cache equals re-read of the live det-eq model
+                @test nd_matches
+            end
+        end
+
+        @testset "per-sample hook fires with the live models" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            hook_calls = []
+            sl = SampleLog(on_sample=(s, models, log) -> push!(hook_calls, (s, termination_status(models[1]))))
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=1, num_train_per_batch=3, sample_log=sl,
+                record=(sample_log, iter, model) -> false)
+            @test [c[1] for c in hook_calls] == [1, 2, 3]
+            @test all(c[2] == MOI.LOCALLY_SOLVED for c in hook_calls)
+        end
+
+        @testset "record early-stop contract" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            batches_seen = Ref(0)
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=5, num_train_per_batch=1,
+                record=(sample_log, iter, model) -> begin
+                    batches_seen[] += 1
+                    return true
+                end)
+            @test batches_seen[] == 1
+        end
+
+        @testset "deprecated record_loss adapter" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            m = Chain(Dense(2, 4), Dense(4, 1))
+            calls = []
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=2, num_train_per_batch=1,
+                record_loss=(iter, model, loss, tag) -> begin
+                    push!(calls, tag)
+                    return false
+                end)
+            @test calls == ["metrics/loss", "metrics/training_loss", "metrics/loss", "metrics/training_loss"]
+            # a stop requested on the first call short-circuits the second, as historically
+            calls2 = []
+            train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=3, num_train_per_batch=1,
+                record_loss=(iter, model, loss, tag) -> begin
+                    push!(calls2, tag)
+                    return true
+                end)
+            @test calls2 == ["metrics/loss"]
+            @test_throws ArgumentError train_multistage(m, [5.0], sps, spi, spo, usamples;
+                num_batches=1, num_train_per_batch=1,
+                record=(sample_log, iter, model) -> false,
+                record_loss=(iter, model, loss, tag) -> false)
+        end
+
+        @testset "RolloutEvaluation on a fixed scenario set" begin
+            sps, spi, spo, usamples = build_two_stage()
+            Random.seed!(222)
+            scenarios = [DecisionRules.sample(usamples) for _ in 1:2]
+            # A policy on the reachable frontier: y <= 8 with x + y >= 10 forces x >= 2,
+            # so the largest reachable state_out is state_in + uncertainty - 2. The policy
+            # input is [uncertainty..., previous_state...], hence the target below is
+            # exactly reachable at every stage and the violation share is ~0 by
+            # construction.
+            reachable_policy = x -> [x[1] + x[2] - 2.0]
+            rollout_eval = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=1)
+            @test rollout_eval(1, reachable_policy) === nothing
+            @test isfinite(rollout_eval.last_objective_no_deficit)
+            @test abs(rollout_eval.last_violation_share) < 1.0e-4
+            # stride: no evaluation on off-stride batches
+            rollout_eval2 = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=2)
+            rollout_eval2(1, reachable_policy)
+            @test isnan(rollout_eval2.last_objective_no_deficit)
+            @test_throws ArgumentError RolloutEvaluation(sps, spi, spo, [5.0], []; stride=1)
+            @test isnan(DecisionRules._target_violation_share(0.0, 0.0))
+            @test DecisionRules._target_violation_share(200.0, 150.0) ≈ 0.25
+        end
+    end
+
     @testset "StateConditionedPolicy" begin
         # Test construction
         n_uncertainty = 5

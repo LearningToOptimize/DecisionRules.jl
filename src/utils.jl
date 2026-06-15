@@ -158,6 +158,183 @@ function (callback::StallingCriterium)(iter, model, loss)
     return false
 end
 
+"""
+    SampleLog(; on_sample=(s, models, sample_log) -> nothing,
+              objective_no_deficit_fn=get_objective_no_target_deficit)
+
+Per-sample logger with local cache state for the training loops, patterned after
+[`SaveBest`](@ref SaveBest). During each batch the training loop calls
+`sample_log(s, det_equivalent_or_subproblems)` right after sample `s` has been simulated
+(successful solves only; a failed solve throws exactly as before). The default behavior
+caches, per sample, the full objective (`objective_value`) and the objective excluding
+the target-slack penalty term (`objective_no_deficit_fn`). The cache is cleared at the
+start of every batch and handed to the per-batch `record(sample_log, iter, model)`
+callback.
+
+`on_sample` is an optional hook called as `on_sample(s, models, sample_log)` after the
+default caching. It receives the live JuMP model(s), so it can inspect termination
+statuses or dump the details of a suspicious sample for debugging — without paying any
+per-sample logging cost in the default configuration.
+"""
+mutable struct SampleLog <: Function
+    on_sample::Function
+    objective_no_deficit_fn::Function
+    objectives::Vector{Float64}
+    objectives_no_deficit::Vector{Float64}
+end
+
+function SampleLog(; on_sample=(s, models, sample_log) -> nothing,
+                   objective_no_deficit_fn=get_objective_no_target_deficit)
+    return SampleLog(on_sample, objective_no_deficit_fn, Float64[], Float64[])
+end
+
+function Base.empty!(sample_log::SampleLog)
+    empty!(sample_log.objectives)
+    empty!(sample_log.objectives_no_deficit)
+    return sample_log
+end
+
+_reset_sample_log!(sample_log::SampleLog) = empty!(sample_log)
+_reset_sample_log!(sample_log) = sample_log
+
+_total_objective_value(model::JuMP.Model) = objective_value(model)
+function _total_objective_value(models::Vector{JuMP.Model})
+    total = 0.0
+    for model in models
+        total += objective_value(model)
+    end
+    return total
+end
+
+function (sample_log::SampleLog)(s::Int, models)
+    push!(sample_log.objectives, _total_objective_value(models))
+    push!(sample_log.objectives_no_deficit, sample_log.objective_no_deficit_fn(models))
+    sample_log.on_sample(s, models, sample_log)
+    return nothing
+end
+
+# Sequential accumulation keeps the same floating-point summation order as the
+# historical `loss += ...; loss /= n` pattern inside the training loops.
+function _sequential_mean(values)
+    total = 0.0
+    for v in values
+        total += v
+    end
+    return total / length(values)
+end
+
+"""
+    default_record(sample_log, iter, model)
+
+Default per-batch recording callback: prints the same two per-batch lines as the
+historical `record_loss` default (`metrics/loss` = mean objective excluding the
+target-slack penalty, then `metrics/training_loss` = mean full objective) and returns
+`false` (training continues). Return `true` from a custom `record` to stop training.
+"""
+function default_record(sample_log::SampleLog, iter, model)
+    println("tag: metrics/loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives_no_deficit))")
+    println("tag: metrics/training_loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives))")
+    return false
+end
+
+# Adapter for the deprecated 4-argument `record_loss(iter, model, loss, tag)` interface.
+# Reproduces the historical two-call contract exactly, including the short-circuit:
+# the "metrics/loss" call runs first and, if it requests a stop, the
+# "metrics/training_loss" call never happens.
+function _record_loss_adapter(record_loss)
+    return function (sample_log::SampleLog, iter, model)
+        record_loss(iter, model, _sequential_mean(sample_log.objectives_no_deficit), "metrics/loss") && return true
+        return record_loss(iter, model, _sequential_mean(sample_log.objectives), "metrics/training_loss")
+    end
+end
+
+function _resolve_record(record, record_loss)
+    isnothing(record_loss) && return record
+    record === default_record || throw(ArgumentError("pass either `record` or the deprecated `record_loss`, not both"))
+    return _record_loss_adapter(record_loss)
+end
+
+"""
+    _target_violation_share(objective, objective_no_deficit)
+
+Target-violation share: the realized target-slack penalty divided by the full
+objective. Returns `NaN` when the share is undefined (nonfinite inputs or a full
+objective of magnitude ~0).
+"""
+function _target_violation_share(objective::Real, objective_no_deficit::Real)
+    slack = objective - objective_no_deficit
+    (isfinite(objective) && isfinite(slack) && abs(objective) > 1e-12) || return NaN
+    return slack / objective
+end
+
+"""
+    RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
+                      scenarios; stride=1)
+
+Evaluation helper that assesses the policy with a **stage-wise rollout** (the
+deployment semantics of a target-trajectory policy) on a fixed held-out scenario set.
+Deterministic-equivalent evaluation re-optimizes all stages jointly and can absorb
+stage-wise-unfollowable targets through the slack penalty, silently overstating policy
+quality; the rollout metric is the guard that detects this.
+
+`scenarios` must be a vector of **materialized** scenarios, sampled once before
+training (e.g. `[DecisionRules.sample(uncertainty_samples) for _ in 1:n]`), so every
+evaluation uses the same fixed set. `subproblems` may be the training subproblems (all
+stage parameters are rewritten on every solve) or a separately built copy; when
+training on a deterministic equivalent, pass the stage-wise subproblems here.
+
+Call `evaluation(iter, model)`, e.g. from within a `record` callback. Every `stride`
+calls it rolls the policy out over the fixed set and reports:
+
+- `metrics/rollout_objective_no_deficit`: the rollout objective excluding the
+  target-slack penalty term (the operational cost), and
+- `metrics/rollout_target_violation_share`: the realized slack penalty divided by the
+  full rollout objective (`NaN` when undefined).
+
+Policy comparisons should only be trusted when the violation share is small
+(≤ ~0.05); a larger share means the policy's targets are not followable stage by stage
+and the reported cost is not what deployment would realize. The latest values are kept
+in `last_objective_no_deficit` / `last_violation_share` for custom logging. Calls on
+batches that are not a multiple of `stride` are a no-op and leave the cached values
+unchanged.
+"""
+mutable struct RolloutEvaluation <: Function
+    subproblems::Vector{JuMP.Model}
+    state_params_in
+    state_params_out
+    initial_state
+    scenarios::Vector
+    stride::Int
+    last_objective_no_deficit::Float64
+    last_violation_share::Float64
+end
+
+function RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
+                           scenarios; stride=1)
+    isempty(scenarios) && throw(ArgumentError(
+        "scenarios must be a nonempty vector of materialized scenarios; sample them once before training so every evaluation uses the same fixed set"))
+    stride >= 1 || throw(ArgumentError("stride must be >= 1"))
+    return RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
+        collect(scenarios), stride, NaN, NaN)
+end
+
+function (evaluation::RolloutEvaluation)(iter, model)
+    iter % evaluation.stride == 0 || return nothing
+    total = 0.0
+    total_no_deficit = 0.0
+    for scenario in evaluation.scenarios
+        total += simulate_multistage(evaluation.subproblems, evaluation.state_params_in,
+            evaluation.state_params_out, evaluation.initial_state, scenario, model)
+        total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
+    end
+    objective = total / length(evaluation.scenarios)
+    evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
+    evaluation.last_violation_share = _target_violation_share(objective, evaluation.last_objective_no_deficit)
+    println("tag: metrics/rollout_objective_no_deficit, Iter: $iter, Loss: $(evaluation.last_objective_no_deficit)")
+    println("tag: metrics/rollout_target_violation_share, Iter: $iter, Loss: $(evaluation.last_violation_share)")
+    return nothing
+end
+
 function var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int)
     name = JuMP.name(src)
     if !isempty(name)
