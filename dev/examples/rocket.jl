@@ -34,49 +34,49 @@ using Statistics, Random
 # `build_rocket_problem` creates the deterministic-equivalent JuMP model, and
 # `build_rocket_subproblems` creates per-stage subproblems for stage-wise training.
 
-# ```julia
-# include("build_rocket_problem.jl")
-#
-# det, state_in, state_out, x0, uncertainty, x_v, x_h, x_m, u_max =
-#     build_rocket_problem(; penalty=1e-5)
-#
-# subproblems, state_in_s, state_out_s, x0_s, uncertainty_s, v, h, m, u_max_s =
-#     build_rocket_subproblems(; penalty=1e-5)
-# ```
+## ```julia
+## include("build_rocket_problem.jl")
+##
+## det, state_in, state_out, x0, uncertainty, x_v, x_h, x_m, u_max =
+##     build_rocket_problem(; penalty=1e-5)
+##
+## subproblems, state_in_s, state_out_s, x0_s, uncertainty_s, v, h, m, u_max_s =
+##     build_rocket_subproblems(; penalty=1e-5)
+## ```
 
 # ## Policy
 #
 # A small LSTM-based network maps `[wind_t; v_t; h_t; m_t]` → `[v̂, ĥ, m̂]`:
 
-# ```julia
-# policy = Chain(
-#     Dense(4, 32, sigmoid),
-#     x -> reshape(x, :, 1),
-#     Flux.LSTM(32 => 32),
-#     x -> x[:, end],
-#     Dense(32, 3),
-# )
-# ```
+## ```julia
+## policy = Chain(
+##     Dense(4, 32, sigmoid),
+##     x -> reshape(x, :, 1),
+##     Flux.LSTM(32 => 32),
+##     x -> x[:, end],
+##     Dense(32, 3),
+## )
+## ```
 
 # ## Training
 #
 # **Deterministic equivalent**: couples all stages into one NLP.
 
-# ```julia
-# train_multistage(
-#     policy, x0, det, state_in, state_out, uncertainty;
-#     num_batches=10, optimizer=Flux.Adam(),
-# )
-# ```
+## ```julia
+## train_multistage(
+##     policy, x0, det, state_in, state_out, uncertainty;
+##     num_batches=10, optimizer=Flux.Adam(),
+## )
+## ```
 
 # **Stage-wise subproblems**: sequential per-stage solves.
 
-# ```julia
-# train_multistage(
-#     policy, x0_s, subproblems, state_in_s, state_out_s, uncertainty_s;
-#     num_batches=10, optimizer=Flux.Adam(),
-# )
-# ```
+## ```julia
+## train_multistage(
+##     policy, x0_s, subproblems, state_in_s, state_out_s, uncertainty_s;
+##     num_batches=10, optimizer=Flux.Adam(),
+## )
+## ```
 
 # ## MPC Baseline
 #
@@ -86,14 +86,14 @@ using Statistics, Random
 
 # ## Results
 #
-# Height trajectories for the common saved evaluation seeds:
+# Height trajectories across 10 scenarios for each method:
 #
 # ![Height comparison](../assets/rocket_height_comparison.png)
 #
-# | Method | Scenarios | Final Height (mean ± std) | Final Height Range | Peak Height (mean ± std) |
-# |:---|---:|---:|---:|---:|
-# | TS-DDR | 8 | 1.01288 ± 0.00058 | 1.01208–1.01373 | 1.01289 ± 0.00056 |
-# | MPC | 8 | 1.00514 ± 0.00034 | 1.00476–1.00585 | 1.00549 ± 0.00025 |
+# | Method | Mean Objective | Std | Final Height (mean) |
+# |:---|---:|---:|---:|
+# | TS-DDR (DE) | — | — | — |
+# | TS-DDR (Subproblems) | — | — | — |
+# | MPC | — | — | — |
 #
-# The table uses the first saved trajectory for each common seed in
-# `examples/rocket_control/dr_results` and `examples/rocket_control/mpc_results`.
+# *Table values will be filled after full training runs.*
