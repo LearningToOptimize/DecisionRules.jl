@@ -10,11 +10,14 @@ using JLD2
 using DiffOpt
 using JuMP
 using MadNLP
-using CUDA
-using CUDSS
-using MadNLPGPU
 
-USE_GPU = CUDA.functional()
+USE_GPU = try
+    using CUDA, CUDSS, MadNLPGPU
+    CUDA.functional()
+catch
+    @warn "GPU packages not available — running on CPU"
+    false
+end
 @info "GPU status" USE_GPU
 
 HydroPowerModels_dir = dirname(@__FILE__)
