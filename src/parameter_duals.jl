@@ -177,7 +177,7 @@ end
 Get the dual contribution from the objective function.
 If parameter appears in the objective with coefficient c, contribution is:
 - +c for minimization
-- -c for maximization
+- +c for maximization
 """
 function _get_dual_from_objective(model::JuMP.Model, param::JuMP.VariableRef)
     obj = JuMP.objective_function(model)
@@ -185,10 +185,8 @@ function _get_dual_from_objective(model::JuMP.Model, param::JuMP.VariableRef)
     
     coef = _get_objective_parameter_coefficient(obj, param)
     
-    if sense == MOI.MIN_SENSE
+    if sense == MOI.MIN_SENSE || sense == MOI.MAX_SENSE
         return coef
-    elseif sense == MOI.MAX_SENSE
-        return -coef
     else
         return 0.0  # FEASIBILITY_SENSE or unknown
     end

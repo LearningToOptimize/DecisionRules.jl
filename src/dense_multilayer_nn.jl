@@ -20,27 +20,15 @@ function dense_multilayer_nn(
     activation = Flux.relu,
     dense = Dense,
 )
+    is_recurrent = dense in (LSTM, GRU, RNN)
+    _make_layer(in_dim, out_dim) = is_recurrent ? dense(in_dim => out_dim) : dense(in_dim, out_dim, activation)
     if length(layers) == 0
-        if dense == LSTM
-            return dense(num_inputs, num_outputs)
-        end
-        return dense(num_inputs, num_outputs, activation)
+        return is_recurrent ? dense(num_inputs => num_outputs) : dense(num_inputs, num_outputs, activation)
     end
-    midlayers = []
-    for i = 1:(length(layers)-1)
-        if dense == LSTM
-            push!(midlayers, dense(layers[i], layers[i+1]))
-        else
-            push!(midlayers, dense(layers[i], layers[i+1], activation))
-        end
-    end
-    first_layer = if dense == LSTM
-        dense(num_inputs, layers[1])
-    else
-        dense(num_inputs, layers[1], activation)
-    end
-    model = Chain(first_layer, midlayers..., dense(layers[end], num_outputs))
-    return model
+    midlayers = [_make_layer(layers[i], layers[i+1]) for i in 1:(length(layers)-1)]
+    first_layer = _make_layer(num_inputs, layers[1])
+    last_layer = is_recurrent ? dense(layers[end] => num_outputs) : dense(layers[end], num_outputs)
+    return Chain(first_layer, midlayers..., last_layer)
 end
 
 """
@@ -188,13 +176,20 @@ function _step_encoder_layers(layers::Tuple, x, states::Tuple)
     return rest_out, (new_state, rest_states...)
 end
 
+_state_eltype(state::Tuple) = _state_eltype(first(state))
+_state_eltype(v::AbstractVector) = eltype(v)
+
 function (m::StateConditionedPolicy)(x)
     # Split input into uncertainty and previous state
     uncertainty = x[1:m.n_uncertainty]
     prev_state = x[(m.n_uncertainty+1):end]
 
-    # Encode uncertainty through the recurrent encoder, carrying state across calls
-    encoded, new_state = _step_encoder(m.encoder, uncertainty, m.state)
+    # Encode uncertainty through the recurrent encoder, carrying state across calls.
+    # Cast to encoder precision to keep the recurrent state type stable
+    # (avoids a Zygote codegen bug with nested-tuple convert when solver
+    # feeds Float64 into a Float32 LSTM).
+    T = _state_eltype(m.state)
+    encoded, new_state = _step_encoder(m.encoder, T.(uncertainty), m.state)
     m.state = new_state
 
     # Combine encoded uncertainty with previous state

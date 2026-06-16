@@ -132,11 +132,15 @@ function ChainRulesCore.rrule(::typeof(get_next_state),
             #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target)
             return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
         catch e
-            # In case of any error (e.g. non-DiffOpt model, missing parameters, etc.), return identity gradients 1 * Δy for state_in and state_out_target.
-            @warn "get_next_state rrule fallback triggered due to error: $e"
-            d_state_in = ones(length(state_in)) .* Δy  # simple fallback: sum Δy and return for all inputs
-            d_state_out_target = ones(length(state_out_target)) .* Δy
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
+            msg = sprint(showerror, e)
+            throw(ArgumentError(
+                "Differentiating get_next_state requires a DiffOpt-enabled model " *
+                "because the closed-loop rollout needs solution sensitivities of the " *
+                "realized state variables. Use an appropriate DiffOpt wrapper for the " *
+                "stage subproblems (for target-slack conic models, " *
+                "`DiffOpt.conic_diff_model(...)`), or use the deterministic-equivalent " *
+                "training path when only target duals are needed. Original error: $msg"
+            ))
         end      
     end
 
@@ -254,9 +258,19 @@ function simulate_multistage(
     return simulate_multistage(subproblems, state_params_in, state_params_out, uncertainties, states)
 end
 
+"""
+    pdual(v::VariableRef) -> Float64
+
+Compute ``∂Q/∂p`` for a JuMP parameter variable ``p`` in a solved model, where
+``Q`` is the optimal objective value.  By the envelope theorem / Lagrangian
+duality this equals the sum of ``-\\text{coef} \\times \\text{dual}`` over all
+constraints where ``p`` appears, plus the objective coefficient of ``p``.
+
+This is the key quantity in TS-DDR (arXiv:2405.14973): the dual ``λ_t`` of the
+target constraint gives the sensitivity ``∂Q/∂\\hat{x}_t`` used in Eq. 1.2.
+"""
 function pdual(v::VariableRef)
     if is_parameter(v)
-        # Use our custom parameter dual computation that works with any JuMP model
         return compute_parameter_dual(JuMP.owner_model(v), v)
     else
         error("Variable is not a parameter")
@@ -265,44 +279,112 @@ end
 
 pdual(vs::Vector) = [pdual(v) for v in vs]
 
+"""
+    ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_in,
+                         state_param_out, uncertainty, state_in, state_out)
+
+Reverse-mode rule for a single-stage subproblem solve.
+
+## Mathematical basis (TS-DDR, arXiv:2405.14973; Extension §2 Eq. 2.5)
+
+For stage problem ``q_t(x_{t-1}, w_t; \\hat{x}_t)``, the sensitivities are:
+
+    ∂q_t/∂(state_in)  = μ_t    (dual of dynamics constraint w.r.t. incoming state)
+    ∂q_t/∂(target)     = λ_t    (dual of target constraint w.r.t. target x̂_t)
+
+These are the Lagrange multipliers that [`compute_parameter_dual`](@ref) (`pdual`)
+extracts from the solved model.  This is the **preferred path**: closed-form
+and exact whenever the solver exposes constraint duals.
+
+## Fallback strategy
+
+1. **pdual** (parameter duals) — tried first.
+2. **DiffOpt reverse differentiation** — if pdual raises (e.g. the optimizer
+   wrapper does not expose conic duals).  Computes the same sensitivities via
+   implicit differentiation of the KKT system.
+3. **Zero gradients** — only when the solver terminated with an unsuccessful
+   status (not OPTIMAL / ALMOST_OPTIMAL / LOCALLY_SOLVED).  A warning is
+   emitted.  Set `DecisionRules.STRICT_GRADIENTS[] = true` to throw instead.
+"""
 function ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
     y = simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
     function _pullback(Δy)
-        try 
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), pdual.(state_param_in) * Δy, pdual.([s[1] for s in state_param_out]) * Δy)
-        catch
-            try
-                DiffOpt.empty_input_sensitivities!(subproblem)
-                MOI.set(
-                    subproblem,
-                    DiffOpt.ReverseObjectiveSensitivity(),
-                    Δy,
-                )
-                DiffOpt.reverse_differentiate!(subproblem)
-
-                return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), 
-                    DiffOpt.get_reverse_parameter.(subproblem, state_param_in), 
-                    DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out])
-                )
-            catch e
-                @warn "Failed to compute gradients via DiffOpt. Returning zero gradients for state_in and state_out_target."
-                # print error
-                @show e
-                # print termination status
-                @show JuMP.termination_status(subproblem)
-
-                return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), zeros(length(state_param_in)), zeros(length(state_param_out)))
+        status = @ignore_derivatives JuMP.termination_status(subproblem)
+        if !(status in _SUCCESSFUL_TERM_STATUSES)
+            if STRICT_GRADIENTS[]
+                error("simulate_stage pullback: solver terminated with status $status; " *
+                      "expected a successful solve. Set DecisionRules.STRICT_GRADIENTS[] " *
+                      "= false to return zero gradients instead.")
             end
+            @warn "simulate_stage: solver status $status, returning zero gradients" status
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(),
+                    zeros(length(state_param_in)), zeros(length(state_param_out)))
         end
+
+        # Preferred: parameter duals (closed-form, Eq. 1.2 / 2.5)
+        try
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(),
+                    pdual.(state_param_in) * Δy,
+                    pdual.([s[1] for s in state_param_out]) * Δy)
+        catch
+            # pdual unavailable (e.g. DiffOpt wrapper hides conic duals)
+        end
+
+        # Fallback: DiffOpt reverse differentiation (same math, implicit diff of KKT)
+        DiffOpt.empty_input_sensitivities!(subproblem)
+        MOI.set(subproblem, DiffOpt.ReverseObjectiveSensitivity(), Δy)
+        DiffOpt.reverse_differentiate!(subproblem)
+        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(),
+                DiffOpt.get_reverse_parameter.(subproblem, state_param_in),
+                DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out]))
     end
     return y, _pullback
 end
 
-# Define ChainRulesCore.rrule of simulate_multistage
+"""
+    ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent, state_params_in,
+                         state_params_out, uncertainties, states)
+
+Reverse-mode rule for the deterministic-equivalent (full-horizon) solve.
+
+## Mathematical basis (TS-DDR, arXiv:2405.14973, Eq. 1.2; Extension §1)
+
+For the coupled problem ``Q(w;θ) = \\min \\sum_t f_t + C_δ\\|δ_t\\|`` the gradient
+estimator is:
+
+    ∇_θ E[Q] ≈ (1/S) Σ_s  λ^s ⊙ ∇_θ π(·; θ)
+
+where ``λ_t`` is the dual of the target constraint ``x_t + δ_t = \\hat{x}_t``.
+The pullback returns ``Δ_{states}`` such that ``Δ_{states}[1]`` holds the
+parameter duals of the initial-state parameters and ``Δ_{states}[t+1]`` holds
+the target-constraint duals ``λ_t`` for each stage.
+
+## Fallback strategy
+
+Same as [`simulate_stage`](@ref): tries [`compute_parameter_dual`](@ref)
+first, falls back to DiffOpt reverse differentiation if pdual raises.
+Solver failure (bad termination status) returns zero gradients or throws
+depending on [`STRICT_GRADIENTS`](@ref).
+"""
 function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuMP.Model, state_params_in, state_params_out, uncertainties, states)
     y = simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainties, states)
     function _pullback(Δy)
+        status = @ignore_derivatives JuMP.termination_status(det_equivalent)
         Δ_states = similar(states)
+        if !(status in _SUCCESSFUL_TERM_STATUSES)
+            if STRICT_GRADIENTS[]
+                error("simulate_multistage (det_eq) pullback: solver terminated with " *
+                      "status $status; expected a successful solve.")
+            end
+            @warn "simulate_multistage (det_eq): solver status $status, returning zero gradients" status
+            Δ_states[1] = zeros(length(state_params_in[1]))
+            for t in 1:length(state_params_out)
+                Δ_states[t + 1] = zeros(length(state_params_out[t]))
+            end
+            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
+        end
+
+        # Preferred: parameter duals (closed-form, Eq. 1.2)
         try
             Δ_states[1] = pdual.(state_params_in[1])
             for t in 1:length(state_params_out)
@@ -310,19 +392,18 @@ function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuM
             end
             return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states * Δy)
         catch
-            DiffOpt.empty_input_sensitivities!(det_equivalent)
-            MOI.set(
-                det_equivalent,
-                DiffOpt.ReverseObjectiveSensitivity(),
-                Δy,
-            )
-            DiffOpt.reverse_differentiate!(det_equivalent)
-            Δ_states[1] = DiffOpt.get_reverse_parameter.(det_equivalent, state_params_in[1])
-            for t in 1:length(state_params_out)
-                Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(det_equivalent, [s[1] for s in state_params_out[t]])
-            end
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
+            # pdual unavailable; fall back to DiffOpt
         end
+
+        # Fallback: DiffOpt reverse differentiation
+        DiffOpt.empty_input_sensitivities!(det_equivalent)
+        MOI.set(det_equivalent, DiffOpt.ReverseObjectiveSensitivity(), Δy)
+        DiffOpt.reverse_differentiate!(det_equivalent)
+        Δ_states[1] = DiffOpt.get_reverse_parameter.(det_equivalent, state_params_in[1])
+        for t in 1:length(state_params_out)
+            Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(det_equivalent, [s[1] for s in state_params_out[t]])
+        end
+        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
     end
     return y, _pullback
 end
