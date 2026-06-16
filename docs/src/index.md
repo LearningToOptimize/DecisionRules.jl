@@ -22,7 +22,7 @@ Three training formulations are supported:
 
 | Formulation | Horizon coupling | Gradient source |
 |:---|:---|:---|
-| **Deterministic Equivalent** | Full horizon, one large NLP | DiffOpt sensitivities on the coupled problem |
+| **Deterministic Equivalent** | Full horizon, one large NLP | Duals on the coupled problem |
 | **Stage-wise (single shooting)** | Sequential rollout | Duals + DiffOpt per stage |
 | **Multiple Shooting** | Windowed sub-horizons | DiffOpt per window, continuity penalties |
 
