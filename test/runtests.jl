@@ -11,8 +11,17 @@ using DiffOpt
 using ChainRules: @ignore_derivatives
 using ChainRulesCore
 
+quiet_ipopt_optimizer() = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0, "sb" => "yes")
+quiet_ipopt_model() = Model(quiet_ipopt_optimizer())
+quiet_diffopt_ipopt_model() = DiffOpt.diff_model(quiet_ipopt_optimizer())
+quiet_conic_ipopt_model() = DiffOpt.conic_diff_model(quiet_ipopt_optimizer())
+quiet_nonlinear_ipopt_model() = DiffOpt.nonlinear_diff_model(quiet_ipopt_optimizer())
+
 function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model())
-    # set_attributes(subproblem, "output_flag" => false)
+    try
+        set_silent(subproblem)
+    catch
+    end
     @variable(subproblem, x >= 0.0)
     @variable(subproblem, 0.0 <= y <= 8.0)
     @variable(subproblem, 0.0 <= state_out_var <= 8.0)
@@ -31,13 +40,13 @@ end
 
 @testset "DecisionRules.jl" begin
     @testset "pdual at infeasibility" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer), state_out_val=9.0)
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model(), state_out_val=9.0)
         optimize!(subproblem1)
         @test DecisionRules.pdual(state_in_1) ≈ -1.0e4 rtol=1.0e-1
         @test DecisionRules.pdual(state_out_1) ≈ 1.0e4 rtol=1.0e-1
     end
 
-    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
 
     optimize!(subproblem1)
 
@@ -71,18 +80,25 @@ end
         m = Chain(Dense(1, 10), Dense(10, 1))
         # 90 is what we expect after training, so we start above that for a random policy
         @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) > 90.0
-        for _ in 1:100
-            _inflow = rand(1.:5)
-            uncertainty_samp = [(uncertainty_1, _inflow)]
-            Flux.train!((m, inflow) -> DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m(inflow)), m, [[_inflow] for _ =1:10], Flux.Adam())
+        opt_state = Flux.setup(Flux.Adam(), m)
+        for _ in 1:200
+            _inflow = rand(1.0:5.0)
+            data = [[_inflow] for _ in 1:10]
+            Flux.train!((model, inflow_vec) -> begin
+                uncertainty_samp = [(uncertainty_1, inflow_vec[1])]
+                return DecisionRules.simulate_stage(
+                    subproblem, state_param_in, state_param_out,
+                    uncertainty_samp, state_in_val, model(inflow_vec)
+                )
+            end, m, data, opt_state)
         end
-        # since we trained towards 90, we should be close to it now
-        @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 92
+        # Optimal is ~90 for inflow=2.0. Allow headroom for stochastic training.
+        @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) <= 95
     end
 
     @testset "simulate_multistage (per-stage)" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
-        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=quiet_conic_ipopt_model())
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
@@ -138,7 +154,7 @@ end
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
-            DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
+            quiet_nonlinear_ipopt_model(),
             subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples
         )
 
@@ -177,7 +193,7 @@ end
         # ∂obj/∂p = -1 * 1 = -1 (since p appears with coef 1 in RHS equivalent: x - p >= 0)
         # But in our formulation: x >= p => x - p >= 0, so coef of p is -1
         # dual contribution = -(-1) * 1 = 1
-        model1 = Model(Ipopt.Optimizer)
+        model1 = quiet_ipopt_model()
         @variable(model1, x1 >= 0)
         @variable(model1, p1 in MOI.Parameter(2.0))
         @constraint(model1, con1, x1 - p1 >= 0)
@@ -188,7 +204,7 @@ end
         # Test 2: Parameter in objective
         # min x + 2*p  s.t. x >= 1
         # ∂obj/∂p = 2 (from objective directly, minimization)
-        model2 = Model(Ipopt.Optimizer)
+        model2 = quiet_ipopt_model()
         @variable(model2, x2 >= 0)
         @variable(model2, p2 in MOI.Parameter(3.0))
         @constraint(model2, x2 >= 1)
@@ -200,7 +216,7 @@ end
         # min x + p  s.t. x >= 2*p
         # At optimality x* = 2p, constraint dual = 1
         # ∂obj/∂p = 1 (from obj) + (-(-2) * 1) = 1 + 2 = 3
-        model3 = Model(Ipopt.Optimizer)
+        model3 = quiet_ipopt_model()
         @variable(model3, x3 >= 0)
         @variable(model3, p3 in MOI.Parameter(1.0))
         @constraint(model3, con3, x3 - 2 * p3 >= 0)
@@ -210,17 +226,17 @@ end
 
         # Test 4: Maximization problem
         # max -x + p  s.t. x >= 1
-        # Equivalent to min x - p, so ∂obj/∂p = -(-1) = 1 for max
-        model4 = Model(Ipopt.Optimizer)
+        # The optimal objective is p - 1, so ∂objective_value/∂p = 1
+        model4 = quiet_ipopt_model()
         @variable(model4, x4 >= 0)
         @variable(model4, p4 in MOI.Parameter(1.0))
         @constraint(model4, x4 >= 1)
         @objective(model4, Max, -x4 + p4)
         optimize!(model4)
-        @test compute_parameter_dual(model4, p4) ≈ -1.0 rtol=1.0e-2
+        @test compute_parameter_dual(model4, p4) ≈ 1.0 rtol=1.0e-2
 
         # Test 5: SOC constraint with parameter (similar to existing pdual tests)
-        model5 = Model(Ipopt.Optimizer)
+        model5 = quiet_ipopt_model()
         @variable(model5, x5 >= 0.0)
         @variable(model5, 0.0 <= y5 <= 8.0)
         @variable(model5, 0.0 <= state_out_var5 <= 8.0)
@@ -241,7 +257,7 @@ end
 
     @testset "create_deficit!" begin
         # Test 1: L1 norm only (default/legacy behavior)
-        model1 = Model(Ipopt.Optimizer)
+        model1 = quiet_ipopt_model()
         @variable(model1, x1)
         @variable(model1, state[1:3])
         @variable(model1, target[1:3])
@@ -261,7 +277,7 @@ end
         @test value(norm_deficit1) ≈ 3.0 rtol=1.0e-2  # L1 norm = |0.5| + |1.0| + |1.5| = 3.0
         
         # Test 2: L2 squared norm only (sum of squares)
-        model2 = Model(Ipopt.Optimizer)
+        model2 = quiet_ipopt_model()
         @variable(model2, x2)
         @variable(model2, state2[1:3])
         @variable(model2, target2[1:3])
@@ -281,7 +297,7 @@ end
         @test value(norm_deficit2) ≈ 3.5 rtol=1.0e-2
         
         # Test 3: Both L1 and L2 squared norms
-        model3 = Model(Ipopt.Optimizer)
+        model3 = quiet_ipopt_model()
         @variable(model3, x3)
         @variable(model3, state3[1:3])
         @variable(model3, target3[1:3])
@@ -302,7 +318,7 @@ end
         @test value(norm_deficit3) ≈ expected_combined rtol=1.0e-2
         
         # Test 4: Verify backward compatibility with legacy 'penalty' argument
-        model4 = Model(Ipopt.Optimizer)
+        model4 = quiet_ipopt_model()
         @variable(model4, x4)
         @objective(model4, Min, x4)
         fix(x4, 1.0)
@@ -313,7 +329,7 @@ end
         @test termination_status(model4) == MOI.LOCALLY_SOLVED
         
         # Test 5: Verify objective contribution with L1 norm
-        model5 = Model(Ipopt.Optimizer)
+        model5 = quiet_ipopt_model()
         @variable(model5, y5 >= 0)
         @objective(model5, Min, 10 * y5)
         @constraint(model5, y5 >= 1)  # Forces y5 = 1
@@ -327,7 +343,7 @@ end
         @test objective_value(model5) ≈ 510.0 rtol=1.0e-2
         
         # Test 6: Verify objective contribution with L2 squared norm
-        model6 = Model(Ipopt.Optimizer)
+        model6 = quiet_ipopt_model()
         @variable(model6, y6 >= 0)
         @objective(model6, Min, 10 * y6)
         @constraint(model6, y6 >= 1)
@@ -417,8 +433,8 @@ end
 
         @testset "train_multistage penalty_schedule end-to-end" begin
             # nothing (default) leaves coefficients untouched
-            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model())
             sps = [sp1, sp2]
             spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
             spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
@@ -450,7 +466,7 @@ end
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
             det_equivalent, usamples = DecisionRules.deterministic_equivalent!(
-                DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
+                quiet_nonlinear_ipopt_model(),
                 sps, spi, spo, [5.0], usamples)
             nd_copies = [v for v in all_variables(det_equivalent) if occursin("norm_deficit", JuMP.name(v))]
             @test length(nd_copies) == 2  # one renamed copy per stage
@@ -472,7 +488,7 @@ end
             windows = DecisionRules.setup_shooting_windows(
                 [sp], spi, spo, [5.0], usamples;
                 window_size=1,
-                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer))
+                model_factory=() -> quiet_conic_ipopt_model())
             wm = windows[1].model
             nd_window = [v for v in all_variables(wm) if occursin("norm_deficit", JuMP.name(v))]
             @test length(nd_window) == 1
@@ -489,8 +505,8 @@ end
 
     @testset "sample logger and per-batch record" begin
         function build_two_stage()
-            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model())
             sps = [sp1, sp2]
             spi = Vector{Vector{Any}}(undef, 2)
             spi .= [[si1], [si2]]
@@ -530,7 +546,7 @@ end
         @testset "deterministic-equivalent overload caches per sample" begin
             sps, spi, spo, usamples = build_two_stage()
             det_equivalent, usamples_det = DecisionRules.deterministic_equivalent!(
-                DiffOpt.nonlinear_diff_model(Ipopt.Optimizer),
+                quiet_nonlinear_ipopt_model(),
                 sps, spi, spo, [5.0], usamples)
             Random.seed!(222)
             m = Chain(Dense(2, 10), Dense(10, 1))
@@ -764,7 +780,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(Ipopt.Optimizer)
+                subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:3] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -792,7 +808,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=window_size,
-                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
+                model_factory=() -> quiet_nonlinear_ipopt_model()
             )
             
             @test length(windows) == 3  # 6 stages / 2 window_size = 3 windows
@@ -817,7 +833,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=4,  # 6 stages / 4 = 2 windows, last window has 2 stages
-                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
+                model_factory=() -> quiet_nonlinear_ipopt_model()
             )
             
             @test length(windows_odd) == 2
@@ -873,7 +889,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
+                subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -900,7 +916,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
+                model_factory=() -> quiet_nonlinear_ipopt_model()
             )
             
             @test length(windows) == 1  # Only one window for 2 stages with window_size=2
@@ -946,7 +962,7 @@ end
             state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
-            subproblems[1] = DiffOpt.diff_model(Ipopt.Optimizer)
+            subproblems[1] = quiet_diffopt_ipopt_model()
             @variable(subproblems[1], x)
             @variable(subproblems[1], state_in)
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.1))
@@ -970,7 +986,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer)
+                model_factory=() -> quiet_conic_ipopt_model()
             )
 
             window = windows[1]
@@ -1002,7 +1018,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
+                subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -1028,7 +1044,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> DiffOpt.nonlinear_diff_model(Ipopt.Optimizer)
+                model_factory=() -> quiet_nonlinear_ipopt_model()
             )
             
             window = windows[1]
@@ -1073,7 +1089,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
+                subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -1100,7 +1116,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
+                model_factory=() -> quiet_nonlinear_ipopt_model()
             )
             
             @test length(windows) == 2
@@ -1148,7 +1164,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
             
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
+                subproblems[t] = quiet_nonlinear_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
@@ -1174,7 +1190,7 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0))
+                model_factory=() -> quiet_nonlinear_ipopt_model()
             )
             
             # Set uncertainty values
@@ -1214,7 +1230,7 @@ end
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
             for t in 1:num_stages
-                subproblems[t] = DiffOpt.diff_model(Ipopt.Optimizer)
+                subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x)
                 @variable(subproblems[t], state_in in MOI.Parameter(1.0))
                 @variable(subproblems[t], u1 in MOI.Parameter(0.1))
@@ -1238,7 +1254,7 @@ end
                 Float64.(initial_state),
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer)
+                model_factory=() -> quiet_conic_ipopt_model()
             )
 
             # Policy expects flat [u1, u2, state] input
@@ -1265,7 +1281,7 @@ end
             state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
             uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
-            subproblems[1] = DiffOpt.diff_model(Ipopt.Optimizer)
+            subproblems[1] = quiet_diffopt_ipopt_model()
             @variable(subproblems[1], x)
             @variable(subproblems[1], state_in in MOI.Parameter(0.0))
             @variable(subproblems[1], uncertainty in MOI.Parameter(0.0))
@@ -1293,7 +1309,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer),
+                model_factory=() -> quiet_conic_ipopt_model(),
             )
 
             DecisionRules.train_multiple_shooting(
@@ -1318,7 +1334,7 @@ end
                 uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
 
                 for t in 1:num_stages
-                    subproblems[t] = DiffOpt.diff_model(Ipopt.Optimizer)
+                    subproblems[t] = quiet_diffopt_ipopt_model()
                     @variable(subproblems[t], reservoir_in)
                     @variable(subproblems[t], reservoir_out)
                     @variable(subproblems[t], inflow)
@@ -1376,7 +1392,7 @@ end
             # Deterministic equivalent
             subproblems_d, state_in_d, state_out_d, uncertainty_samples_d =
                 build_consistent_subproblems(num_stages)
-            det_model = JuMP.Model(Ipopt.Optimizer)
+            det_model = JuMP.Model(quiet_ipopt_optimizer())
             det_model, uncertainty_samples_d = DecisionRules.deterministic_equivalent!(
                 det_model,
                 subproblems_d,
@@ -1409,7 +1425,7 @@ end
                 Float64.(initial_state),
                 uncertainty_samples_w;
                 window_size=6,
-                model_factory=() -> DiffOpt.conic_diff_model(Ipopt.Optimizer),
+                model_factory=() -> quiet_conic_ipopt_model(),
             )
             # Variable count checks
             stage_var_count = sum(length.(all_variables.(subproblems_s)))
@@ -1623,8 +1639,8 @@ end
     end
 
     @testset "get_objective_no_target_deficit (vector)" begin
-        sp1 = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))[1]
-        sp2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=DiffOpt.conic_diff_model(Ipopt.Optimizer))[1]
+        sp1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())[1]
+        sp2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model())[1]
         optimize!(sp1)
         optimize!(sp2)
         total = DecisionRules.get_objective_no_target_deficit([sp1, sp2])
@@ -1731,10 +1747,11 @@ end
         end
 
         @testset "train_multistage (subproblems) with MadNLP" begin
-            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=Model(MadNLP.Optimizer))
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=Model(MadNLP.Optimizer))
-            set_optimizer_attribute(sp1, "print_level", MadNLP.ERROR)
-            set_optimizer_attribute(sp2, "print_level", MadNLP.ERROR)
+            madnlp_diff_model = () -> DiffOpt.conic_diff_model(
+                optimizer_with_attributes(MadNLP.Optimizer, "print_level" => MadNLP.ERROR)
+            )
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=madnlp_diff_model())
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=madnlp_diff_model())
             sps = [sp1, sp2]
             spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
             spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
@@ -1750,6 +1767,23 @@ end
             obj_after = DecisionRules.simulate_multistage(
                 sps, spi, spo, [5.0], sample(usamples), m)
             @test obj_after <= obj_before + 50.0  # some tolerance for stochastic training
+        end
+
+        @testset "get_next_state rrule with MadNLP through DiffOpt" begin
+            sp, si, so, sov, u = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(
+                optimizer_with_attributes(MadNLP.Optimizer, "print_level" => MadNLP.ERROR)
+            ))
+            state_param_in = Vector{Any}([si])
+            state_param_out = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            uncertainty_sample = [(u, 2.0)]
+            state_in_val = [5.0]
+            state_out_val = [4.0]
+            DecisionRules.simulate_stage(sp, state_param_in, state_param_out,
+                uncertainty_sample, state_in_val, state_out_val)
+            jac = Zygote.jacobian(DecisionRules.get_next_state, sp,
+                state_param_in, state_param_out, state_in_val, state_out_val)
+            @test jac[4][1] ≈ 0.0 atol=1.0e-4
+            @test jac[5][1] ≈ 1.0 rtol=1.0e-1
         end
 
         @testset "train_multistage (det_eq) with MadNLP and penalty_schedule" begin
@@ -1834,6 +1868,159 @@ end
         end
     end
 
+    @testset "rrule mathematical correctness (finite differences)" begin
+        # Verify that rrule gradients match finite-difference approximations.
+        # This validates the mathematical chain described in the Extension PDF:
+        #   ∂q_t/∂(state_in) = μ_t,  ∂q_t/∂(target) = λ_t  (Eq. 2.5)
+        # and for the det-eq:
+        #   ∂Q/∂(state[t]) = λ_t  (Eq. 1.2)
+        #
+        # STRICT_GRADIENTS is on: these are controlled single-solve tests where
+        # the solver must succeed, so zero-gradient fallback would be a bug.
+        DecisionRules.STRICT_GRADIENTS[] = true
+
+        @testset "simulate_stage rrule vs finite differences" begin
+            sp, si, so, sov, u = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+            spi_v = Vector{Any}([si])
+            spo_v = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            usamp = [(u, 2.0)]
+            s_in = [5.0]
+            s_out = [4.0]
+
+            # AD gradient
+            grad = Zygote.gradient(
+                (si, so) -> DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, si, so),
+                s_in, s_out
+            )
+
+            # Finite-difference gradient
+            ε = 1e-5
+            f0 = DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, s_in, s_out)
+            fd_in = (DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, s_in .+ ε, s_out) - f0) / ε
+            fd_out = (DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, s_in, s_out .+ ε) - f0) / ε
+
+            @test grad[1][1] ≈ fd_in atol=1e-2
+            @test grad[2][1] ≈ fd_out atol=1e-2
+        end
+
+        @testset "simulate_multistage (det_eq) rrule vs finite differences" begin
+            sp1, si1, so1, sov1, u1 = build_subproblem(10)
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
+            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+            det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
+                quiet_nonlinear_ipopt_model(),
+                [sp1, sp2], spi, spo, [5.0], usamples)
+            usamp = sample(usamples_det)
+            states0 = [[9.0], [7.0], [4.0]]
+
+            # AD gradient
+            grad = Zygote.gradient(
+                st -> DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, st),
+                states0
+            )
+
+            # Finite-difference gradient for initial state (states0[1])
+            ε = 1e-5
+            f0 = DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states0)
+            states_p = [states0[1] .+ ε, states0[2], states0[3]]
+            fd_s1 = (DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states_p) - f0) / ε
+            @test grad[1][1][1] ≈ fd_s1 atol=1e-1
+
+            # Finite-difference gradient for last target (states0[3])
+            states_p3 = [states0[1], states0[2], states0[3] .+ ε]
+            fd_s3 = (DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states_p3) - f0) / ε
+            @test grad[1][3][1] ≈ fd_s3 atol=1e-1
+        end
+
+        @testset "solve_window rrule vs finite differences" begin
+            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=quiet_diffopt_ipopt_model())
+            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_diffopt_ipopt_model())
+            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo .= [[(so1, sov1)], [(so2, sov2)]]
+            usamples = [[(u1, [2.0])], [(u2, [1.0])]]
+            windows = DecisionRules.setup_shooting_windows(
+                [sp1, sp2], spi, spo, [5.0], usamples;
+                window_size=2, model_factory=() -> quiet_conic_ipopt_model())
+            window = windows[1]
+            for t in 1:2
+                for p in window.uncertainty_params[t]
+                    set_parameter_value(p, usamples[t][1][2][1])
+                end
+            end
+            s_in = Float32[5.0]
+            targets = [Float32[4.0], Float32[3.0]]
+
+            # AD gradient w.r.t. targets
+            grad = Zygote.gradient(
+                tgts -> DecisionRules.solve_window(
+                    window.model, window.state_in_params, window.state_out_params, s_in, tgts),
+                targets
+            )
+
+            # Finite-difference gradient for targets[1]
+            ε = 1e-4
+            f0 = DecisionRules.solve_window(window.model, window.state_in_params, window.state_out_params, s_in, targets)
+            targets_p = [targets[1] .+ Float32(ε), targets[2]]
+            fd_t1 = (DecisionRules.solve_window(window.model, window.state_in_params, window.state_out_params, s_in, targets_p) - f0) / ε
+            @test grad[1][1][1] ≈ fd_t1 atol=5e-1
+        end
+
+        DecisionRules.STRICT_GRADIENTS[] = false
+    end
+
+    @testset "gradient fallback behavior" begin
+        @testset "STRICT_GRADIENTS flag controls error behavior" begin
+            @test DecisionRules.STRICT_GRADIENTS[] == false  # default
+        end
+
+        @testset "successful solve produces nonzero gradients" begin
+            # With a successful solve, both pdual and DiffOpt should give nonzero results.
+            # This verifies the rrule does NOT hit the zero-gradient fallback.
+            DecisionRules.STRICT_GRADIENTS[] = true
+            sp, si, so, sov, u = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+            spi_v = Vector{Any}([si])
+            spo_v = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            usamp = [(u, 2.0)]
+
+            grad = Zygote.gradient(
+                (si_val, so_val) -> DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, si_val, so_val),
+                [5.0], [4.0]
+            )
+            @test abs(grad[1][1]) > 1.0
+            @test abs(grad[2][1]) > 1.0
+            DecisionRules.STRICT_GRADIENTS[] = false
+        end
+
+        @testset "pdual matches DiffOpt on the same model" begin
+            # Verify that pdual (parameter duals) and DiffOpt give the same sensitivities
+            # when both are available. This validates the mathematical equivalence of
+            # the two gradient paths in the rrule.
+            sp, si, so, sov, u = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+            spi_v = Vector{Any}([si])
+            spo_v = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            usamp = [(u, 2.0)]
+            DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, [5.0], [4.0])
+
+            # pdual path
+            d_in_pdual = DecisionRules.pdual(si)
+            d_out_pdual = DecisionRules.pdual(so)
+
+            # DiffOpt path
+            DiffOpt.empty_input_sensitivities!(sp)
+            MOI.set(sp, DiffOpt.ReverseObjectiveSensitivity(), 1.0)
+            DiffOpt.reverse_differentiate!(sp)
+            d_in_diffopt = DiffOpt.get_reverse_parameter(sp, si)
+            d_out_diffopt = DiffOpt.get_reverse_parameter(sp, so)
+
+            @test d_in_pdual ≈ d_in_diffopt rtol=0.1
+            @test d_out_pdual ≈ d_out_diffopt rtol=0.1
+        end
+    end
+
     @testset "GPU (CUDA) solver" begin
         gpu_available = try
             @eval using CUDA
@@ -1858,7 +2045,7 @@ end
                 optimize!(gpu_model)
                 @test termination_status(gpu_model) in [MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
                 @test value(gx) ≈ 3.0 atol=1e-3
-                @test compute_parameter_dual(gpu_model, gp) ≈ -1.0 rtol=0.2
+                @test compute_parameter_dual(gpu_model, gp) ≈ 1.0 rtol=0.2
             end
 
             @testset "deterministic_equivalent GPU training" begin

@@ -19,6 +19,25 @@ export simulate_multistage, sample, train_multistage, simulate_states, simulate_
     train_multiple_shooting, setup_shooting_windows, solve_window, predict_window_targets,
     simulate_multiple_shooting, WindowData
 
+"""
+    STRICT_GRADIENTS
+
+Global flag controlling gradient fallback behavior in rrules.
+
+When `false` (default), rrule pullbacks return zero gradients with a warning
+when the solver terminates unsuccessfully — this keeps training alive when a
+few samples hit numerical trouble.
+
+When `true`, the same situation throws an error instead. Enable this in tests
+to verify that controlled test cases never silently fall through to zero
+gradients:
+
+    DecisionRules.STRICT_GRADIENTS[] = true
+"""
+const STRICT_GRADIENTS = Ref(false)
+
+const _SUCCESSFUL_TERM_STATUSES = (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED)
+
 include("parameter_duals.jl")
 include("simulate_multistage.jl")
 include("dense_multilayer_nn.jl")
