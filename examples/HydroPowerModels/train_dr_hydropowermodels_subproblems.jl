@@ -1,18 +1,10 @@
-# import Pkg
-# Pkg.activate(".")
+# Train HydroPowerModels using stage-wise decomposition (single shooting, Extension §2)
 using DecisionRules
 using Statistics
 using Random
 using Flux
 
-# using MosekTools
-using Ipopt, HSL_jll # Gurobi, MosekTools, Ipopt, MadNLP
-# using Gurobi # Gurobi, MosekTools, Ipopt, MadNLP
-# import CUDA # if error run CUDA.set_runtime_version!(v"12.1.0")
-# CUDA.set_runtime_version!(v"12.1.0")
-# using MadNLP 
-# using MadNLPGPU
-# import ParametricOptInterface as POI
+using Ipopt
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
@@ -27,22 +19,21 @@ function non_ensurance(x_out, x_in, uncertainty, max_volume)
 end
 
 # Parameters
-case_name = "bolivia" # bolivia, case3
-formulation = "ACPPowerModel" # SOCWRConicPowerModel, DCPPowerModel, ACPPowerModel
-num_stages = 96 # 96, 48
+case_name = "bolivia"
+formulation = "ACPPowerModel"
+num_stages = 96
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 save_file = "$(case_name)-$(formulation)-h$(num_stages)-subproblems-$(now())"
 formulation_file = formulation * ".mof.json"
-num_epochs=30
-num_batches=100
-_num_train_per_batch=1
-# dense = Flux.LSTM # RNN, Dense, LSTM
-activation = sigmoid # tanh, DecisionRules.identity, relu
-layers = Int64[128, 128] # Int64[8, 8], Int64[]
-ensure_feasibility = non_ensurance # ensure_feasibility_double_softplus
-optimizers= [Flux.Adam()] # Flux.Adam(0.01), Flux.Descent(0.1), Flux.RMSProp(0.00001, 0.001)
-pre_trained_model = nothing #joinpath(HydroPowerModels_dir, case_name, formulation, "models", "case3-ACPPowerModel-h48-2024-05-18T10:16:25.117.jld2")
+num_epochs = 30
+num_batches = 100
+_num_train_per_batch = 1
+activation = sigmoid
+layers = Int64[128, 128]
+ensure_feasibility = non_ensurance
+optimizers = [Flux.Adam()]
+pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
 # Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
@@ -54,32 +45,35 @@ eval_every = 25                          # rollout-evaluate every eval_every bat
 # Build MSP using subproblems (not deterministic equivalent)
 
 # Define the DiffOpt optimizer for subproblems
-diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Optimizer, 
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma27"
-))
+diff_optimizer =
+    () -> DiffOpt.diff_optimizer(
+        optimizer_with_attributes(
+            Ipopt.Optimizer,
+            "print_level" => 0,
+            "linear_solver" => "mumps",
+        ),
+    )
 
-subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
-    joinpath(HydroPowerModels_dir, case_name), formulation_file; 
+subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(
+    joinpath(HydroPowerModels_dir, case_name),
+    formulation_file;
     num_stages=num_stages,
     optimizer=diff_optimizer,
     penalty_l1=penalty_l1,
-    penalty_l2=penalty_l2
+    penalty_l2=penalty_l2,
 )
 
 num_hydro = length(initial_state)
 
 # Logging
 
-lg = WandbLogger(
-    project = "RL",
-    name = save_file,
-    save_code = false,
-    config = Dict(
+lg = WandbLogger(;
+    project="RL",
+    name=save_file,
+    save_code=false,
+    config=Dict(
         "layers" => layers,
         "activation" => string(activation),
-        # "dense" => string(dense),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
         "training_method" => "subproblems",
@@ -89,14 +83,20 @@ lg = WandbLogger(
         "num_epochs" => string(num_epochs),
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),
-    )
+    ),
 )
 
 # Define Model
 # Policy architecture: LSTM processes uncertainty, Dense combines with previous state
 num_uncertainties = length(uncertainty_samples[1])
-models = state_conditioned_policy(num_uncertainties, num_hydro, num_hydro, layers; 
-                                   activation=activation, encoder_type=Flux.LSTM)
+models = state_conditioned_policy(
+    num_uncertainties,
+    num_hydro,
+    num_hydro,
+    layers;
+    activation=activation,
+    encoder_type=Flux.LSTM,
+)
 
 # Load pretrained Model
 if !isnothing(pre_trained_model)
@@ -106,12 +106,16 @@ if !isnothing(pre_trained_model)
 end
 
 Random.seed!(8788)
-objective_values = [simulate_multistage(
-    subproblems, state_params_in, state_params_out, 
-    initial_state, DecisionRules.sample(uncertainty_samples), 
-    models;
-    # ensure_feasibility=(x_out, x_in, uncertainty) -> ensure_feasibility(x_out, x_in, uncertainty, max_volume)
-) for _ in 1:2]
+objective_values = [
+    simulate_multistage(
+        subproblems,
+        state_params_in,
+        state_params_out,
+        initial_state,
+        DecisionRules.sample(uncertainty_samples),
+        models;
+    ) for _ in 1:2
+]
 best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
@@ -124,35 +128,54 @@ convergence_criterium = StallingCriterium(100, best_obj, 0)
 # target-violation share; comparisons are only trustworthy when the share is <= ~0.05.
 Random.seed!(8789)
 eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:num_eval_scenarios]
-rollout_evaluation = RolloutEvaluation(subproblems, state_params_in, state_params_out,
-    initial_state, eval_scenarios; stride=eval_every)
+rollout_evaluation = RolloutEvaluation(
+    subproblems,
+    state_params_in,
+    state_params_out,
+    initial_state,
+    eval_scenarios;
+    stride=eval_every,
+    policy_state=:realized,
+)
+resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
+    DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
 
 # Train Model using subproblems (not deterministic equivalent).
 # A single call over num_epochs*num_batches batches so the penalty schedule spans the whole
 # run (this also keeps one optimizer state throughout, and a `true` return from the record
 # callback now stops the whole run).
-train_multistage(models, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples;
+train_multistage(
+    models,
+    initial_state,
+    subproblems,
+    state_params_in,
+    state_params_out,
+    uncertainty_samples;
     num_batches=num_epochs * num_batches,
     num_train_per_batch=_num_train_per_batch,
     optimizer=first(optimizers),
     record=(sample_log, iter, model) -> begin
         training_loss = mean(sample_log.objectives)
-        Wandb.log(lg, Dict(
+        metrics = Dict(
             "metrics/loss" => mean(sample_log.objectives_no_deficit),
             "metrics/training_loss" => training_loss,
-        ))
+        )
         rollout_evaluation(iter, model)
         if iter % eval_every == 0
-            Wandb.log(lg, Dict(
-                "metrics/rollout_objective_no_deficit" => rollout_evaluation.last_objective_no_deficit,
-                "metrics/rollout_target_violation_share" => rollout_evaluation.last_violation_share,
-            ))
+            metrics["metrics/rollout_objective_no_deficit"] =
+                rollout_evaluation.last_objective_no_deficit
+            metrics["metrics/rollout_target_violation_share"] =
+                rollout_evaluation.last_violation_share
         end
+        if !isnothing(resolved_penalty_schedule)
+            metrics["metrics/target_penalty_multiplier"] =
+                DecisionRules._penalty_multiplier_for(resolved_penalty_schedule, iter)
+        end
+        Wandb.log(lg, metrics)
         save_control(iter, model, training_loss)
         return convergence_criterium(iter, model, training_loss)
     end,
-    # ensure_feasibility=(x_out, x_in, uncertainty) -> ensure_feasibility(x_out, x_in, uncertainty, max_volume),
-    penalty_schedule=penalty_schedule
+    penalty_schedule=penalty_schedule,
 )
 
 # Finish the run

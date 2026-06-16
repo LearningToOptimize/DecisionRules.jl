@@ -17,17 +17,23 @@ function dense_multilayer_nn(
     num_inputs::Int,
     num_outputs::Int,
     layers::Vector{Int};
-    activation = Flux.relu,
-    dense = Dense,
+    activation=Flux.relu,
+    dense=Dense,
 )
     is_recurrent = dense in (LSTM, GRU, RNN)
-    _make_layer(in_dim, out_dim) = is_recurrent ? dense(in_dim => out_dim) : dense(in_dim, out_dim, activation)
+    _make_layer(in_dim, out_dim) =
+        is_recurrent ? dense(in_dim => out_dim) : dense(in_dim, out_dim, activation)
     if length(layers) == 0
-        return is_recurrent ? dense(num_inputs => num_outputs) : dense(num_inputs, num_outputs, activation)
+        return if is_recurrent
+            dense(num_inputs => num_outputs)
+        else
+            dense(num_inputs, num_outputs, activation)
+        end
     end
-    midlayers = [_make_layer(layers[i], layers[i+1]) for i in 1:(length(layers)-1)]
+    midlayers = [_make_layer(layers[i], layers[i + 1]) for i in 1:(length(layers) - 1)]
     first_layer = _make_layer(num_inputs, layers[1])
-    last_layer = is_recurrent ? dense(layers[end] => num_outputs) : dense(layers[end], num_outputs)
+    last_layer =
+        is_recurrent ? dense(layers[end] => num_outputs) : dense(layers[end], num_outputs)
     return Chain(first_layer, midlayers..., last_layer)
 end
 
@@ -166,8 +172,9 @@ output and the updated state. For a `Chain` of cells, each layer's output feeds 
 next and each layer's state is threaded independently.
 """
 _step_encoder(cell, x, state) = cell(x, state)
-_step_encoder(chain::Chain, x, states::Tuple) =
-    _step_encoder_layers(chain.layers, x, states)
+function _step_encoder(chain::Chain, x, states::Tuple)
+    return _step_encoder_layers(chain.layers, x, states)
+end
 
 _step_encoder_layers(::Tuple{}, x, ::Tuple{}) = x, ()
 function _step_encoder_layers(layers::Tuple, x, states::Tuple)
@@ -182,7 +189,7 @@ _state_eltype(v::AbstractVector) = eltype(v)
 function (m::StateConditionedPolicy)(x)
     # Split input into uncertainty and previous state
     uncertainty = x[1:m.n_uncertainty]
-    prev_state = x[(m.n_uncertainty+1):end]
+    prev_state = x[(m.n_uncertainty + 1):end]
 
     # Encode uncertainty through the recurrent encoder, carrying state across calls.
     # Cast to encoder precision to keep the recurrent state type stable
@@ -235,8 +242,8 @@ function state_conditioned_policy(
     n_state::Int,
     n_output::Int,
     layers::Vector{Int};
-    activation = Flux.relu,
-    encoder_type = Flux.LSTM,
+    activation=Flux.relu,
+    encoder_type=Flux.LSTM,
 )
     # Build encoder (stack of recurrent cells that process uncertainty)
     if length(layers) == 0
@@ -247,8 +254,8 @@ function state_conditioned_policy(
         encoder_output_dim = layers[1]
     else
         encoder_layers = [_as_cell(encoder_type(n_uncertainty => layers[1]))]
-        for i = 1:(length(layers)-1)
-            push!(encoder_layers, _as_cell(encoder_type(layers[i] => layers[i+1])))
+        for i in 1:(length(layers) - 1)
+            push!(encoder_layers, _as_cell(encoder_type(layers[i] => layers[i + 1])))
         end
         encoder = Chain(encoder_layers...)
         encoder_output_dim = layers[end]
@@ -260,10 +267,6 @@ function state_conditioned_policy(
     combiner = Dense(encoder_output_dim + n_state => n_output, activation)
 
     return StateConditionedPolicy(
-        encoder,
-        combiner,
-        _init_recurrent_state(encoder),
-        n_uncertainty,
-        n_state,
+        encoder, combiner, _init_recurrent_state(encoder), n_uncertainty, n_state
     )
 end

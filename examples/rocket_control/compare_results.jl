@@ -20,7 +20,7 @@ using Plots
 
 plt = Plots.plot(; xlabel="Time", ylabel="Height", legend=false);
 for i in successful_seeds
-    Plots.plot!(1:1000, Matrix(dr_h[dr_h.seed .== i, 1:1000])', color=:red);
-    Plots.plot!(1:1000, Matrix(mpc_h[mpc_h.seed .== i, 1:1000])', color=:blue);
+    Plots.plot!(1:1000, Matrix(dr_h[dr_h.seed .== i, 1:1000])'; color=:red);
+    Plots.plot!(1:1000, Matrix(mpc_h[mpc_h.seed .== i, 1:1000])'; color=:blue);
 end
 Plots.savefig(plt, joinpath(example_dir, "height_comparison.png"))

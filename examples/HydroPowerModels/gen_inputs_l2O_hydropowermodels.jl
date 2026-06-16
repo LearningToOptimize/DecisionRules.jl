@@ -17,11 +17,18 @@ HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
 case_dir = joinpath(HydroPowerModels_dir, case_name)
 
-subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(    
+subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 
-det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(JuMP.Model(), subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples)
+det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
+    JuMP.Model(),
+    subproblems,
+    state_params_in,
+    state_params_out,
+    initial_state,
+    uncertainty_samples,
+)
 
 # Remove state imposing constraints
 
@@ -39,7 +46,10 @@ for con in cons
         func
     end
 
-    if all( [(_var in state_params) || (_var in _deficit) || (_var in state_vars) for _var in _vars])
+    if all([
+        (_var in state_params) || (_var in _deficit) || (_var in state_vars) for
+        _var in _vars
+    ])
         delete(det_equivalent, con)
     end
 end
@@ -61,12 +71,16 @@ for (i, hyd_in) in enumerate(state_params_in[1])
     pairs[hyd_in] = fill(initial_state[i], num_samples)
 end
 
-JuMP.write_to_file(det_equivalent, joinpath(case_dir, formulation) * "_det_equivalent.mof.json")
+JuMP.write_to_file(
+    det_equivalent, joinpath(case_dir, formulation) * "_det_equivalent.mof.json"
+)
 
 # inflow
 recursive_merge(x::AbstractDict...) = merge(recursive_merge, x...)
 inflow = vcat([[_var for _var in keys(dict)] for dict in uncertainty_samples]...)
-pairs = merge(pairs, Dict(inflow .=> [Vector{Float64}(undef, num_samples) for _ in 1:length(inflow)]))
+pairs = merge(
+    pairs, Dict(inflow .=> [Vector{Float64}(undef, num_samples) for _ in 1:length(inflow)])
+)
 for s in 1:num_samples
     uncertainty_sample = sample(uncertainty_samples)
     uncertainty_sample = recursive_merge(uncertainty_sample...)
@@ -79,9 +93,6 @@ problem_iterator = ProblemIterator(pairs)
 
 save(
     problem_iterator,
-    joinpath(
-        case_dir,
-        case_name * "_" * formulation * "_input_" * string(batch_id),
-    ),
+    joinpath(case_dir, case_name * "_" * formulation * "_input_" * string(batch_id)),
     ArrowFile,
 )

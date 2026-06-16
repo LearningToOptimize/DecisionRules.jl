@@ -40,15 +40,15 @@ function compute_parameter_dual(model::JuMP.Model, param::JuMP.VariableRef)
     if !JuMP.is_parameter(param)
         error("Variable is not a parameter")
     end
-    
+
     dual_value = 0.0
-    
+
     # Get contributions from constraints
     dual_value += _get_dual_from_constraints(model, param)
-    
+
     # Get contribution from objective
     dual_value += _get_dual_from_objective(model, param)
-    
+
     return dual_value
 end
 
@@ -59,21 +59,23 @@ Compute the dual contribution from all constraints containing the parameter.
 """
 function _get_dual_from_constraints(model::JuMP.Model, param::JuMP.VariableRef)
     dual_contribution = 0.0
-    
+
     # Iterate over all constraint types in the model
     for (F, S) in JuMP.list_of_constraint_types(model)
         # Handle scalar affine constraints
         if F <: JuMP.GenericAffExpr
             dual_contribution += _get_dual_from_affine_constraints(model, param, S)
-        # Handle scalar quadratic constraints
+            # Handle scalar quadratic constraints
         elseif F <: JuMP.GenericQuadExpr
             dual_contribution += _get_dual_from_quadratic_constraints(model, param, S)
-        # Handle vector affine constraints (conic)
+            # Handle vector affine constraints (conic)
         elseif F <: Vector{<:JuMP.GenericAffExpr}
-            dual_contribution += _get_dual_from_vector_affine_constraints(model, param, F, S)
+            dual_contribution += _get_dual_from_vector_affine_constraints(
+                model, param, F, S
+            )
         end
     end
-    
+
     return dual_contribution
 end
 
@@ -84,11 +86,11 @@ Get dual contribution from scalar affine constraints of set type S.
 """
 function _get_dual_from_affine_constraints(model::JuMP.Model, param::JuMP.VariableRef, S)
     dual_contribution = 0.0
-    
+
     for con in JuMP.all_constraints(model, JuMP.AffExpr, S)
         con_obj = JuMP.constraint_object(con)
         func = con_obj.func
-        
+
         # Check if parameter appears in this constraint
         coef = _get_parameter_coefficient(func, param)
         if !iszero(coef)
@@ -103,7 +105,7 @@ function _get_dual_from_affine_constraints(model::JuMP.Model, param::JuMP.Variab
             end
         end
     end
-    
+
     return dual_contribution
 end
 
@@ -116,19 +118,19 @@ Handles both affine terms (parameter appears linearly) and quadratic terms
 """
 function _get_dual_from_quadratic_constraints(model::JuMP.Model, param::JuMP.VariableRef, S)
     dual_contribution = 0.0
-    
+
     for con in JuMP.all_constraints(model, JuMP.QuadExpr, S)
         con_obj = JuMP.constraint_object(con)
         func = con_obj.func
-        
+
         # Get coefficient from affine part
         coef = _get_parameter_coefficient_from_affine(func, param)
-        
+
         # Get coefficient from quadratic part (p*v or p*p terms)
         quad_coef = _get_parameter_coefficient_from_quadratic(func, param)
-        
+
         total_coef = coef + quad_coef
-        
+
         if !iszero(total_coef)
             try
                 con_dual = JuMP.dual(con)
@@ -138,7 +140,7 @@ function _get_dual_from_quadratic_constraints(model::JuMP.Model, param::JuMP.Var
             end
         end
     end
-    
+
     return dual_contribution
 end
 
@@ -147,16 +149,18 @@ end
 
 Get dual contribution from vector affine constraints (like conic constraints).
 """
-function _get_dual_from_vector_affine_constraints(model::JuMP.Model, param::JuMP.VariableRef, F, S)
+function _get_dual_from_vector_affine_constraints(
+    model::JuMP.Model, param::JuMP.VariableRef, F, S
+)
     dual_contribution = 0.0
-    
+
     for con in JuMP.all_constraints(model, F, S)
         con_obj = JuMP.constraint_object(con)
         func = con_obj.func  # Vector of AffExpr
-        
+
         try
             con_dual = JuMP.dual(con)  # Vector of duals
-            
+
             for (i, expr) in enumerate(func)
                 coef = _get_parameter_coefficient(expr, param)
                 if !iszero(coef)
@@ -167,7 +171,7 @@ function _get_dual_from_vector_affine_constraints(model::JuMP.Model, param::JuMP
             # If dual is not available, skip this constraint
         end
     end
-    
+
     return dual_contribution
 end
 
@@ -182,9 +186,9 @@ If parameter appears in the objective with coefficient c, contribution is:
 function _get_dual_from_objective(model::JuMP.Model, param::JuMP.VariableRef)
     obj = JuMP.objective_function(model)
     sense = JuMP.objective_sense(model)
-    
+
     coef = _get_objective_parameter_coefficient(obj, param)
-    
+
     if sense == MOI.MIN_SENSE || sense == MOI.MAX_SENSE
         return coef
     else
@@ -203,7 +207,7 @@ function _get_parameter_coefficient(expr::JuMP.GenericAffExpr, param::JuMP.Varia
 end
 
 function _get_parameter_coefficient(expr::JuMP.GenericQuadExpr, param::JuMP.VariableRef)
-    return _get_parameter_coefficient_from_affine(expr, param) + 
+    return _get_parameter_coefficient_from_affine(expr, param) +
            _get_parameter_coefficient_from_quadratic(expr, param)
 end
 
@@ -212,7 +216,9 @@ end
 
 Get the coefficient of a parameter from the affine part of a quadratic expression.
 """
-function _get_parameter_coefficient_from_affine(expr::JuMP.GenericQuadExpr, param::JuMP.VariableRef)
+function _get_parameter_coefficient_from_affine(
+    expr::JuMP.GenericQuadExpr, param::JuMP.VariableRef
+)
     # The affine part is expr.aff
     return get(expr.aff.terms, param, 0.0)
 end
@@ -224,14 +230,16 @@ Get the effective coefficient of a parameter from quadratic terms.
 For terms like coef * p * v, the effective coefficient is coef * value(v).
 For terms like coef * p * p, the effective coefficient is 2 * coef * value(p).
 """
-function _get_parameter_coefficient_from_quadratic(expr::JuMP.GenericQuadExpr, param::JuMP.VariableRef)
+function _get_parameter_coefficient_from_quadratic(
+    expr::JuMP.GenericQuadExpr, param::JuMP.VariableRef
+)
     effective_coef = 0.0
     model = JuMP.owner_model(param)
-    
+
     # QuadExpr has terms as OrderedDict from UnorderedPair to coefficient
     for (pair, coef) in expr.terms
         v1, v2 = pair.a, pair.b
-        
+
         if v1 == param && v2 == param
             # p * p term: ∂(coef * p^2)/∂p = 2 * coef * p
             effective_coef += 2 * coef * JuMP.parameter_value(param)
@@ -251,7 +259,7 @@ function _get_parameter_coefficient_from_quadratic(expr::JuMP.GenericQuadExpr, p
             end
         end
     end
-    
+
     return effective_coef
 end
 
@@ -260,16 +268,22 @@ end
 
 Get the coefficient of a parameter in the objective function.
 """
-function _get_objective_parameter_coefficient(obj::JuMP.GenericAffExpr, param::JuMP.VariableRef)
+function _get_objective_parameter_coefficient(
+    obj::JuMP.GenericAffExpr, param::JuMP.VariableRef
+)
     return get(obj.terms, param, 0.0)
 end
 
-function _get_objective_parameter_coefficient(obj::JuMP.GenericQuadExpr, param::JuMP.VariableRef)
-    return _get_parameter_coefficient_from_affine(obj, param) + 
+function _get_objective_parameter_coefficient(
+    obj::JuMP.GenericQuadExpr, param::JuMP.VariableRef
+)
+    return _get_parameter_coefficient_from_affine(obj, param) +
            _get_parameter_coefficient_from_quadratic(obj, param)
 end
 
-function _get_objective_parameter_coefficient(obj::JuMP.VariableRef, param::JuMP.VariableRef)
+function _get_objective_parameter_coefficient(
+    obj::JuMP.VariableRef, param::JuMP.VariableRef
+)
     return obj == param ? 1.0 : 0.0
 end
 

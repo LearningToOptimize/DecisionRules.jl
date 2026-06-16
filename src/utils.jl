@@ -1,5 +1,17 @@
-function variable_to_parameter(model::JuMP.Model, variable::JuMP.VariableRef; initial_value=0.0, deficit=nothing)
-    parameter = @variable(model; base_name = "_" * name(variable), set=MOI.Parameter(initial_value))
+"""
+    variable_to_parameter(model, variable; initial_value=0.0, deficit=nothing)
+
+Replace a decision variable with an `MOI.Parameter` and bind them via an equality
+constraint.  When `deficit` is provided, the constraint becomes
+`variable + deficit == parameter` and both the parameter and the deficit variable
+are returned.
+"""
+function variable_to_parameter(
+    model::JuMP.Model, variable::JuMP.VariableRef; initial_value=0.0, deficit=nothing
+)
+    parameter = @variable(
+        model; base_name="_" * name(variable), set=MOI.Parameter(initial_value)
+    )
     # bind the parameter to the variable
     if isnothing(deficit)
         @constraint(model, variable == parameter)
@@ -43,7 +55,9 @@ norm_deficit, _deficit = create_deficit!(model, 3; penalty_l2=1000.0)
 norm_deficit, _deficit = create_deficit!(model, 3; penalty_l1=1000.0, penalty_l2=500.0)
 ```
 """
-function create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalty_l2=nothing, penalty=nothing)
+function create_deficit!(
+    model::JuMP.Model, len::Int; penalty_l1=nothing, penalty_l2=nothing, penalty=nothing
+)
     # Handle legacy 'penalty' argument for backwards compatibility
     if isnothing(penalty_l1) && isnothing(penalty_l2)
         if !isnothing(penalty)
@@ -67,14 +81,14 @@ function create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalt
 
     # Create deficit variables
     _deficit = @variable(model, _deficit[1:len])
-    
+
     # Create individual norm variables for each cone type
     use_l1 = !isnothing(penalty_l1)
     use_l2 = !isnothing(penalty_l2)
-    
+
     # Create norm_deficit as the total penalized deviation (for logging compatibility)
     @variable(model, norm_deficit >= 0.0)
-    
+
     if use_l1 && use_l2
         # Both L1 and L2 squared norms
         @variable(model, norm_l1 >= 0.0)
@@ -95,7 +109,7 @@ function create_deficit!(model::JuMP.Model, len::Int; penalty_l1=nothing, penalt
     else
         error("At least one of penalty_l1 or penalty_l2 must be specified")
     end
-    
+
     return norm_deficit, _deficit
 end
 
@@ -156,10 +170,21 @@ function _validate_penalty_schedule(schedule)
     isempty(schedule) && throw(ArgumentError("penalty_schedule must not be empty"))
     expected_lo = 1
     for (lo, hi, mult) in schedule
-        lo == expected_lo || throw(ArgumentError(
-            "penalty_schedule phases must be contiguous starting at batch 1; got phase ($lo, $hi, $mult) where first_batch $expected_lo was expected"))
-        lo <= hi || throw(ArgumentError("penalty_schedule phase ($lo, $hi, $mult) has first_batch > last_batch"))
-        (isfinite(mult) && mult > 0) || throw(ArgumentError("penalty_schedule multipliers must be finite and positive; got $mult"))
+        lo == expected_lo || throw(
+            ArgumentError(
+                "penalty_schedule phases must be contiguous starting at batch 1; got phase ($lo, $hi, $mult) where first_batch $expected_lo was expected",
+            ),
+        )
+        lo <= hi || throw(
+            ArgumentError(
+                "penalty_schedule phase ($lo, $hi, $mult) has first_batch > last_batch"
+            ),
+        )
+        (isfinite(mult) && mult > 0) || throw(
+            ArgumentError(
+                "penalty_schedule multipliers must be finite and positive; got $mult"
+            ),
+        )
         expected_lo = hi + 1
     end
     return schedule
@@ -180,9 +205,15 @@ last_batch, multiplier)` phases, or `nothing` if penalty scaling is disabled:
 _resolve_penalty_schedule(::Nothing, num_batches::Int) = nothing
 function _resolve_penalty_schedule(penalty_schedule::Symbol, num_batches::Int)
     penalty_schedule === :default_annealed && return default_annealed_schedule(num_batches)
-    throw(ArgumentError("unknown penalty_schedule symbol :$penalty_schedule; use :default_annealed, an explicit vector of (first_batch, last_batch, multiplier) tuples, or nothing"))
+    throw(
+        ArgumentError(
+            "unknown penalty_schedule symbol :$penalty_schedule; use :default_annealed, an explicit vector of (first_batch, last_batch, multiplier) tuples, or nothing",
+        ),
+    )
 end
-_resolve_penalty_schedule(penalty_schedule, num_batches::Int) = _validate_penalty_schedule(penalty_schedule)
+function _resolve_penalty_schedule(penalty_schedule, num_batches::Int)
+    return _validate_penalty_schedule(penalty_schedule)
+end
 
 """
     _penalty_multiplier_for(schedule, iter::Int) -> Float64
@@ -211,7 +242,11 @@ function _linear_objective_coefficient(model::JuMP.Model, variable::VariableRef)
     elseif obj isa GenericQuadExpr
         return get(obj.aff.terms, variable, 0.0)
     end
-    throw(ArgumentError("penalty_schedule requires an affine or quadratic objective; got $(typeof(obj))"))
+    throw(
+        ArgumentError(
+            "penalty_schedule requires an affine or quadratic objective; got $(typeof(obj))"
+        ),
+    )
 end
 
 """
@@ -226,7 +261,9 @@ variable if `deficit_name` occurs in its name and its linear objective coefficie
 Must be called **before** any `penalty_schedule` multiplier is applied, so the
 captured coefficients reflect the as-built penalties.
 """
-function _deficit_penalty_bases(model::JuMP.Model; deficit_name::AbstractString="norm_deficit")
+function _deficit_penalty_bases(
+    model::JuMP.Model; deficit_name::AbstractString="norm_deficit"
+)
     bases = Dict{VariableRef,Float64}()
     for variable in all_variables(model)
         if occursin(deficit_name, JuMP.name(variable))
@@ -237,7 +274,9 @@ function _deficit_penalty_bases(model::JuMP.Model; deficit_name::AbstractString=
     return bases
 end
 
-function _deficit_penalty_bases(models::Vector{JuMP.Model}; deficit_name::AbstractString="norm_deficit")
+function _deficit_penalty_bases(
+    models::Vector{JuMP.Model}; deficit_name::AbstractString="norm_deficit"
+)
     return [_deficit_penalty_bases(model; deficit_name=deficit_name) for model in models]
 end
 
@@ -250,8 +289,11 @@ nothing to scale.
 """
 function _check_deficit_penalty_bases(bases)
     total = bases isa Dict ? length(bases) : sum(length, bases)
-    total > 0 || throw(ArgumentError(
-        "penalty_schedule was given but no variable matching \"norm_deficit\" with a nonzero objective coefficient was found; build the model(s) with create_deficit! (or equivalent) to use a penalty schedule"))
+    total > 0 || throw(
+        ArgumentError(
+            "penalty_schedule was given but no variable matching \"norm_deficit\" with a nonzero objective coefficient was found; build the model(s) with create_deficit! (or equivalent) to use a penalty schedule",
+        ),
+    )
     return bases
 end
 
@@ -263,14 +305,18 @@ Mutate `model` (or each model in `models`) in place, setting every deficit varia
 objective coefficient to `multiplier * base` using the bases from
 [`_deficit_penalty_bases`](@ref). Return the mutated model(s).
 """
-function _apply_deficit_penalty_multiplier!(model::JuMP.Model, bases::Dict{VariableRef,Float64}, multiplier::Real)
+function _apply_deficit_penalty_multiplier!(
+    model::JuMP.Model, bases::Dict{VariableRef,Float64}, multiplier::Real
+)
     for (variable, base) in bases
         set_objective_coefficient(model, variable, multiplier * base)
     end
     return model
 end
 
-function _apply_deficit_penalty_multiplier!(models::Vector{JuMP.Model}, bases::Vector, multiplier::Real)
+function _apply_deficit_penalty_multiplier!(
+    models::Vector{JuMP.Model}, bases::Vector, multiplier::Real
+)
     for (model, base) in zip(models, bases)
         _apply_deficit_penalty_multiplier!(model, base, multiplier)
     end
@@ -293,10 +339,14 @@ function normalize_recur_state(state)
     if state isa NamedTuple
         vals = map(normalize_recur_state, values(state))
         nt = NamedTuple{keys(state)}(vals)
-        if (:cell in keys(nt)) && (:state in keys(nt)) &&
-           (getproperty(nt, :cell) isa NamedTuple) && (:state0 in keys(getproperty(nt, :cell)))
+        if (:cell in keys(nt)) &&
+            (:state in keys(nt)) &&
+            (getproperty(nt, :cell) isa NamedTuple) &&
+            (:state0 in keys(getproperty(nt, :cell)))
             ks = keys(nt)
-            newvals = map(k -> (k === :state ? getproperty(nt.cell, :state0) : getproperty(nt, k)), ks)
+            newvals = map(
+                k -> (k === :state ? getproperty(nt.cell, :state0) : getproperty(nt, k)), ks
+            )
             return NamedTuple{ks}(newvals)
         end
         return nt
@@ -309,7 +359,7 @@ end
 
 function (callback::SaveBest)(iter, model, loss)
     if loss < callback.best_loss
-        m = model |> cpu
+        m = cpu(model)
         @info "best model change" callback.best_loss loss
         callback.best_loss = loss
         model_state = normalize_recur_state(Flux.state(m))
@@ -361,8 +411,10 @@ mutable struct SampleLog <: Function
     objectives_no_deficit::Vector{Float64}
 end
 
-function SampleLog(; on_sample=(s, models, sample_log) -> nothing,
-                   objective_no_deficit_fn=get_objective_no_target_deficit)
+function SampleLog(;
+    on_sample=(s, models, sample_log) -> nothing,
+    objective_no_deficit_fn=get_objective_no_target_deficit,
+)
     return SampleLog(on_sample, objective_no_deficit_fn, Float64[], Float64[])
 end
 
@@ -410,8 +462,12 @@ target-slack penalty, then `metrics/training_loss` = mean full objective) and re
 `false` (training continues). Return `true` from a custom `record` to stop training.
 """
 function default_record(sample_log::SampleLog, iter, model)
-    println("tag: metrics/loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives_no_deficit))")
-    println("tag: metrics/training_loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives))")
+    println(
+        "tag: metrics/loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives_no_deficit))",
+    )
+    println(
+        "tag: metrics/training_loss, Iter: $iter, Loss: $(_sequential_mean(sample_log.objectives))",
+    )
     return false
 end
 
@@ -426,8 +482,12 @@ result of whichever call is made last.
 """
 function _record_loss_adapter(record_loss)
     return function (sample_log::SampleLog, iter, model)
-        record_loss(iter, model, _sequential_mean(sample_log.objectives_no_deficit), "metrics/loss") && return true
-        return record_loss(iter, model, _sequential_mean(sample_log.objectives), "metrics/training_loss")
+        record_loss(
+            iter, model, _sequential_mean(sample_log.objectives_no_deficit), "metrics/loss"
+        ) && return true
+        return record_loss(
+            iter, model, _sequential_mean(sample_log.objectives), "metrics/training_loss"
+        )
     end
 end
 
@@ -442,7 +502,9 @@ otherwise require `record === default_record` and return
 """
 function _resolve_record(record, record_loss)
     isnothing(record_loss) && return record
-    record === default_record || throw(ArgumentError("pass either `record` or the deprecated `record_loss`, not both"))
+    record === default_record || throw(
+        ArgumentError("pass either `record` or the deprecated `record_loss`, not both")
+    )
     return _record_loss_adapter(record_loss)
 end
 
@@ -461,13 +523,21 @@ end
 
 """
     RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
-                      scenarios; stride=1)
+                      scenarios; stride=1, policy_state=:realized)
 
 Evaluation helper that assesses the policy with a **stage-wise rollout** (the
 deployment semantics of a target-trajectory policy) on a fixed held-out scenario set.
 Deterministic-equivalent evaluation re-optimizes all stages jointly and can absorb
 stage-wise-unfollowable targets through the slack penalty, silently overstating policy
 quality; the rollout metric is the guard that detects this.
+
+`policy_state` controls what state is passed back into the policy:
+
+- `:realized` pipes the previous realized state into the policy. This is the
+  deployment/closed-loop rollout semantics.
+- `:target` pipes the previous target state into the policy, matching the
+  deterministic-equivalent target-generation semantics from [`simulate_states`](@ref)
+  while still solving the stage subproblems sequentially.
 
 `scenarios` must be a vector of **materialized** scenarios, sampled once before
 training (e.g. `[DecisionRules.sample(uncertainty_samples) for _ in 1:n]`), so every
@@ -497,17 +567,70 @@ mutable struct RolloutEvaluation <: Function
     initial_state
     scenarios::Vector
     stride::Int
+    policy_state::Symbol
     last_objective_no_deficit::Float64
     last_violation_share::Float64
 end
 
-function RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
-                           scenarios; stride=1)
-    isempty(scenarios) && throw(ArgumentError(
-        "scenarios must be a nonempty vector of materialized scenarios; sample them once before training so every evaluation uses the same fixed set"))
+function RolloutEvaluation(
+    subproblems,
+    state_params_in,
+    state_params_out,
+    initial_state,
+    scenarios;
+    stride=1,
+    policy_state::Symbol=:realized,
+)
+    isempty(scenarios) && throw(
+        ArgumentError(
+            "scenarios must be a nonempty vector of materialized scenarios; sample them once before training so every evaluation uses the same fixed set",
+        ),
+    )
     stride >= 1 || throw(ArgumentError("stride must be >= 1"))
-    return RolloutEvaluation(subproblems, state_params_in, state_params_out, initial_state,
-        collect(scenarios), stride, NaN, NaN)
+    policy_state in (:realized, :target) || throw(
+        ArgumentError("policy_state must be either :realized or :target; got :$policy_state")
+    )
+    return RolloutEvaluation(
+        subproblems,
+        state_params_in,
+        state_params_out,
+        initial_state,
+        collect(scenarios),
+        stride,
+        policy_state,
+        NaN,
+        NaN,
+    )
+end
+
+function _simulate_multistage_target_feedback(
+    subproblems::Vector{JuMP.Model},
+    state_params_in,
+    state_params_out,
+    initial_state,
+    uncertainties,
+    decision_rules,
+)
+    Flux.reset!(decision_rules)
+    target_states = simulate_states(initial_state, uncertainties, decision_rules)
+
+    objective = 0.0
+    state_in = initial_state
+    for stage in 1:length(subproblems)
+        subproblem = subproblems[stage]
+        state_param_in = state_params_in[stage]
+        state_param_out = state_params_out[stage]
+        uncertainty = uncertainties[stage]
+        target = target_states[stage + 1]
+        objective += simulate_stage(
+            subproblem, state_param_in, state_param_out, uncertainty, state_in, target
+        )
+        state_in = get_next_state(
+            subproblem, state_param_in, state_param_out, state_in, target
+        )
+    end
+
+    return objective
 end
 
 function (evaluation::RolloutEvaluation)(iter, model)
@@ -515,15 +638,38 @@ function (evaluation::RolloutEvaluation)(iter, model)
     total = 0.0
     total_no_deficit = 0.0
     for scenario in evaluation.scenarios
-        total += simulate_multistage(evaluation.subproblems, evaluation.state_params_in,
-            evaluation.state_params_out, evaluation.initial_state, scenario, model)
+        total += if evaluation.policy_state === :realized
+            simulate_multistage(
+                evaluation.subproblems,
+                evaluation.state_params_in,
+                evaluation.state_params_out,
+                evaluation.initial_state,
+                scenario,
+                model,
+            )
+        else
+            _simulate_multistage_target_feedback(
+                evaluation.subproblems,
+                evaluation.state_params_in,
+                evaluation.state_params_out,
+                evaluation.initial_state,
+                scenario,
+                model,
+            )
+        end
         total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
     end
     objective = total / length(evaluation.scenarios)
     evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
-    evaluation.last_violation_share = _target_violation_share(objective, evaluation.last_objective_no_deficit)
-    println("tag: metrics/rollout_objective_no_deficit, Iter: $iter, Loss: $(evaluation.last_objective_no_deficit)")
-    println("tag: metrics/rollout_target_violation_share, Iter: $iter, Loss: $(evaluation.last_violation_share)")
+    evaluation.last_violation_share = _target_violation_share(
+        objective, evaluation.last_objective_no_deficit
+    )
+    println(
+        "tag: metrics/rollout_objective_no_deficit, Iter: $iter, Loss: $(evaluation.last_objective_no_deficit)",
+    )
+    println(
+        "tag: metrics/rollout_target_violation_share, Iter: $iter, Loss: $(evaluation.last_violation_share)",
+    )
     return nothing
 end
 
@@ -539,7 +685,15 @@ function var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int)
     end
 end
 
-function add_child_model_vars!(model::JuMP.Model, subproblem::JuMP.Model, t::Int, state_params_in::Vector{Vector{Any}}, state_params_out::Vector{Vector{Tuple{Any, VariableRef}}}, initial_state::Vector{Float64}, var_src_to_dest::Dict{VariableRef, VariableRef})
+function add_child_model_vars!(
+    model::JuMP.Model,
+    subproblem::JuMP.Model,
+    t::Int,
+    state_params_in::Vector{Vector{Any}},
+    state_params_out::Vector{Vector{Tuple{Any,VariableRef}}},
+    initial_state::Vector{Float64},
+    var_src_to_dest::Dict{VariableRef,VariableRef},
+)
     allvars = all_variables(subproblem)
     allvars = setdiff(allvars, state_params_in[t])
     if state_params_out[t][1][1] isa VariableRef # not MadNLP
@@ -556,7 +710,7 @@ function add_child_model_vars!(model::JuMP.Model, subproblem::JuMP.Model, t::Int
         dest_var = @variable(model)
         var_src_to_dest[src[2]] = dest_var
         var_set_name!(src[2], dest_var, t)
-        
+
         if state_params_out[t][1][1] isa VariableRef
             dest_param = @variable(model)
             var_src_to_dest[src[1]] = dest_param
@@ -578,12 +732,13 @@ function add_child_model_vars!(model::JuMP.Model, subproblem::JuMP.Model, t::Int
     else
         for (i, src) in enumerate(state_params_in[t])
             if src isa VariableRef
-                var_src_to_dest[src] = state_params_out[t-1][i][2]
+                var_src_to_dest[src] = state_params_out[t - 1][i][2]
             end
-            state_params_in[t][i] = state_params_out[t-1][i][2]
+            state_params_in[t][i] = state_params_out[t - 1][i][2]
             # delete parameter constraint associated with src
             if src isa VariableRef
-                for con in JuMP.all_constraints(subproblem, VariableRef, MOI.Parameter{Float64})
+                for con in
+                    JuMP.all_constraints(subproblem, VariableRef, MOI.Parameter{Float64})
                     obj = JuMP.constraint_object(con)
                     if obj.func == src
                         JuMP.delete(subproblem, con)
@@ -596,29 +751,23 @@ function add_child_model_vars!(model::JuMP.Model, subproblem::JuMP.Model, t::Int
 end
 
 function copy_and_replace_variables(
-    src::Vector,
-    map::Dict{JuMP.VariableRef,JuMP.VariableRef},
+    src::Vector, map::Dict{JuMP.VariableRef,JuMP.VariableRef}
 )
     return copy_and_replace_variables.(src, Ref(map))
 end
 
-function copy_and_replace_variables(
-    src::Real,
-    ::Dict{JuMP.VariableRef,JuMP.VariableRef},
-)
+function copy_and_replace_variables(src::Real, ::Dict{JuMP.VariableRef,JuMP.VariableRef})
     return src
 end
 
 function copy_and_replace_variables(
-    src::JuMP.VariableRef,
-    src_to_dest_variable::Dict{JuMP.VariableRef,JuMP.VariableRef},
+    src::JuMP.VariableRef, src_to_dest_variable::Dict{JuMP.VariableRef,JuMP.VariableRef}
 )
     return src_to_dest_variable[src]
 end
 
 function copy_and_replace_variables(
-    src::JuMP.GenericAffExpr,
-    src_to_dest_variable::Dict{JuMP.VariableRef,JuMP.VariableRef},
+    src::JuMP.GenericAffExpr, src_to_dest_variable::Dict{JuMP.VariableRef,JuMP.VariableRef}
 )
     return JuMP.GenericAffExpr(
         src.constant,
@@ -629,15 +778,13 @@ function copy_and_replace_variables(
 end
 
 function copy_and_replace_variables(
-    src::JuMP.GenericQuadExpr,
-    src_to_dest_variable::Dict{JuMP.VariableRef,JuMP.VariableRef},
+    src::JuMP.GenericQuadExpr, src_to_dest_variable::Dict{JuMP.VariableRef,JuMP.VariableRef}
 )
     return JuMP.GenericQuadExpr(
         copy_and_replace_variables(src.aff, src_to_dest_variable),
         Pair{UnorderedPair{VariableRef},Float64}[
             UnorderedPair{VariableRef}(
-                src_to_dest_variable[pair.a],
-                src_to_dest_variable[pair.b],
+                src_to_dest_variable[pair.a], src_to_dest_variable[pair.b]
             ) => coef for (pair, coef) in src.terms
         ],
     )
@@ -649,19 +796,16 @@ function copy_and_replace_variables(
 ) where {V}
     num_args = length(src.args)
     args = Vector{Any}(undef, num_args)
-    for i = 1:num_args
+    for i in 1:num_args
         args[i] = copy_and_replace_variables(src.args[i], src_to_dest_variable)
     end
 
     return @expression(owner_model(first(src_to_dest_variable)[2]), eval(src.head)(args...))
 end
 
-function copy_and_replace_variables(
-    src::Any,
-    ::Dict{JuMP.VariableRef,JuMP.VariableRef},
-)
+function copy_and_replace_variables(src::Any, ::Dict{JuMP.VariableRef,JuMP.VariableRef})
     return error(
-        "`copy_and_replace_variables` is not implemented for functions like `$(src)`.",
+        "`copy_and_replace_variables` is not implemented for functions like `$(src)`."
     )
 end
 
@@ -670,22 +814,35 @@ function create_constraint(model, obj, var_src_to_dest)
     return @constraint(model, new_func in obj.set)
 end
 
-function create_constraint(model, obj::ScalarConstraint{NonlinearExpr, MOI.EqualTo{Float64}}, var_src_to_dest)
+function create_constraint(
+    model, obj::ScalarConstraint{NonlinearExpr,MOI.EqualTo{Float64}}, var_src_to_dest
+)
     new_func = copy_and_replace_variables(obj.func, var_src_to_dest)
     return @constraint(model, new_func == obj.set.value)
 end
 
-function create_constraint(model, obj::ScalarConstraint{NonlinearExpr, MOI.LessThan{Float64}}, var_src_to_dest)
+function create_constraint(
+    model, obj::ScalarConstraint{NonlinearExpr,MOI.LessThan{Float64}}, var_src_to_dest
+)
     new_func = copy_and_replace_variables(obj.func, var_src_to_dest)
     return @constraint(model, new_func <= obj.set.upper)
 end
 
-function create_constraint(model, obj::ScalarConstraint{NonlinearExpr, MOI.GreaterThan{Float64}}, var_src_to_dest)
+function create_constraint(
+    model, obj::ScalarConstraint{NonlinearExpr,MOI.GreaterThan{Float64}}, var_src_to_dest
+)
     new_func = copy_and_replace_variables(obj.func, var_src_to_dest)
     return @constraint(model, new_func >= obj.set.lower)
 end
 
-function add_child_model_exps!(model::JuMP.Model, subproblem::JuMP.Model, var_src_to_dest::Dict{VariableRef, VariableRef}, state_params_out, state_params_in, t)
+function add_child_model_exps!(
+    model::JuMP.Model,
+    subproblem::JuMP.Model,
+    var_src_to_dest::Dict{VariableRef,VariableRef},
+    state_params_out,
+    state_params_in,
+    t,
+)
     # Add constraints:
     # for (F, S) in JuMP.list_of_constraint_types(subproblem)
     cons_to_cons = Dict()
@@ -694,7 +851,7 @@ function add_child_model_exps!(model::JuMP.Model, subproblem::JuMP.Model, var_sr
         c = create_constraint(model, obj, var_src_to_dest)
         cons_to_cons[con] = c
         if (state_params_out[t][1][1] isa ConstraintRef)
-            for (i,_con) in enumerate(state_params_out[t])
+            for (i, _con) in enumerate(state_params_out[t])
                 if con == _con[1]
                     state_params_out[t][i] = (c, state_params_out[t][i][2])
                     continue;
@@ -702,7 +859,7 @@ function add_child_model_exps!(model::JuMP.Model, subproblem::JuMP.Model, var_sr
             end
         end
         if (t==1) && (state_params_in[t][1] isa ConstraintRef)
-            for (i,_con) in enumerate(state_params_in[t])
+            for (i, _con) in enumerate(state_params_in[t])
                 if con == _con
                     state_params_in[t][i] = c
                     continue;
@@ -713,51 +870,77 @@ function add_child_model_exps!(model::JuMP.Model, subproblem::JuMP.Model, var_sr
     # end
     # Add objective:
     current = JuMP.objective_function(model)
-    subproblem_objective =
-        copy_and_replace_variables(JuMP.objective_function(subproblem), var_src_to_dest)
-    JuMP.set_objective_function(
-        model,
-        current + subproblem_objective,
+    subproblem_objective = copy_and_replace_variables(
+        JuMP.objective_function(subproblem), var_src_to_dest
     )
+    JuMP.set_objective_function(model, current + subproblem_objective)
     return cons_to_cons
 end
 
-"Create Single JuMP.Model from subproblems. rename variables to avoid conflicts by adding [t] at the end of the variable name where t is the subproblem index"
-function deterministic_equivalent!(model::JuMP.Model,
+"""
+    deterministic_equivalent!(model, subproblems, state_params_in, state_params_out,
+                              initial_state, uncertainties)
+
+Build the deterministic-equivalent (direct transcription) JuMP model by copying all
+stage subproblems into `model`.  Variables are renamed with a `#t` suffix to avoid
+conflicts.  Stage coupling is enforced by identifying the realized state variable of
+stage `t` with the incoming state parameter of stage `t+1`.
+
+Returns `(model, uncertainties_new)` where `uncertainties_new` maps the original
+uncertainty parameter refs to the new refs in the combined model.
+"""
+function deterministic_equivalent!(
+    model::JuMP.Model,
     subproblems::Vector{JuMP.Model},
     state_params_in::Vector{Vector{Any}},
-    state_params_out::Vector{Vector{Tuple{Any, VariableRef}}},
+    state_params_out::Vector{Vector{Tuple{Any,VariableRef}}},
     initial_state::Vector{Float64},
-    uncertainties::Vector{Vector{Tuple{VariableRef, Vector{Float64}}}},
+    uncertainties::Vector{Vector{Tuple{VariableRef,Vector{Float64}}}},
 )
     set_objective_sense(model, objective_sense(subproblems[1]))
-    uncertainties_new = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, length(uncertainties))
-    var_src_to_dest = Dict{VariableRef, VariableRef}()
+    uncertainties_new = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+        undef, length(uncertainties)
+    )
+    var_src_to_dest = Dict{VariableRef,VariableRef}()
     for t in 1:length(subproblems)
-        DecisionRules.add_child_model_vars!(model, subproblems[t], t, state_params_in, state_params_out, initial_state, var_src_to_dest)
+        DecisionRules.add_child_model_vars!(
+            model,
+            subproblems[t],
+            t,
+            state_params_in,
+            state_params_out,
+            initial_state,
+            var_src_to_dest,
+        )
     end
 
     cons_to_cons = Vector{Dict}(undef, length(subproblems))
     for t in 1:length(subproblems)
-        cons_to_cons[t] = DecisionRules.add_child_model_exps!(model, subproblems[t], var_src_to_dest, state_params_out, state_params_in, t)
+        cons_to_cons[t] = DecisionRules.add_child_model_exps!(
+            model, subproblems[t], var_src_to_dest, state_params_out, state_params_in, t
+        )
     end
 
     if uncertainties[1][1][1] isa VariableRef
         # use var_src_to_dest
         for t in 1:length(subproblems)
-            uncertainties_new[t] = Vector{Tuple{VariableRef, Vector{Float64}}}(undef, length(uncertainties[t]))
+            uncertainties_new[t] = Vector{Tuple{VariableRef,Vector{Float64}}}(
+                undef, length(uncertainties[t])
+            )
             for (i, tup) in enumerate(uncertainties[t])
                 ky, val = tup
-                uncertainties_new[t][i] = (var_src_to_dest[ky],val)
+                uncertainties_new[t][i] = (var_src_to_dest[ky], val)
             end
         end
     else
         # use cons_to_cons
         for t in 1:length(subproblems)
-            uncertainties_new[t] = Vector{Tuple{VariableRef, Vector{Float64}}}(undef, length(uncertainties[t]))
+            uncertainties_new[t] = Vector{Tuple{VariableRef,Vector{Float64}}}(
+                undef, length(uncertainties[t])
+            )
             for (i, tup) in enumerate(uncertainties[t])
                 ky, val = tup
-                uncertainties_new[t] = (cons_to_cons[t][ky],val)
+                uncertainties_new[t] = (cons_to_cons[t][ky], val)
             end
         end
     end
@@ -767,9 +950,15 @@ end
 
 function find_variables(model::JuMP.Model, variable_name_parts::Vector{S}) where {S}
     all_vars = all_variables(model)
-    interest_vars = all_vars[findall(x -> all([occursin(part, JuMP.name(x)) for part in variable_name_parts]), all_vars)]
+    interest_vars = all_vars[findall(
+        x -> all([occursin(part, JuMP.name(x)) for part in variable_name_parts]), all_vars
+    )]
     if length(interest_vars) == 1
         return interest_vars
     end
-    return [interest_vars[findfirst(x -> occursin(variable_name_parts[1] * "[$i]", JuMP.name(x)), interest_vars)] for i in 1:length(interest_vars)]
+    return [
+        interest_vars[findfirst(
+            x -> occursin(variable_name_parts[1] * "[$i]", JuMP.name(x)), interest_vars
+        )] for i in 1:length(interest_vars)
+    ]
 end

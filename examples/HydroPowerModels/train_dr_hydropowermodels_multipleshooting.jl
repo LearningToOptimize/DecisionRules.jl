@@ -4,7 +4,7 @@ using Statistics
 using Random
 using Flux
 
-using Ipopt, HSL_jll
+using Ipopt
 using Wandb, Dates, Logging
 using JLD2
 using DiffOpt
@@ -46,34 +46,41 @@ penalty_schedule = :default_annealed
 # Build MSP using subproblems (not deterministic equivalent)
 
 # Define the DiffOpt optimizer for subproblems and window models
-diff_optimizer = () -> DiffOpt.diff_optimizer(optimizer_with_attributes(Ipopt.Optimizer,
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma27"
-))
+diff_optimizer =
+    () -> DiffOpt.diff_optimizer(
+        optimizer_with_attributes(
+            Ipopt.Optimizer,
+            "print_level" => 0,
+            "linear_solver" => "mumps",
+        ),
+    )
 
-diff_model = () -> DiffOpt.nonlinear_diff_model(optimizer_with_attributes(Ipopt.Optimizer,
-    "print_level" => 0,
-    "hsllib" => HSL_jll.libhsl_path,
-    "linear_solver" => "ma27"
-))
+diff_model =
+    () -> DiffOpt.nonlinear_diff_model(
+        optimizer_with_attributes(
+            Ipopt.Optimizer,
+            "print_level" => 0,
+            "linear_solver" => "mumps",
+        ),
+    )
 
 subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(
-    joinpath(HydroPowerModels_dir, case_name), formulation_file;
+    joinpath(HydroPowerModels_dir, case_name),
+    formulation_file;
     num_stages=num_stages,
     optimizer=diff_optimizer,
     penalty_l1=penalty_l1,
-    penalty_l2=penalty_l2
+    penalty_l2=penalty_l2,
 )
 
 num_hydro = length(initial_state)
 
 # Logging
-lg = WandbLogger(
-    project = "RL",
-    name = save_file,
-    save_code = false,
-    config = Dict(
+lg = WandbLogger(;
+    project="RL",
+    name=save_file,
+    save_code=false,
+    config=Dict(
         "layers" => layers,
         "activation" => string(activation),
         "ensure_feasibility" => string(ensure_feasibility),
@@ -86,19 +93,20 @@ lg = WandbLogger(
         "num_epochs" => string(num_epochs),
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),
-    )
+    ),
 )
-
-function record_loss(iter, model, loss, tag)
-    Wandb.log(lg, Dict(tag => loss))
-    return false
-end
 
 # Define Model
 # Policy architecture: LSTM processes uncertainty, Dense combines with previous state
 num_uncertainties = length(uncertainty_samples[1])
-models = state_conditioned_policy(num_uncertainties, num_hydro, num_hydro, layers;
-                                   activation=activation, encoder_type=Flux.LSTM)
+models = state_conditioned_policy(
+    num_uncertainties,
+    num_hydro,
+    num_hydro,
+    layers;
+    activation=activation,
+    encoder_type=Flux.LSTM,
+)
 
 # Load pretrained Model
 if !isnothing(pre_trained_model)
@@ -119,23 +127,26 @@ windows = DecisionRules.setup_shooting_windows(
     model_factory=diff_model,
 )
 
-objective_values = [begin
-    uncertainty_sample = DecisionRules.sample(uncertainty_samples)
-    uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
-    DecisionRules.simulate_multiple_shooting(
-        windows,
-        models,
-        Float32.(initial_state),
-        uncertainty_sample,
-        uncertainties_vec
-    )
-end for _ in 1:2]
+objective_values = [
+    begin
+        uncertainty_sample = DecisionRules.sample(uncertainty_samples)
+        uncertainties_vec = [
+            [Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample
+        ]
+        DecisionRules.simulate_multiple_shooting(
+            windows, models, Float32.(initial_state), uncertainty_sample, uncertainties_vec
+        )
+    end for _ in 1:2
+]
 
 best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
 convergence_criterium = StallingCriterium(200, best_obj, 0)
+resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
+    DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
+pending_metrics = Dict{String,Any}()
 
 # Train Model using multiple shooting.
 # A single call over num_epochs*num_batches batches so the penalty schedule spans the whole
@@ -150,14 +161,20 @@ train_multiple_shooting(
     num_train_per_batch=_num_train_per_batch,
     optimizer=first(optimizers),
     record_loss=(iter, model, loss, tag) -> begin
+        pending_metrics[tag] = loss
         if tag == "metrics/training_loss"
+            if !isnothing(resolved_penalty_schedule)
+                pending_metrics["metrics/target_penalty_multiplier"] =
+                    DecisionRules._penalty_multiplier_for(resolved_penalty_schedule, iter)
+            end
+            Wandb.log(lg, copy(pending_metrics))
+            empty!(pending_metrics)
             save_control(iter, model, loss)
-            record_loss(iter, model, loss, tag)
             return convergence_criterium(iter, model, loss)
         end
-        return record_loss(iter, model, loss, tag)
+        return false
     end,
-    penalty_schedule=penalty_schedule
+    penalty_schedule=penalty_schedule,
 )
 
 # Finish the run
