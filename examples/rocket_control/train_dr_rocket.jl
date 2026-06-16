@@ -124,13 +124,19 @@ using Plots
 using CSV
 using DataFrames
 
+example_dir = @__DIR__
+dr_dir = joinpath(example_dir, "dr_results")
+mkpath(dr_dir)
+
 num_scenarios = 10
+T = length(heights)
 
 objective_values = Array{Float64}(undef, num_scenarios)
-trajectories_h = Array{Float64}(undef, num_scenarios, length(heights))
+trajectories_h = Array{Float64}(undef, num_scenarios, T)
 
-for s in 1:num_scenarios
-    wind_sample = sample(uncertainty_samples)
+seeds = 1:num_scenarios
+for (s, seed) in enumerate(seeds)
+    Random.seed!(seed)
     objective_values[s] = simulate_multistage(
         subproblems,
         state_params_in,
@@ -139,12 +145,16 @@ for s in 1:num_scenarios
         sample(uncertainty_samples),
         model_per_stage,
     )
-
     trajectories_h[s, :] = value.(heights)
 end
 
+df_h = DataFrame(trajectories_h, [Symbol("$i") for i in 1:T])
+df_h[!, :seed] = collect(seeds)
+CSV.write(joinpath(dr_dir, "dr_h.csv"), df_h)
+
 plt = Plots.plot(; xlabel="Time", ylabel="Height", legend=false);
 for s in 1:num_scenarios
-    Plots.plot!(1:999, trajectories_h[s, :]; color=:red);
+    Plots.plot!(1:T, trajectories_h[s, :]; color=:red);
 end
-plt
+Plots.savefig(plt, joinpath(example_dir, "dr_height_trajectories.png"))
+println("Saved dr_results/dr_h.csv and dr_height_trajectories.png")

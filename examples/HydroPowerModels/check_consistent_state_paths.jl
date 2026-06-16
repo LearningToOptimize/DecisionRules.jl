@@ -109,6 +109,7 @@ states_shoot = Vector{Vector{Float64}}()
 push!(states_shoot, Float64.(initial_state_w))
 current_state = Float64.(initial_state_w)
 for window in windows
+    global current_state
     window_range = window.stage_range
     window_uncertainties_vec = uncertainties_vec[window_range]
     targets = DecisionRules.predict_window_targets(

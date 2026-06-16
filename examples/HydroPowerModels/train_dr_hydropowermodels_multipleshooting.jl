@@ -42,6 +42,8 @@ penalty_l1 = nothing
 # Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
 # to train with the constant penalties the models were built with.
 penalty_schedule = :default_annealed
+num_eval_scenarios = 4
+eval_every = 25
 
 # Build MSP using subproblems (not deterministic equivalent)
 
@@ -144,6 +146,18 @@ best_obj = mean(objective_values)
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
 convergence_criterium = StallingCriterium(200, best_obj, 0)
+
+Random.seed!(8789)
+eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:num_eval_scenarios]
+rollout_evaluation = RolloutEvaluation(
+    subproblems,
+    state_params_in,
+    state_params_out,
+    initial_state,
+    eval_scenarios;
+    stride=eval_every,
+    policy_state=:realized,
+)
 resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
     DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
 pending_metrics = Dict{String,Any}()
@@ -163,6 +177,13 @@ train_multiple_shooting(
     record_loss=(iter, model, loss, tag) -> begin
         pending_metrics[tag] = loss
         if tag == "metrics/training_loss"
+            rollout_evaluation(iter, model)
+            if iter % eval_every == 0
+                pending_metrics["metrics/rollout_objective_no_deficit"] =
+                    rollout_evaluation.last_objective_no_deficit
+                pending_metrics["metrics/rollout_target_violation_share"] =
+                    rollout_evaluation.last_violation_share
+            end
             if !isnothing(resolved_penalty_schedule)
                 pending_metrics["metrics/target_penalty_multiplier"] =
                     DecisionRules._penalty_multiplier_for(resolved_penalty_schedule, iter)
