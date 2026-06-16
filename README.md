@@ -174,6 +174,7 @@ eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:8]
 rollout_eval = RolloutEvaluation(
     subproblems, state_params_in, state_params_out, initial_state, eval_scenarios;
     stride=25,  # evaluate every 25 batches
+    policy_state=:realized,
 )
 
 train_multistage(policy, initial_state, det, state_in_det, state_out_det, uncertainty_sampler;
@@ -183,6 +184,18 @@ train_multistage(policy, initial_state, det, state_in_det, state_out_det, uncert
         return false
     end)
 ```
+
+`policy_state` selects which state is fed back to the policy between stage solves:
+
+- `:realized` feeds the previous realized optimizer state to the policy. This is the
+  closed-loop/deployment rollout and is the default.
+- `:target` feeds the previous target/predicted state to the policy, matching the
+  deterministic-equivalent target-generation path while still solving the stage
+  subproblems sequentially.
+
+Use `policy_state=:target` when comparing against a deterministic-equivalent
+training loss, because both metrics then call the policy on the same target-state
+history. Log `:realized` separately as the harder deployment diagnostic.
 
 Each evaluation reports (a) the rollout objective **excluding** the target-slack penalty term (the operational cost) and (b) the **target-violation share** — the realized slack penalty divided by the full objective. Policy comparisons are only trustworthy when the violation share is small (≤ ~0.05): a larger share means the policy's targets are not followable stage by stage and the reported cost is not what deployment would realize. When training drives the violation share to ~0, the deterministic-equivalent and rollout views are expected to coincide; the rollout metric is the guard that detects when they don't.
 

@@ -1,13 +1,21 @@
+"""
+    simulate_states(initial_state, uncertainties, decision_rule) -> Vector{Vector}
+
+Roll out `decision_rule` over `uncertainties` to produce a target-state trajectory.
+At each stage the policy receives `[uncertainty..., previous_state...]` and outputs
+the next target state.  Returns a length-`(T+1)` vector of states starting with
+`initial_state`.
+"""
 function simulate_states(
-    initial_state::Vector{T},
-    uncertainties,
-    decision_rule::F;
-) where {F, T <: Real}
+    initial_state::Vector{T}, uncertainties, decision_rule::F;
+) where {F,T<:Real}
     num_stages = length(uncertainties)
     states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
     for stage in 1:num_stages
-        uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
+        uncertainties_stage = [
+            uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])
+        ]
         # Input: [uncertainty, previous_predicted_state]
         # For stage 1, previous_predicted_state = initial_state
         # For stage t > 1, previous_predicted_state = states[t] (output from previous stage)
@@ -18,15 +26,15 @@ function simulate_states(
 end
 
 function simulate_states(
-    initial_state::Vector{T},
-    uncertainties,
-    decision_rules::Vector{F};
-) where {F, T <: Real}
+    initial_state::Vector{T}, uncertainties, decision_rules::Vector{F};
+) where {F,T<:Real}
     num_stages = length(uncertainties)
     states = Vector{Vector{T}}(undef, num_stages + 1)
     states[1] = initial_state
     for stage in 1:num_stages
-        uncertainties_stage = [uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])]
+        uncertainties_stage = [
+            uncertainties[stage][i][2] for i in 1:length(uncertainties[stage])
+        ]
         decision_rule = decision_rules[stage]
         # Input: [uncertainty, previous_predicted_state]
         prev_state = states[stage]
@@ -35,8 +43,22 @@ function simulate_states(
     return states
 end
 
-function simulate_stage(subproblem::JuMP.Model, state_param_in::Vector{Any}, state_param_out::Vector{Tuple{Any, VariableRef}}, uncertainty::Vector{Tuple{VariableRef,T}}, state_in::Vector{Z}, state_out_target::Vector{V}
-) where {T <: Real, V <: Real, Z <: Real}
+"""
+    simulate_stage(subproblem, state_param_in, state_param_out, uncertainty,
+                   state_in, state_out_target) -> Float64
+
+Set parameter values on `subproblem` (incoming state, outgoing target, uncertainty),
+solve it, and return the objective value.  Used as the inner solve in single-shooting
+rollouts (Extension §2, Eq. 2.1).
+"""
+function simulate_stage(
+    subproblem::JuMP.Model,
+    state_param_in::Vector{Any},
+    state_param_out::Vector{Tuple{Any,VariableRef}},
+    uncertainty::Vector{Tuple{VariableRef,T}},
+    state_in::Vector{Z},
+    state_out_target::Vector{V},
+) where {T<:Real,V<:Real,Z<:Real}
     # Update state parameters
     for (i, state_var) in enumerate(state_param_in)
         set_parameter_value(state_var, state_in[i])
@@ -62,7 +84,20 @@ function simulate_stage(subproblem::JuMP.Model, state_param_in::Vector{Any}, sta
     return obj
 end
 
-function get_next_state(subproblem::JuMP.Model, state_param_in::Vector{Any}, state_param_out::Vector{Tuple{Any, VariableRef}}, state_in::Vector{T}, state_out_target::Vector{Z}) where {T <: Real, Z <: Real}
+"""
+    get_next_state(subproblem, state_param_in, state_param_out, state_in,
+                   state_out_target) -> Vector
+
+Return the realized state from the most recent solve of `subproblem` by reading
+the values of the realized-state variables in `state_param_out`.
+"""
+function get_next_state(
+    subproblem::JuMP.Model,
+    state_param_in::Vector{Any},
+    state_param_out::Vector{Tuple{Any,VariableRef}},
+    state_in::Vector{T},
+    state_out_target::Vector{Z},
+) where {T<:Real,Z<:Real}
     state_out = [value(state_param_out[i][2]) for i in 1:length(state_param_out)]
     return state_out
 end
@@ -82,18 +117,41 @@ Assumptions:
     (target-Parameter variable, realized-state Variable) per component
 - `get_next_state(...)` updates parameter values, `optimize!`s, and returns a Vector matching the realized-state variables
 """
-function ChainRulesCore.rrule(::typeof(get_next_state),
+function ChainRulesCore.rrule(
+    ::typeof(get_next_state),
     subproblem::JuMP.Model,
     state_param_in,
     state_param_out,
     state_in,
-    state_out_target
+    state_out_target,
 )
 
     # Forward pass: run the solver via the user's function
-    y = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out_target)
+    y = DecisionRules.get_next_state(
+        subproblem, state_param_in, state_param_out, state_in, state_out_target
+    )
+    forward_status = JuMP.termination_status(subproblem)
 
     function pullback(Δy)
+        status = forward_status
+        if !(status in _SUCCESSFUL_TERM_STATUSES)
+            if STRICT_GRADIENTS[]
+                error(
+                    "get_next_state pullback: solver terminated with status $status; " *
+                    "expected a successful solve.",
+                )
+            end
+            @warn "get_next_state: solver status $status, returning zero gradients" status
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                zeros(length(state_in)),
+                zeros(length(state_out_target)),
+            )
+        end
+
         try
             Δy = collect(Δy)  # ensure indexable, concrete element type
 
@@ -119,7 +177,9 @@ function ChainRulesCore.rrule(::typeof(get_next_state),
                 d_state_in[i] = DiffOpt.get_reverse_parameter(subproblem, pin)
             end
 
-            d_state_out_target = similar(state_out_target, promote_type(eltype(state_out_target), eltype(Δy)))
+            d_state_out_target = similar(
+                state_out_target, promote_type(eltype(state_out_target), eltype(Δy))
+            )
             @inbounds for i in eachindex(state_param_out)
                 pout = state_param_out[i][1]  # target Parameter variable
                 d_state_out_target[i] = DiffOpt.get_reverse_parameter(subproblem, pout)
@@ -130,24 +190,35 @@ function ChainRulesCore.rrule(::typeof(get_next_state),
 
             # Return cotangents for each primal argument, in order:
             #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target)
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_state_in, d_state_out_target)
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                d_state_in,
+                d_state_out_target,
+            )
         catch e
             msg = sprint(showerror, e)
-            throw(ArgumentError(
-                "Differentiating get_next_state requires a DiffOpt-enabled model " *
-                "because the closed-loop rollout needs solution sensitivities of the " *
-                "realized state variables. Use an appropriate DiffOpt wrapper for the " *
-                "stage subproblems (for target-slack conic models, " *
-                "`DiffOpt.conic_diff_model(...)`), or use the deterministic-equivalent " *
-                "training path when only target duals are needed. Original error: $msg"
-            ))
-        end      
+            throw(
+                ArgumentError(
+                    "Differentiating get_next_state requires a DiffOpt-enabled model " *
+                    "because the closed-loop rollout needs solution sensitivities of the " *
+                    "realized state variables. Use an appropriate DiffOpt wrapper for the " *
+                    "stage subproblems (for target-slack conic models, " *
+                    "`DiffOpt.conic_diff_model(...)`), or use the deterministic-equivalent " *
+                    "training path when only target duals are needed. Original error: $msg",
+                ),
+            )
+        end
     end
 
     return y, pullback
 end
 
-function get_objective_no_target_deficit(subproblem::JuMP.Model; norm_deficit::AbstractString="norm_deficit")
+function get_objective_no_target_deficit(
+    subproblem::JuMP.Model; norm_deficit::AbstractString="norm_deficit"
+)
     obj = JuMP.objective_function(subproblem)
     objective_val = objective_value(subproblem)
     for term in obj.terms
@@ -158,17 +229,23 @@ function get_objective_no_target_deficit(subproblem::JuMP.Model; norm_deficit::A
     return objective_val
 end
 
-function get_objective_no_target_deficit(subproblems::Vector{JuMP.Model}; norm_deficit::AbstractString="norm_deficit")
+function get_objective_no_target_deficit(
+    subproblems::Vector{JuMP.Model}; norm_deficit::AbstractString="norm_deficit"
+)
     total_objective = 0.0
     for subproblem in subproblems
-        total_objective += get_objective_no_target_deficit(subproblem, norm_deficit=norm_deficit)
+        total_objective += get_objective_no_target_deficit(
+            subproblem; norm_deficit=norm_deficit
+        )
     end
     return total_objective
 end
 
 # define ChainRulesCore.rrule of get_objective_no_target_deficit
-function ChainRulesCore.rrule(::typeof(get_objective_no_target_deficit), subproblem; norm_deficit="norm_deficit")
-    objective_val = get_objective_no_target_deficit(subproblem, norm_deficit=norm_deficit)
+function ChainRulesCore.rrule(
+    ::typeof(get_objective_no_target_deficit), subproblem; norm_deficit="norm_deficit"
+)
+    objective_val = get_objective_no_target_deficit(subproblem; norm_deficit=norm_deficit)
     function _pullback(Δobjective_val)
         return (NoTangent(), NoTangent())
     end
@@ -183,16 +260,25 @@ function apply_rule(stage::Int, decision_rules::Vector{T}, uncertainty, state_in
     return apply_rule(stage, decision_rules[stage], uncertainty, state_in)
 end
 
+"""
+    simulate_multistage(subproblems, state_params_in, state_params_out,
+                        initial_state, uncertainties, decision_rules) -> Float64
+
+Stage-wise (single shooting) forward simulation.  Rolls `decision_rules` over
+`uncertainties`, solving one subproblem per stage.  The realized state from each
+stage feeds the next via `get_next_state`.  Returns the total objective across
+all stages (Extension §2, Eq. 2.1–2.4).
+"""
 function simulate_multistage(
     subproblems::Vector{JuMP.Model},
     state_params_in::Vector{Vector{U}},
-    state_params_out::Vector{Vector{Tuple{U, VariableRef}}},
+    state_params_out::Vector{Vector{Tuple{U,VariableRef}}},
     initial_state::Vector{T},
     uncertainties,
-    decision_rules
-) where {T <: Real, U}
+    decision_rules,
+) where {T<:Real,U}
     @ignore_derivatives Flux.reset!(decision_rules)
-    
+
     # Loop over stages
     objective_value = 0.0
     state_in = initial_state
@@ -202,23 +288,34 @@ function simulate_multistage(
         state_param_out = state_params_out[stage]
         uncertainty = uncertainties[stage]
         state_out = apply_rule(stage, decision_rules, uncertainty, state_in)
-        objective_value += simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
-        state_in = DecisionRules.get_next_state(subproblem, state_param_in, state_param_out, state_in, state_out)
+        objective_value += simulate_stage(
+            subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out
+        )
+        state_in = DecisionRules.get_next_state(
+            subproblem, state_param_in, state_param_out, state_in, state_out
+        )
     end
-    
+
     # Return final objective value
     return objective_value
 end
 
+"""
+    simulate_multistage(det_equivalent, state_params_in, state_params_out,
+                        uncertainties, states) -> Float64
+
+Deterministic-equivalent (direct transcription) forward pass.  Sets all parameter
+values from `states` and `uncertainties` into the coupled `det_equivalent` model,
+solves it, and returns the objective value (Extension §1, Eq. 1.1).
+"""
 function simulate_multistage(
     det_equivalent::JuMP.Model,
     state_params_in::Vector{Vector{Z}},
-    state_params_out::Vector{Vector{Tuple{Z, VariableRef}}},
+    state_params_out::Vector{Vector{Tuple{Z,VariableRef}}},
     uncertainties,
-    states
-    ) where {Z}
-    
-    for t in  1:length(state_params_in)
+    states,
+) where {Z}
+    for t in 1:length(state_params_in)
         state = states[t]
         # Update state parameters in
         if t == 1
@@ -245,17 +342,26 @@ function simulate_multistage(
     return objective_value(det_equivalent)
 end
 
+"""
+    simulate_multistage(det_equivalent::JuMP.Model, state_params_in, state_params_out,
+                        initial_state, uncertainties, decision_rules) -> Float64
+
+Convenience overload: rolls out `decision_rules` to produce target states, then
+calls the deterministic-equivalent `simulate_multistage` to solve the coupled problem.
+"""
 function simulate_multistage(
     subproblems::JuMP.Model,
     state_params_in::Vector{Vector{U}},
-    state_params_out::Vector{Vector{Tuple{U, VariableRef}}},
+    state_params_out::Vector{Vector{Tuple{U,VariableRef}}},
     initial_state::Vector{T},
     uncertainties,
-    decision_rules
-) where {T <: Real, U}
+    decision_rules,
+) where {T<:Real,U}
     Flux.reset!(decision_rules)
     states = simulate_states(initial_state, uncertainties, decision_rules)
-    return simulate_multistage(subproblems, state_params_in, state_params_out, uncertainties, states)
+    return simulate_multistage(
+        subproblems, state_params_in, state_params_out, uncertainties, states
+    )
 end
 
 """
@@ -306,26 +412,52 @@ and exact whenever the solver exposes constraint duals.
    status (not OPTIMAL / ALMOST_OPTIMAL / LOCALLY_SOLVED).  A warning is
    emitted.  Set `DecisionRules.STRICT_GRADIENTS[] = true` to throw instead.
 """
-function ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
-    y = simulate_stage(subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out)
+function ChainRulesCore.rrule(
+    ::typeof(simulate_stage),
+    subproblem,
+    state_param_in,
+    state_param_out,
+    uncertainty,
+    state_in,
+    state_out,
+)
+    y = simulate_stage(
+        subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out
+    )
+    forward_status = JuMP.termination_status(subproblem)
     function _pullback(Δy)
-        status = @ignore_derivatives JuMP.termination_status(subproblem)
+        status = forward_status
         if !(status in _SUCCESSFUL_TERM_STATUSES)
             if STRICT_GRADIENTS[]
-                error("simulate_stage pullback: solver terminated with status $status; " *
-                      "expected a successful solve. Set DecisionRules.STRICT_GRADIENTS[] " *
-                      "= false to return zero gradients instead.")
+                error(
+                    "simulate_stage pullback: solver terminated with status $status; " *
+                    "expected a successful solve. Set DecisionRules.STRICT_GRADIENTS[] " *
+                    "= false to return zero gradients instead.",
+                )
             end
             @warn "simulate_stage: solver status $status, returning zero gradients" status
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(),
-                    zeros(length(state_param_in)), zeros(length(state_param_out)))
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                zeros(length(state_param_in)),
+                zeros(length(state_param_out)),
+            )
         end
 
         # Preferred: parameter duals (closed-form, Eq. 1.2 / 2.5)
         try
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(),
-                    pdual.(state_param_in) * Δy,
-                    pdual.([s[1] for s in state_param_out]) * Δy)
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                pdual.(state_param_in) * Δy,
+                pdual.([s[1] for s in state_param_out]) * Δy,
+            )
         catch
             # pdual unavailable (e.g. DiffOpt wrapper hides conic duals)
         end
@@ -334,9 +466,15 @@ function ChainRulesCore.rrule(::typeof(simulate_stage), subproblem, state_param_
         DiffOpt.empty_input_sensitivities!(subproblem)
         MOI.set(subproblem, DiffOpt.ReverseObjectiveSensitivity(), Δy)
         DiffOpt.reverse_differentiate!(subproblem)
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(),
-                DiffOpt.get_reverse_parameter.(subproblem, state_param_in),
-                DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out]))
+        return (
+            NoTangent(),
+            NoTangent(),
+            NoTangent(),
+            NoTangent(),
+            NoTangent(),
+            DiffOpt.get_reverse_parameter.(subproblem, state_param_in),
+            DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out]),
+        )
     end
     return y, _pullback
 end
@@ -366,22 +504,36 @@ first, falls back to DiffOpt reverse differentiation if pdual raises.
 Solver failure (bad termination status) returns zero gradients or throws
 depending on [`STRICT_GRADIENTS`](@ref).
 """
-function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuMP.Model, state_params_in, state_params_out, uncertainties, states)
-    y = simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainties, states)
+function ChainRulesCore.rrule(
+    ::typeof(simulate_multistage),
+    det_equivalent::JuMP.Model,
+    state_params_in,
+    state_params_out,
+    uncertainties,
+    states,
+)
+    y = simulate_multistage(
+        det_equivalent, state_params_in, state_params_out, uncertainties, states
+    )
+    forward_status = JuMP.termination_status(det_equivalent)
     function _pullback(Δy)
-        status = @ignore_derivatives JuMP.termination_status(det_equivalent)
+        status = forward_status
         Δ_states = similar(states)
         if !(status in _SUCCESSFUL_TERM_STATUSES)
             if STRICT_GRADIENTS[]
-                error("simulate_multistage (det_eq) pullback: solver terminated with " *
-                      "status $status; expected a successful solve.")
+                error(
+                    "simulate_multistage (det_eq) pullback: solver terminated with " *
+                    "status $status; expected a successful solve.",
+                )
             end
             @warn "simulate_multistage (det_eq): solver status $status, returning zero gradients" status
             Δ_states[1] = zeros(length(state_params_in[1]))
             for t in 1:length(state_params_out)
                 Δ_states[t + 1] = zeros(length(state_params_out[t]))
             end
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
+            return (
+                NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states
+            )
         end
 
         # Preferred: parameter duals (closed-form, Eq. 1.2)
@@ -390,7 +542,14 @@ function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuM
             for t in 1:length(state_params_out)
                 Δ_states[t + 1] = pdual.([s[1] for s in state_params_out[t]])
             end
-            return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states * Δy)
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                Δ_states * Δy,
+            )
         catch
             # pdual unavailable; fall back to DiffOpt
         end
@@ -401,14 +560,16 @@ function ChainRulesCore.rrule(::typeof(simulate_multistage), det_equivalent::JuM
         DiffOpt.reverse_differentiate!(det_equivalent)
         Δ_states[1] = DiffOpt.get_reverse_parameter.(det_equivalent, state_params_in[1])
         for t in 1:length(state_params_out)
-            Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(det_equivalent, [s[1] for s in state_params_out[t]])
+            Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(
+                det_equivalent, [s[1] for s in state_params_out[t]]
+            )
         end
         return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
     end
     return y, _pullback
 end
 
-function sample(uncertainty_samples::Vector{Tuple{VariableRef, Vector{T}}}) where {T<:Real}
+function sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where {T<:Real}
     uncertainty_sample = Vector{Tuple{VariableRef,T}}(undef, length(uncertainty_samples))
     for i in 1:length(uncertainty_samples)
         uncertainty_sample[i] = (uncertainty_samples[i][1], rand(uncertainty_samples[i][2]))
@@ -416,26 +577,48 @@ function sample(uncertainty_samples::Vector{Tuple{VariableRef, Vector{T}}}) wher
     return uncertainty_sample
 end
 
-function sample(uncertainty_samples::Vector{Vector{Tuple{VariableRef, Vector{T}}}}) where {T<:Real}
-    [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
+function sample(
+    uncertainty_samples::Vector{Vector{Tuple{VariableRef,Vector{T}}}}
+) where {T<:Real}
+    return [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
 end
 
-function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
-    state_params_in, state_params_out, uncertainty_sampler;
-    num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
+"""
+    train_multistage(model, initial_state, subproblems, state_params_in,
+                     state_params_out, uncertainty_sampler; kwargs...)
+
+Train a policy with **stage-wise decomposition** (single shooting, Extension §2).
+Each SGD step samples `num_train_per_batch` uncertainty trajectories, rolls out the
+policy through `simulate_multistage` (stage-wise overload), and updates `model` via
+the Flux optimizer.
+"""
+function train_multistage(
+    model,
+    initial_state,
+    subproblems::Vector{JuMP.Model},
+    state_params_in,
+    state_params_out,
+    uncertainty_sampler;
+    num_batches=100,
+    num_train_per_batch=32,
+    optimizer=Flux.Adam(0.01),
     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
     record_loss=nothing,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
     sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
     record=default_record,
-    penalty_schedule=nothing
+    penalty_schedule=nothing,
 )
     record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
 
     schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
-    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(subproblems))
+    penalty_bases = if isnothing(schedule)
+        nothing
+    else
+        _check_deficit_penalty_bases(_deficit_penalty_bases(subproblems))
+    end
     current_multiplier = NaN
 
     for iter in 1:num_batches
@@ -454,7 +637,14 @@ function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
         grads = Flux.gradient(model) do m
             for s in 1:num_train_per_batch
                 Flux.reset!(m)
-                objective += simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples[s], m)
+                objective += simulate_multistage(
+                    subproblems,
+                    state_params_in,
+                    state_params_out,
+                    initial_state,
+                    uncertainty_samples[s],
+                    m,
+                )
                 @ignore_derivatives sample_log(s, subproblems)
             end
             objective /= num_train_per_batch
@@ -468,7 +658,7 @@ function train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
         grad = materialize_tangent(grads[1])
         Flux.update!(opt_state, model, grad)
     end
-    
+
     return model
 end
 
@@ -485,15 +675,31 @@ function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
     end
 end
 
-function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
-    state_params_in, state_params_out, uncertainty_sampler;
-    num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
+"""
+    train_multistage(model, initial_state, det_equivalent::JuMP.Model,
+                     state_params_in, state_params_out, uncertainty_sampler; kwargs...)
+
+Train a policy with the **deterministic equivalent** (direct transcription,
+Extension §1).  Each SGD step samples uncertainty trajectories, rolls out target
+states with `Base.accumulate`, solves the coupled `det_equivalent`, and updates
+`model`.  Gradient: Eq. 1.2, ``λ^s ⊙ ∇_θ π``.
+"""
+function train_multistage(
+    model,
+    initial_state,
+    det_equivalent::JuMP.Model,
+    state_params_in,
+    state_params_out,
+    uncertainty_sampler;
+    num_batches=100,
+    num_train_per_batch=32,
+    optimizer=Flux.Adam(0.01),
     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
     record_loss=nothing,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
     sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
     record=default_record,
-    penalty_schedule=nothing
+    penalty_schedule=nothing,
 )
     record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
@@ -501,14 +707,20 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
     num_stages = length(state_params_in)
 
     schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
-    penalty_bases = isnothing(schedule) ? nothing : _check_deficit_penalty_bases(_deficit_penalty_bases(det_equivalent))
+    penalty_bases = if isnothing(schedule)
+        nothing
+    else
+        _check_deficit_penalty_bases(_deficit_penalty_bases(det_equivalent))
+    end
     current_multiplier = NaN
 
     for iter in 1:num_batches
         if !isnothing(schedule)
             multiplier = _penalty_multiplier_for(schedule, iter)
             if multiplier != current_multiplier
-                _apply_deficit_penalty_multiplier!(det_equivalent, penalty_bases, multiplier)
+                _apply_deficit_penalty_multiplier!(
+                    det_equivalent, penalty_bases, multiplier
+                )
                 current_multiplier = multiplier
             end
         end
@@ -516,34 +728,39 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
         # Sample uncertainties
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
         num_uncertainties = length(uncertainty_samples[1][1])
-        uncertainty_samples_vec = [[[uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties] for stage in 1:length(uncertainty_samples[1])] for s in 1:num_train_per_batch]
+        uncertainty_samples_vec = [
+            [
+                [uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties] for
+                stage in 1:length(uncertainty_samples[1])
+            ] for s in 1:num_train_per_batch
+        ]
 
         # Calculate the gradient of the objective
         # with respect to the parameters within the model:
         objective = 0.0
         _reset_sample_log!(sample_log)
-        # try
-            grads = Flux.gradient(model) do m
-                for s in 1:num_train_per_batch
-                    Flux.reset!(m)
-                    # Compute states using accumulate (AD-friendly scan operation)
-                    # Input to policy: [uncertainty, previous_predicted_state]
-                    init_state = Float32.(initial_state)
-                    # accumulate returns all intermediate states
-                    predicted_states = accumulate(uncertainty_samples_vec[s]; init=init_state) do prev_state, uncertainties_t
-                        m(vcat(uncertainties_t, prev_state))
-                    end
-                    # Combine initial state with predicted states
-                    states = vcat([init_state], predicted_states)
-                    objective += simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainty_samples[s], states)
-                    @ignore_derivatives sample_log(s, det_equivalent)
+        grads = Flux.gradient(model) do m
+            for s in 1:num_train_per_batch
+                Flux.reset!(m)
+                init_state = Float32.(initial_state)
+                predicted_states = accumulate(
+                    uncertainty_samples_vec[s]; init=init_state
+                ) do prev_state, uncertainties_t
+                    return m(vcat(uncertainties_t, prev_state))
                 end
-                objective /= num_train_per_batch
-                return objective
+                states = vcat([init_state], predicted_states)
+                objective += simulate_multistage(
+                    det_equivalent,
+                    state_params_in,
+                    state_params_out,
+                    uncertainty_samples[s],
+                    states,
+                )
+                @ignore_derivatives sample_log(s, det_equivalent)
             end
-        # catch
-            # continue;
-        # end
+            objective /= num_train_per_batch
+            return objective
+        end
         record(sample_log, iter, model) && break
 
         # Update the parameters so as to reduce the objective,
@@ -552,122 +769,6 @@ function train_multistage(model, initial_state, det_equivalent::JuMP.Model,
         grad = materialize_tangent(grads[1])
         Flux.update!(opt_state, model, grad)
     end
-    
+
     return model
 end
-
-# function make_single_network(models::Vector{F}, number_of_states::Int) where {F}
-#     size_m = length(models)
-#     return Parallel(permutedims ∘ hcat, [Chain(
-#         x -> x[1:number_of_states * (i + 1)],
-#         models[i]
-#     ) for i in 1:size_m]...)
-# end
-
-# function train_multistage(models::Vector, initial_state, subproblems::Vector{JuMP.Model}, 
-#     state_params_in, state_params_out, uncertainty_sampler; 
-#     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
-#     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
-#     record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
-#         return false
-#     end,
-#     get_objective_no_target_deficit=get_objective_no_target_deficit
-# )
-#     num_states = length(initial_state)
-#     model = make_single_network(models, num_states)
-#     # Initialise the optimiser for this model:
-#     opt_state = Flux.setup(optimizer, model)
-
-#     for iter in 1:num_batches
-#         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
-#         # Sample uncertainties
-#         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
-#         uncertainty_samples_vecs = [[collect(values(uncertainty_sample[j])) for j in 1:length(uncertainty_sample)] for uncertainty_sample in uncertainty_samples]
-#         uncertainty_samples_vec = [vcat(initial_state, uncertainty_samples_vecs[s]...) for s in 1:num_train_per_batch]
-
-#         # Calculate the gradient of the objective
-#         # with respect to the parameters within the model:
-#         eval_loss = 0.0
-#         objective = 0.0
-#         grads = Flux.gradient(model) do m
-#             for s in 1:num_train_per_batch
-#                 states = m(uncertainty_samples_vec[s])
-#                 state_in = initial_state
-#                 for (j, subproblem) in enumerate(subproblems)
-#                     state_out = states[j]
-#                     objective += simulate_stage(subproblem, state_params_in[j], state_params_out[j], uncertainty_samples[s][j], state_in, state_out)
-#                     eval_loss += get_objective_no_target_deficit(subproblem)
-#                     state_in = get_next_state(subproblem, state_params_out[j], state_in, state_out)
-#                 end
-#             end
-#             objective /= num_train_per_batch
-#             eval_loss /= num_train_per_batch
-#             return objective
-#         end
-#         record_loss(iter, model, eval_loss, "metrics/loss") && break
-#         record_loss(iter, model, objective, "metrics/training_loss") && break
-
-#         # Update the parameters so as to reduce the objective,
-#         # according the chosen optimisation rule:
-#         Flux.update!(opt_state, model, grads[1])
-#     end
-    
-#     return model
-# end
-
-
-# function train_multistage(models::Vector, initial_state, det_equivalent::JuMP.Model, 
-#     state_params_in, state_params_out, uncertainty_sampler; 
-#     num_batches=100, num_train_per_batch=32, optimizer=Flux.Adam(0.01),
-#     adjust_hyperparameters=(iter, opt_state, num_train_per_batch) -> num_train_per_batch,
-#     record_loss=(iter, model, loss, tag) -> begin println("tag: $tag, Iter: $iter, Loss: $loss")
-#         return false
-#     end,
-#     get_objective_no_target_deficit=get_objective_no_target_deficit
-# )
-#     num_states = length(initial_state)
-#     num_stages = length(state_params_in)
-#     # Initialise the optimiser for each model:
-#     opt_states = [Flux.setup(optimizer, m) for m in models]
-
-#     for iter in 1:num_batches
-#         num_train_per_batch = adjust_hyperparameters(iter, opt_states, num_train_per_batch)
-#         # Sample uncertainties
-#         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
-#         num_uncertainties = length(uncertainty_samples[1][1])
-#         uncertainty_samples_vecs = [[[uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties] for stage in 1:length(uncertainty_samples[1])] for s in 1:num_train_per_batch]
-
-#         # Calculate the gradient of the objective
-#         # with respect to the parameters within the model:
-#         eval_loss = 0.0
-#         objective = 0.0
-#         grads = Flux.gradient(models...) do ms...
-#             for s in 1:num_train_per_batch
-#                 # Compute states sequentially: each state depends on the previous predicted state
-#                 # Input to policy: [uncertainty, previous_predicted_state]
-#                 states = Vector{Any}(undef, num_stages + 1)
-#                 states[1] = Float32.(initial_state)
-#                 for t in 2:num_stages + 1
-#                     uncertainties_t = uncertainty_samples_vecs[s][t - 1]
-#                     prev_state = states[t - 1]
-#                     states[t] = ms[t - 1](vcat(uncertainties_t, prev_state))
-#                 end
-#                 objective += simulate_multistage(det_equivalent, state_params_in, state_params_out, uncertainty_samples[s], states)
-#                 @ignore_derivatives eval_loss += get_objective_no_target_deficit(det_equivalent)
-#             end
-#             objective /= num_train_per_batch
-#             @ignore_derivatives eval_loss /= num_train_per_batch
-#             return objective
-#         end
-#         record_loss(iter, models, eval_loss, "metrics/loss") && break
-#         record_loss(iter, models, objective, "metrics/training_loss") && break
-
-#         # Update the parameters so as to reduce the objective,
-#         # according the chosen optimisation rule:
-#         for (i, m) in enumerate(models)
-#             Flux.update!(opt_states[i], m, grads[i])
-#         end
-#     end
-    
-#     return models
-# end

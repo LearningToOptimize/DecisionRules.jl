@@ -11,13 +11,17 @@ using DiffOpt
 using ChainRules: @ignore_derivatives
 using ChainRulesCore
 
-quiet_ipopt_optimizer() = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0, "sb" => "yes")
+function quiet_ipopt_optimizer()
+    return optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0, "sb" => "yes")
+end
 quiet_ipopt_model() = Model(quiet_ipopt_optimizer())
 quiet_diffopt_ipopt_model() = DiffOpt.diff_model(quiet_ipopt_optimizer())
 quiet_conic_ipopt_model() = DiffOpt.conic_diff_model(quiet_ipopt_optimizer())
 quiet_nonlinear_ipopt_model() = DiffOpt.nonlinear_diff_model(quiet_ipopt_optimizer())
 
-function build_subproblem(d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model())
+function build_subproblem(
+    d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model()
+)
     try
         set_silent(subproblem)
     catch
@@ -40,13 +44,17 @@ end
 
 @testset "DecisionRules.jl" begin
     @testset "pdual at infeasibility" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model(), state_out_val=9.0)
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(
+            10; subproblem=quiet_conic_ipopt_model(), state_out_val=9.0
+        )
         optimize!(subproblem1)
         @test DecisionRules.pdual(state_in_1) ≈ -1.0e4 rtol=1.0e-1
         @test DecisionRules.pdual(state_out_1) ≈ 1.0e4 rtol=1.0e-1
     end
 
-    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
+    subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(
+        10; subproblem=quiet_conic_ipopt_model()
+    )
 
     optimize!(subproblem1)
 
@@ -58,19 +66,41 @@ end
     @testset "simulate_stage" begin
         inflow = 2.0
         state_param_in = Vector{Any}(undef, 1)
-        state_param_out = Vector{Tuple{Any, VariableRef}}(undef, 1)
+        state_param_out = Vector{Tuple{Any,VariableRef}}(undef, 1)
         state_param_in .= [state_in_1]
         state_param_out .= [(state_out_1, state_out_var_1)]
         uncertainty_sample = [(uncertainty_1, inflow)]
         state_in_val = [5.0]
         state_out_val = [4.0]
         # Test simulate_stage
-        @test DecisionRules.simulate_stage(subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val) ≈ 210 rtol=1.0e-1
-        grad = Zygote.gradient(DecisionRules.simulate_stage, subproblem1, state_param_in, state_param_out, uncertainty_sample, state_in_val, state_out_val)
+        @test DecisionRules.simulate_stage(
+            subproblem1,
+            state_param_in,
+            state_param_out,
+            uncertainty_sample,
+            state_in_val,
+            state_out_val,
+        ) ≈ 210 rtol=1.0e-1
+        grad = Zygote.gradient(
+            DecisionRules.simulate_stage,
+            subproblem1,
+            state_param_in,
+            state_param_out,
+            uncertainty_sample,
+            state_in_val,
+            state_out_val,
+        )
         @test grad[5][1] ≈ -30.0 rtol=1.0e-1
         @test grad[6][1] ≈ 30.0 rtol=1.0e-1
         # Test get next state
-        jac = Zygote.jacobian(DecisionRules.get_next_state, subproblem1, state_param_in, state_param_out, state_in_val, state_out_val)
+        jac = Zygote.jacobian(
+            DecisionRules.get_next_state,
+            subproblem1,
+            state_param_in,
+            state_param_out,
+            state_in_val,
+            state_out_val,
+        )
         @test jac[4][1] ≈ 0.0 atol=1.0e-4 # ∂next_state/∂state_in
         @test jac[5][1] ≈ 1.0 rtol=1.0e-1 # ∂next_state/∂state_out
 
@@ -79,63 +109,119 @@ end
         Random.seed!(222)
         m = Chain(Dense(1, 10), Dense(10, 1))
         # 90 is what we expect after training, so we start above that for a random policy
-        @test DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow])) > 90.0
+        @test DecisionRules.simulate_stage(
+            subproblem,
+            state_param_in,
+            state_param_out,
+            uncertainty_sample,
+            state_in_val,
+            m([inflow]),
+        ) > 90.0
         opt_state = Flux.setup(Flux.Adam(), m)
         for _ in 1:300
             _inflow = rand(1.0:5.0)
             data = [[_inflow] for _ in 1:10]
-            Flux.train!((model, inflow_vec) -> begin
-                uncertainty_samp = [(uncertainty_1, inflow_vec[1])]
-                return DecisionRules.simulate_stage(
-                    subproblem, state_param_in, state_param_out,
-                    uncertainty_samp, state_in_val, model(inflow_vec)
-                )
-            end, m, data, opt_state)
+            Flux.train!(
+                (model, inflow_vec) -> begin
+                    uncertainty_samp = [(uncertainty_1, inflow_vec[1])]
+                    return DecisionRules.simulate_stage(
+                        subproblem,
+                        state_param_in,
+                        state_param_out,
+                        uncertainty_samp,
+                        state_in_val,
+                        model(inflow_vec),
+                    )
+                end,
+                m,
+                data,
+                opt_state,
+            )
         end
-        trained_val = DecisionRules.simulate_stage(subproblem, state_param_in, state_param_out, uncertainty_sample, state_in_val, m([inflow]))
+        trained_val = DecisionRules.simulate_stage(
+            subproblem,
+            state_param_in,
+            state_param_out,
+            uncertainty_sample,
+            state_in_val,
+            m([inflow]),
+        )
         # Optimal is ~90 for inflow=2.0. Allow headroom for stochastic training.
         @test trained_val <= 100
     end
 
     @testset "simulate_multistage (per-stage)" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
-        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0, subproblem=quiet_conic_ipopt_model())
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(
+            10; subproblem=quiet_conic_ipopt_model()
+        )
+        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(
+            10;
+            state_i_val=1.0,
+            state_out_val=9.0,
+            uncertainty_val=2.0,
+            subproblem=quiet_conic_ipopt_model(),
+        )
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
-        state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+        state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
         state_params_in .= [[state_in_1], [state_in_2]]
-        state_params_out .= [[(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]]
+        state_params_out .= [
+            [(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]
+        ]
         uncertainty_samples = [[(uncertainty_1, [2.0])], [(uncertainty_2, [1.0])]]
         initial_state = [5.0]
 
         function simulate(initial_state, params)
             i = 0
-            m = (ars...) -> begin i= i+1; return params[i] end
-            DecisionRules.simulate_multistage(subproblems, state_params_in, state_params_out, initial_state, sample(uncertainty_samples), m)
+            m = (ars...) -> begin
+                i = i+1;
+                return params[i]
+            end
+            return DecisionRules.simulate_multistage(
+                subproblems,
+                state_params_in,
+                state_params_out,
+                initial_state,
+                sample(uncertainty_samples),
+                m,
+            )
         end
-        grad = Zygote.gradient(simulate, initial_state, [[4.0], [3.]])
+        grad = Zygote.gradient(simulate, initial_state, [[4.0], [3.0]])
         @test grad[2][1][1] + grad[2][2][1] ≈ 30.0 atol=1.0e-2
 
-        rand_policy = simulate([5.0], [[4.0], [3.]])
+        rand_policy = simulate([5.0], [[4.0], [3.0]])
 
         @test rand_policy ≈ 450 rtol=1.0e-1
 
-        @test simulate([9.0], [[7.], [4.000]]) ≈ 359 rtol=1.0e-1
+        @test simulate([9.0], [[7.0], [4.000]]) ≈ 359 rtol=1.0e-1
 
         Random.seed!(222)
         # Policy input: [uncertainty, previous_state] = 1 + 1 = 2 dimensions
         m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val_prev = DecisionRules.simulate_multistage(
-            subproblems, state_params_in, state_params_out, 
-            initial_state, sample(uncertainty_samples), 
-            m
+            subproblems,
+            state_params_in,
+            state_params_out,
+            initial_state,
+            sample(uncertainty_samples),
+            m,
         )
-        train_multistage(m, initial_state, subproblems, state_params_in, state_params_out, uncertainty_samples)
+        train_multistage(
+            m,
+            initial_state,
+            subproblems,
+            state_params_in,
+            state_params_out,
+            uncertainty_samples,
+        )
         obj_val = DecisionRules.simulate_multistage(
-            subproblems, state_params_in, state_params_out, 
-            initial_state, sample(uncertainty_samples), 
-            m
+            subproblems,
+            state_params_in,
+            state_params_out,
+            initial_state,
+            sample(uncertainty_samples),
+            m,
         )
 
         @test obj_val < rand_policy
@@ -143,45 +229,82 @@ end
     end
 
     @testset "deterministic_equivalent" begin
-        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(10)
-        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
+        subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(
+            10
+        )
+        subproblem2, state_in_2, state_out_2, state_out_var_2, uncertainty_2 = build_subproblem(
+            10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+        )
 
         subproblems = [subproblem1, subproblem2]
         state_params_in = Vector{Vector{Any}}(undef, 2)
-        state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+        state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
         state_params_in .= [[state_in_1], [state_in_2]]
-        state_params_out .= [[(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]]
+        state_params_out .= [
+            [(state_out_1, state_out_var_1)], [(state_out_2, state_out_var_2)]
+        ]
         uncertainty_samples = [[(uncertainty_1, [2.0])], [(uncertainty_2, [1.0])]]
         initial_state = [5.0]
 
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
             quiet_nonlinear_ipopt_model(),
-            subproblems, state_params_in, state_params_out, initial_state, uncertainty_samples
+            subproblems,
+            state_params_in,
+            state_params_out,
+            initial_state,
+            uncertainty_samples,
         )
 
-        obj_val = DecisionRules.simulate_multistage(det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.000]])
+        obj_val = DecisionRules.simulate_multistage(
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            sample(uncertainty_samples),
+            [[9.0], [7.0], [4.000]],
+        )
         @test obj_val ≈ 359 rtol=1.0e-1
-        grad = Zygote.gradient(DecisionRules.simulate_multistage, det_equivalent, state_params_in, state_params_out, sample(uncertainty_samples), [[9.0], [7.], [4.0]])
+        grad = Zygote.gradient(
+            DecisionRules.simulate_multistage,
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            sample(uncertainty_samples),
+            [[9.0], [7.0], [4.0]],
+        )
         @test grad[5][1][1] ≈ -30.0 rtol=1.0e-1
         @test grad[5][3][1] ≈ 30.0 rtol=1.0e-1
 
         Random.seed!(222)
         uncertainty_sample = sample(uncertainty_samples)
-        
+
         # Policy input: [uncertainty, previous_state] = 1 + 1 = 2 dimensions
         m = Chain(Dense(2, 10), Dense(10, 1))
         obj_val_before = DecisionRules.simulate_multistage(
-            det_equivalent, state_params_in, state_params_out, 
-            initial_state, uncertainty_sample, 
-            m
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            initial_state,
+            uncertainty_sample,
+            m,
         )
 
-        train_multistage(m, initial_state, det_equivalent, state_params_in, state_params_out, uncertainty_samples, num_batches=200)
+        train_multistage(
+            m,
+            initial_state,
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            uncertainty_samples,
+            num_batches=200,
+        )
 
         obj_val_after = DecisionRules.simulate_multistage(
-            det_equivalent, state_params_in, state_params_out, 
-            initial_state, uncertainty_sample, 
-            m
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            initial_state,
+            uncertainty_sample,
+            m,
         )
 
         @test obj_val_after < obj_val_before
@@ -276,7 +399,7 @@ end
         optimize!(model1)
         @test termination_status(model1) == MOI.LOCALLY_SOLVED
         @test value(norm_deficit1) ≈ 3.0 rtol=1.0e-2  # L1 norm = |0.5| + |1.0| + |1.5| = 3.0
-        
+
         # Test 2: L2 squared norm only (sum of squares)
         model2 = quiet_ipopt_model()
         @variable(model2, x2)
@@ -296,7 +419,7 @@ end
         @test termination_status(model2) == MOI.LOCALLY_SOLVED
         # L2 squared = 0.5^2 + 1.0^2 + 1.5^2 = 3.5
         @test value(norm_deficit2) ≈ 3.5 rtol=1.0e-2
-        
+
         # Test 3: Both L1 and L2 squared norms
         model3 = quiet_ipopt_model()
         @variable(model3, x3)
@@ -304,7 +427,9 @@ end
         @variable(model3, target3[1:3])
         @objective(model3, Min, x3)
         fix(x3, 1.0)
-        norm_deficit3, _deficit3 = create_deficit!(model3, 3; penalty_l1=100.0, penalty_l2=50.0)
+        norm_deficit3, _deficit3 = create_deficit!(
+            model3, 3; penalty_l1=100.0, penalty_l2=50.0
+        )
         for i in 1:3
             @constraint(model3, _deficit3[i] == state3[i] - target3[i])
         end
@@ -317,7 +442,7 @@ end
         # Combined: 100 * 3.0 + 50 * 3.5 = 300 + 175 = 475
         expected_combined = 100.0 * 3.0 + 50.0 * 3.5
         @test value(norm_deficit3) ≈ expected_combined rtol=1.0e-2
-        
+
         # Test 4: Verify backward compatibility with legacy 'penalty' argument
         model4 = quiet_ipopt_model()
         @variable(model4, x4)
@@ -328,7 +453,7 @@ end
         # Should create L1 norm constraint (backwards compatible)
         optimize!(model4)
         @test termination_status(model4) == MOI.LOCALLY_SOLVED
-        
+
         # Test 5: Verify objective contribution with L1 norm
         model5 = quiet_ipopt_model()
         @variable(model5, y5 >= 0)
@@ -342,7 +467,7 @@ end
         @test value(norm_deficit5) ≈ 5.0 rtol=1.0e-2  # L1 = 2 + 3 = 5
         # Total objective = 10 * 1 + 100 * 5 = 510
         @test objective_value(model5) ≈ 510.0 rtol=1.0e-2
-        
+
         # Test 6: Verify objective contribution with L2 squared norm
         model6 = quiet_ipopt_model()
         @variable(model6, y6 >= 0)
@@ -360,9 +485,12 @@ end
 
     @testset "penalty schedule (annealing)" begin
         @testset "default_annealed_schedule" begin
-            @test default_annealed_schedule(24) == [(1, 2, 0.1), (3, 4, 1.0), (5, 8, 10.0), (9, 24, 30.0)]
-            @test default_annealed_schedule(20) == [(1, 2, 0.1), (3, 4, 1.0), (5, 7, 10.0), (8, 20, 30.0)]
-            @test default_annealed_schedule(4) == [(1, 1, 0.1), (2, 2, 1.0), (3, 3, 10.0), (4, 4, 30.0)]
+            @test default_annealed_schedule(24) ==
+                [(1, 2, 0.1), (3, 4, 1.0), (5, 8, 10.0), (9, 24, 30.0)]
+            @test default_annealed_schedule(20) ==
+                [(1, 2, 0.1), (3, 4, 1.0), (5, 7, 10.0), (8, 20, 30.0)]
+            @test default_annealed_schedule(4) ==
+                [(1, 1, 0.1), (2, 2, 1.0), (3, 3, 10.0), (4, 4, 30.0)]
             # Fewer batches than multipliers: keep the last multipliers, always end at 30x
             @test default_annealed_schedule(2) == [(1, 1, 10.0), (2, 2, 30.0)]
             @test default_annealed_schedule(1) == [(1, 1, 30.0)]
@@ -372,7 +500,7 @@ end
                 sched = default_annealed_schedule(n)
                 @test sched[1][1] == 1
                 @test sched[end][2] == n
-                @test all(sched[k+1][1] == sched[k][2] + 1 for k in 1:length(sched)-1)
+                @test all(sched[k + 1][1] == sched[k][2] + 1 for k in 1:(length(sched) - 1))
             end
         end
 
@@ -382,14 +510,27 @@ end
             @test DecisionRules._penalty_multiplier_for(sched, 4) == 30.0
             @test DecisionRules._penalty_multiplier_for(sched, 99) == 30.0  # past-end hold
             @test DecisionRules._resolve_penalty_schedule(nothing, 10) === nothing
-            @test DecisionRules._resolve_penalty_schedule(:default_annealed, 24) == default_annealed_schedule(24)
-            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(:not_a_schedule, 10)
+            @test DecisionRules._resolve_penalty_schedule(:default_annealed, 24) ==
+                default_annealed_schedule(24)
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(
+                :not_a_schedule, 10
+            )
             @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([], 10)                              # empty
-            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(2, 3, 1.0)], 10)                   # starts after 1
-            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(1, 2, 1.0), (4, 5, 2.0)], 10)      # gap
-            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(1, 3, 1.0), (3, 5, 2.0)], 10)      # overlap
-            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(1, 2, -1.0)], 10)                  # nonpositive
-            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule([(2, 1, 1.0)], 10)                   # lo > hi
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(
+                [(2, 3, 1.0)], 10
+            )                   # starts after 1
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(
+                [(1, 2, 1.0), (4, 5, 2.0)], 10
+            )      # gap
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(
+                [(1, 3, 1.0), (3, 5, 2.0)], 10
+            )      # overlap
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(
+                [(1, 2, -1.0)], 10
+            )                  # nonpositive
+            @test_throws ArgumentError DecisionRules._resolve_penalty_schedule(
+                [(2, 1, 1.0)], 10
+            )                   # lo > hi
         end
 
         @testset "deficit penalty scaling across create_deficit! modes" begin
@@ -410,7 +551,9 @@ end
             @variable(ml2, yl2 >= 0)
             @objective(ml2, Min, 10 * yl2)
             ndl2, _ = create_deficit!(ml2, 2; penalty_l2=100.0)
-            DecisionRules._apply_deficit_penalty_multiplier!(ml2, DecisionRules._deficit_penalty_bases(ml2), 0.5)
+            DecisionRules._apply_deficit_penalty_multiplier!(
+                ml2, DecisionRules._deficit_penalty_bases(ml2), 0.5
+            )
             @test coefficient(objective_function(ml2), ndl2) ≈ 50.0
 
             # Both-mode: penalties live in the linking constraint; the objective coefficient
@@ -429,89 +572,144 @@ end
             @variable(mnone, ynone >= 0)
             @objective(mnone, Min, ynone)
             @test_throws ArgumentError DecisionRules._check_deficit_penalty_bases(
-                DecisionRules._deficit_penalty_bases(mnone))
+                DecisionRules._deficit_penalty_bases(mnone)
+            )
         end
 
         @testset "train_multistage penalty_schedule end-to-end" begin
             # nothing (default) leaves coefficients untouched
-            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model())
+            sp1, si1, so1, sov1, u1 = build_subproblem(
+                10; subproblem=quiet_conic_ipopt_model()
+            )
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model()
+            )
             sps = [sp1, sp2]
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
             nd1 = variable_by_name(sp1, "norm_deficit")
             nd2 = variable_by_name(sp2, "norm_deficit")
             Random.seed!(222)
             m = Chain(Dense(2, 4), Dense(4, 1))
-            train_multistage(m, [5.0], sps, spi, spo, usamples; num_batches=2, num_train_per_batch=1)
+            train_multistage(
+                m, [5.0], sps, spi, spo, usamples; num_batches=2, num_train_per_batch=1
+            )
             @test coefficient(objective_function(sp1), nd1) ≈ 1.0e4
             @test coefficient(objective_function(sp2), nd2) ≈ 1.0e4
 
             # Explicit two-phase schedule crosses a boundary on DiffOpt models and the final
             # coefficients hold the last multiplier times the built base
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=4, num_train_per_batch=1,
-                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
+            train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=4,
+                num_train_per_batch=1,
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)],
+            )
             @test coefficient(objective_function(sp1), nd1) ≈ 3.0e4
             @test coefficient(objective_function(sp2), nd2) ≈ 3.0e4
         end
 
         @testset "deterministic-equivalent overload applies the schedule to the copies" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+            )
             sps = [sp1, sp2]
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
             det_equivalent, usamples = DecisionRules.deterministic_equivalent!(
-                quiet_nonlinear_ipopt_model(),
-                sps, spi, spo, [5.0], usamples)
-            nd_copies = [v for v in all_variables(det_equivalent) if occursin("norm_deficit", JuMP.name(v))]
+                quiet_nonlinear_ipopt_model(), sps, spi, spo, [5.0], usamples
+            )
+            nd_copies = [
+                v for
+                v in all_variables(det_equivalent) if occursin("norm_deficit", JuMP.name(v))
+            ]
             @test length(nd_copies) == 2  # one renamed copy per stage
-            @test all(coefficient(objective_function(det_equivalent), v) ≈ 1.0e4 for v in nd_copies)
+            @test all(
+                coefficient(objective_function(det_equivalent), v) ≈ 1.0e4 for
+                v in nd_copies
+            )
             Random.seed!(222)
             m = Chain(Dense(2, 10), Dense(10, 1))
-            train_multistage(m, [5.0], det_equivalent, spi, spo, usamples;
-                num_batches=4, num_train_per_batch=1,
-                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
-            @test all(coefficient(objective_function(det_equivalent), v) ≈ 3.0e4 for v in nd_copies)
+            train_multistage(
+                m,
+                [5.0],
+                det_equivalent,
+                spi,
+                spo,
+                usamples;
+                num_batches=4,
+                num_train_per_batch=1,
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)],
+            )
+            @test all(
+                coefficient(objective_function(det_equivalent), v) ≈ 3.0e4 for
+                v in nd_copies
+            )
         end
 
         @testset "train_multiple_shooting applies the schedule to the window models" begin
             sp, si, so, sov, u = build_subproblem(10)
-            spi = Vector{Vector{Any}}(undef, 1); spi .= [[si]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 1)
+            spi = Vector{Vector{Any}}(undef, 1);
+            spi .= [[si]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 1)
             spo .= [[(so, sov)]]
             usamples = [[(u, [2.0])]]
             windows = DecisionRules.setup_shooting_windows(
-                [sp], spi, spo, [5.0], usamples;
+                [sp],
+                spi,
+                spo,
+                [5.0],
+                usamples;
                 window_size=1,
-                model_factory=() -> quiet_conic_ipopt_model())
+                model_factory=() -> quiet_conic_ipopt_model(),
+            )
             wm = windows[1].model
-            nd_window = [v for v in all_variables(wm) if occursin("norm_deficit", JuMP.name(v))]
+            nd_window = [
+                v for v in all_variables(wm) if occursin("norm_deficit", JuMP.name(v))
+            ]
             @test length(nd_window) == 1
             @test coefficient(objective_function(wm), nd_window[1]) ≈ 1.0e4
             model = Dense(2, 1; bias=false)
             model.weight .= 0.5f0
-            DecisionRules.train_multiple_shooting(model, [5.0], windows, () -> usamples;
-                num_batches=4, num_train_per_batch=1, optimizer=Flux.Descent(0.0),
+            DecisionRules.train_multiple_shooting(
+                model,
+                [5.0],
+                windows,
+                () -> usamples;
+                num_batches=4,
+                num_train_per_batch=1,
+                optimizer=Flux.Descent(0.0),
                 record_loss=(iter, m, loss, tag) -> false,
-                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)],
+            )
             @test coefficient(objective_function(wm), nd_window[1]) ≈ 3.0e4
         end
     end
 
     @testset "sample logger and per-batch record" begin
         function build_two_stage()
-            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model())
+            sp1, si1, so1, sov1, u1 = build_subproblem(
+                10; subproblem=quiet_conic_ipopt_model()
+            )
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model()
+            )
             sps = [sp1, sp2]
             spi = Vector{Vector{Any}}(undef, 2)
             spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
             return sps, spi, spo, usamples
@@ -523,16 +721,31 @@ end
             m = Chain(Dense(2, 4), Dense(4, 1))
             recorded = []
             sl = SampleLog()
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=2, num_train_per_batch=2, sample_log=sl,
+            train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=2,
+                num_train_per_batch=2,
+                sample_log=sl,
                 record=(sample_log, iter, model) -> begin
-                    push!(recorded, (iter,
-                        copy(sample_log.objectives),
-                        copy(sample_log.objectives_no_deficit),
-                        sum(objective_value, sps) == sample_log.objectives[end],
-                        DecisionRules.get_objective_no_target_deficit(sps) == sample_log.objectives_no_deficit[end]))
+                    push!(
+                        recorded,
+                        (
+                            iter,
+                            copy(sample_log.objectives),
+                            copy(sample_log.objectives_no_deficit),
+                            sum(objective_value, sps) == sample_log.objectives[end],
+                            DecisionRules.get_objective_no_target_deficit(sps) ==
+                            sample_log.objectives_no_deficit[end],
+                        ),
+                    )
                     return false
-                end)
+                end,
+            )
             @test length(recorded) == 2
             for (iter, objs, objs_nd, obj_matches, nd_matches) in recorded
                 @test length(objs) == 2 && length(objs_nd) == 2   # cache cleared per batch
@@ -547,20 +760,33 @@ end
         @testset "deterministic-equivalent overload caches per sample" begin
             sps, spi, spo, usamples = build_two_stage()
             det_equivalent, usamples_det = DecisionRules.deterministic_equivalent!(
-                quiet_nonlinear_ipopt_model(),
-                sps, spi, spo, [5.0], usamples)
+                quiet_nonlinear_ipopt_model(), sps, spi, spo, [5.0], usamples
+            )
             Random.seed!(222)
             m = Chain(Dense(2, 10), Dense(10, 1))
             recorded = []
-            train_multistage(m, [5.0], det_equivalent, spi, spo, usamples_det;
-                num_batches=2, num_train_per_batch=2,
+            train_multistage(
+                m,
+                [5.0],
+                det_equivalent,
+                spi,
+                spo,
+                usamples_det;
+                num_batches=2,
+                num_train_per_batch=2,
                 record=(sample_log, iter, model) -> begin
-                    push!(recorded, (length(sample_log.objectives),
-                        sample_log.objectives[end] == objective_value(det_equivalent),
-                        sample_log.objectives_no_deficit[end] ==
-                            DecisionRules.get_objective_no_target_deficit(det_equivalent)))
+                    push!(
+                        recorded,
+                        (
+                            length(sample_log.objectives),
+                            sample_log.objectives[end] == objective_value(det_equivalent),
+                            sample_log.objectives_no_deficit[end] ==
+                            DecisionRules.get_objective_no_target_deficit(det_equivalent),
+                        ),
+                    )
                     return false
-                end)
+                end,
+            )
             @test length(recorded) == 2
             for (n, obj_matches, nd_matches) in recorded
                 @test n == 2          # cache cleared per batch
@@ -574,10 +800,22 @@ end
             Random.seed!(222)
             m = Chain(Dense(2, 4), Dense(4, 1))
             hook_calls = []
-            sl = SampleLog(on_sample=(s, models, log) -> push!(hook_calls, (s, termination_status(models[1]))))
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=1, num_train_per_batch=3, sample_log=sl,
-                record=(sample_log, iter, model) -> false)
+            sl = SampleLog(
+                on_sample=(s, models, log) ->
+                    push!(hook_calls, (s, termination_status(models[1]))),
+            )
+            train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=1,
+                num_train_per_batch=3,
+                sample_log=sl,
+                record=(sample_log, iter, model) -> false,
+            )
             @test [c[1] for c in hook_calls] == [1, 2, 3]
             @test all(c[2] == MOI.LOCALLY_SOLVED for c in hook_calls)
         end
@@ -587,12 +825,20 @@ end
             Random.seed!(222)
             m = Chain(Dense(2, 4), Dense(4, 1))
             batches_seen = Ref(0)
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=5, num_train_per_batch=1,
+            train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=5,
+                num_train_per_batch=1,
                 record=(sample_log, iter, model) -> begin
                     batches_seen[] += 1
                     return true
-                end)
+                end,
+            )
             @test batches_seen[] == 1
         end
 
@@ -601,26 +847,55 @@ end
             Random.seed!(222)
             m = Chain(Dense(2, 4), Dense(4, 1))
             calls = []
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=2, num_train_per_batch=1,
+            train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=2,
+                num_train_per_batch=1,
                 record_loss=(iter, model, loss, tag) -> begin
                     push!(calls, tag)
                     return false
-                end)
-            @test calls == ["metrics/loss", "metrics/training_loss", "metrics/loss", "metrics/training_loss"]
+                end,
+            )
+            @test calls == [
+                "metrics/loss",
+                "metrics/training_loss",
+                "metrics/loss",
+                "metrics/training_loss",
+            ]
             # a stop requested on the first call short-circuits the second, as historically
             calls2 = []
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=3, num_train_per_batch=1,
+            train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=3,
+                num_train_per_batch=1,
                 record_loss=(iter, model, loss, tag) -> begin
                     push!(calls2, tag)
                     return true
-                end)
+                end,
+            )
             @test calls2 == ["metrics/loss"]
-            @test_throws ArgumentError train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=1, num_train_per_batch=1,
+            @test_throws ArgumentError train_multistage(
+                m,
+                [5.0],
+                sps,
+                spi,
+                spo,
+                usamples;
+                num_batches=1,
+                num_train_per_batch=1,
                 record=(sample_log, iter, model) -> false,
-                record_loss=(iter, model, loss, tag) -> false)
+                record_loss=(iter, model, loss, tag) -> false,
+            )
         end
 
         @testset "RolloutEvaluation on a fixed scenario set" begin
@@ -637,11 +912,39 @@ end
             @test rollout_eval(1, reachable_policy) === nothing
             @test isfinite(rollout_eval.last_objective_no_deficit)
             @test abs(rollout_eval.last_violation_share) < 1.0e-4
+
+            seen_realized = Vector{Vector{Float64}}()
+            realized_feedback_policy = x -> begin
+                push!(seen_realized, Float64.(x))
+                return [10.0]
+            end
+            realized_eval = RolloutEvaluation(
+                sps, spi, spo, [5.0], scenarios[1:1]; stride=1, policy_state=:realized
+            )
+            realized_eval(1, realized_feedback_policy)
+            @test length(seen_realized) == 2
+            @test seen_realized[2][2] != 10.0
+
+            seen_target = Vector{Vector{Float64}}()
+            target_feedback_policy = x -> begin
+                push!(seen_target, Float64.(x))
+                return [10.0]
+            end
+            target_eval = RolloutEvaluation(
+                sps, spi, spo, [5.0], scenarios[1:1]; stride=1, policy_state=:target
+            )
+            target_eval(1, target_feedback_policy)
+            @test length(seen_target) == 2
+            @test seen_target[2][2] == 10.0
+
             # stride: no evaluation on off-stride batches
             rollout_eval2 = RolloutEvaluation(sps, spi, spo, [5.0], scenarios; stride=2)
             rollout_eval2(1, reachable_policy)
             @test isnan(rollout_eval2.last_objective_no_deficit)
             @test_throws ArgumentError RolloutEvaluation(sps, spi, spo, [5.0], []; stride=1)
+            @test_throws ArgumentError RolloutEvaluation(
+                sps, spi, spo, [5.0], scenarios; policy_state=:not_a_mode
+            )
             @test isnan(DecisionRules._target_violation_share(0.0, 0.0))
             @test DecisionRules._target_violation_share(200.0, 150.0) ≈ 0.25
         end
@@ -653,19 +956,25 @@ end
         n_state = 3
         n_output = 3
         layers = [8, 8]
-        
-        policy = state_conditioned_policy(n_uncertainty, n_state, n_output, layers; 
-                                          activation=sigmoid, encoder_type=Flux.LSTM)
-        
+
+        policy = state_conditioned_policy(
+            n_uncertainty,
+            n_state,
+            n_output,
+            layers;
+            activation=sigmoid,
+            encoder_type=Flux.LSTM,
+        )
+
         @test policy.n_uncertainty == n_uncertainty
         @test policy.n_state == n_state
-        
+
         # Test forward pass
         Flux.reset!(policy)
         input = rand(Float32, n_uncertainty + n_state)
         output = policy(input)
         @test length(output) == n_output
-        
+
         # Test sequential calls (recurrent behavior)
         Flux.reset!(policy)
         prev_state = rand(Float32, n_state)
@@ -702,30 +1011,37 @@ end
             end
             return total
         end
-        
+
         loss, grads = Flux.withgradient(policy) do m
-            test_loss(m, n_uncertainty, n_state)
+            return test_loss(m, n_uncertainty, n_state)
         end
-        
+
         @test loss > 0
         @test grads[1] !== nothing
         @test grads[1].encoder !== nothing
         @test grads[1].combiner !== nothing
-        
+
         # Test Flux.update! works (this was the original bug)
         opt_state = Flux.setup(Flux.Adam(0.01), policy)
         Flux.update!(opt_state, policy, grads[1])
-        
+
         # Test single layer encoder
-        policy_single = state_conditioned_policy(n_uncertainty, n_state, n_output, [8]; 
-                                                  activation=relu, encoder_type=Flux.LSTM)
+        policy_single = state_conditioned_policy(
+            n_uncertainty, n_state, n_output, [8]; activation=relu, encoder_type=Flux.LSTM
+        )
         Flux.reset!(policy_single)
         output_single = policy_single(rand(Float32, n_uncertainty + n_state))
         @test length(output_single) == n_output
-        
+
         # Test empty layers (edge case)
-        policy_empty = state_conditioned_policy(n_uncertainty, n_state, n_output, Int[];
-                                                 activation=Base.identity, encoder_type=Flux.LSTM)
+        policy_empty = state_conditioned_policy(
+            n_uncertainty,
+            n_state,
+            n_output,
+            Int[];
+            activation=Base.identity,
+            encoder_type=Flux.LSTM,
+        )
         Flux.reset!(policy_empty)
         output_empty = policy_empty(rand(Float32, n_uncertainty + n_state))
         @test length(output_empty) == n_output
@@ -734,8 +1050,14 @@ end
         # (solver feeds Float64 into a Float32 LSTM; without _state_eltype cast the
         # recurrent state drifts to Float64 and triggers a Zygote codegen bug)
         @testset "Float64 input regression" begin
-            policy_f64 = state_conditioned_policy(n_uncertainty, n_state, n_output, [8];
-                activation=sigmoid, encoder_type=Flux.LSTM)
+            policy_f64 = state_conditioned_policy(
+                n_uncertainty,
+                n_state,
+                n_output,
+                [8];
+                activation=sigmoid,
+                encoder_type=Flux.LSTM,
+            )
 
             Flux.reset!(policy_f64)
             input_f64 = rand(Float64, n_uncertainty + n_state)
@@ -757,7 +1079,7 @@ end
             end
 
             loss_val, grads_f64 = Flux.withgradient(policy_f64) do m
-                f64_loss(m)
+                return f64_loss(m)
             end
             @test isfinite(loss_val)
             @test grads_f64[1] !== nothing
@@ -772,14 +1094,16 @@ end
         # Test setup_shooting_windows
         @testset "setup_shooting_windows" begin
             Random.seed!(456)
-            
+
             # Create 6 subproblems to test windowing with multiple windows
             num_stages = 6
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
-            
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
+
             for t in 1:num_stages
                 subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:3] >= 0)
@@ -792,15 +1116,15 @@ end
                 @constraint(subproblems[t], state_out_var >= state_out - 3.0)
                 @constraint(subproblems[t], state_out_var <= state_out + 3.0)
                 @objective(subproblems[t], Min, sum(x) + 5 * (state_out - state_out_var)^2)
-                
+
                 state_params_in[t] = [state_in]
                 state_params_out[t] = [(state_out, state_out_var)]
                 uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.3, 0.5, 0.7])]
             end
-            
+
             initial_state = [2.0]
             window_size = 2
-            
+
             # Test setup_shooting_windows
             windows = DecisionRules.setup_shooting_windows(
                 subproblems,
@@ -809,23 +1133,25 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=window_size,
-                model_factory=() -> quiet_nonlinear_ipopt_model()
+                model_factory=() -> quiet_nonlinear_ipopt_model(),
             )
-            
+
             @test length(windows) == 3  # 6 stages / 2 window_size = 3 windows
-            
+
             # Verify each window
             for (w, window) in enumerate(windows)
                 @test window.model !== nothing
-                @test window.stage_range == ((w-1)*window_size + 1):min(w*window_size, num_stages)
+                @test window.stage_range ==
+                    ((w - 1) * window_size + 1):min(w * window_size, num_stages)
                 @test length(window.state_out_params) == length(window.stage_range)
                 @test length(window.uncertainty_params) == length(window.stage_range)
-                
+
                 # Verify we can solve the window model
                 optimize!(window.model)
-                @test termination_status(window.model) in [MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED]
+                @test termination_status(window.model) in
+                    [MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED]
             end
-            
+
             # Test with odd window size that doesn't divide evenly
             windows_odd = DecisionRules.setup_shooting_windows(
                 subproblems,
@@ -834,24 +1160,26 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=4,  # 6 stages / 4 = 2 windows, last window has 2 stages
-                model_factory=() -> quiet_nonlinear_ipopt_model()
+                model_factory=() -> quiet_nonlinear_ipopt_model(),
             )
-            
+
             @test length(windows_odd) == 2
             @test windows_odd[1].stage_range == 1:4
             @test windows_odd[2].stage_range == 5:6
         end
-        
+
         # Test predict_window_targets
         @testset "predict_window_targets" begin
             # Simple decision rule that adds uncertainty to state
             simple_rule(x) = x[1:1] .+ x[2:2]  # state + uncertainty (uncertainty first, then state)
-            
+
             initial_state = Float32[0.0]
             uncertainties = [Float32[1.0], Float32[2.0], Float32[3.0]]
-            
-            targets = DecisionRules.predict_window_targets(simple_rule, initial_state, uncertainties)
-            
+
+            targets = DecisionRules.predict_window_targets(
+                simple_rule, initial_state, uncertainties
+            )
+
             # targets[1] = simple_rule([1, 0]) = [1]  (first uncertainty + initial state)
             # targets[2] = simple_rule([2, 1]) = [3]  (second uncertainty + targets[1])
             # targets[3] = simple_rule([3, 3]) = [6]  (third uncertainty + targets[2])
@@ -860,35 +1188,39 @@ end
             @test targets[2] ≈ [3.0f0]
             @test targets[3] ≈ [6.0f0]
         end
-        
+
         # Test gradients flow through predict_window_targets
         @testset "predict_window_targets gradients" begin
             # Use a simple neural network
             m = Chain(Dense(2, 1, identity))
-            
+
             initial_state = Float32[1.0]
             uncertainties = [Float32[0.5], Float32[0.3]]
-            
+
             loss, grads = Flux.withgradient(m) do model
-                targets = DecisionRules.predict_window_targets(model, initial_state, uncertainties)
-                sum(sum.(targets))  # Simple loss to get gradients
+                targets = DecisionRules.predict_window_targets(
+                    model, initial_state, uncertainties
+                )
+                return sum(sum.(targets))  # Simple loss to get gradients
             end
-            
+
             @test loss != 0  # Should have some value
             @test grads[1] !== nothing
         end
-        
+
         # Test solve_window
         @testset "solve_window" begin
             Random.seed!(789)
-            
+
             # Create a simple 2-stage window model
             num_stages = 2
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
-            
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
+
             for t in 1:num_stages
                 subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
@@ -901,14 +1233,14 @@ end
                 @constraint(subproblems[t], state_out_var >= state_out - 5.0)
                 @constraint(subproblems[t], state_out_var <= state_out + 5.0)
                 @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
-                
+
                 state_params_in[t] = [state_in]
                 state_params_out[t] = [(state_out, state_out_var)]
                 uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.2, 0.4, 0.6])]
             end
-            
+
             initial_state = [1.5]
-            
+
             # Setup windows
             windows = DecisionRules.setup_shooting_windows(
                 subproblems,
@@ -917,40 +1249,32 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> quiet_nonlinear_ipopt_model()
+                model_factory=() -> quiet_nonlinear_ipopt_model(),
             )
-            
+
             @test length(windows) == 1  # Only one window for 2 stages with window_size=2
-            
+
             window = windows[1]
-            
+
             # Set uncertainty values
             for t in 1:num_stages
                 for param in window.uncertainty_params[t]
                     set_parameter_value(param, 0.4)
                 end
             end
-            
+
             s_in = Float32[1.5]
             targets = [Float32[1.2], Float32[1.0]]  # Two targets for 2 stages
-            
+
             # Solve window
             obj = DecisionRules.solve_window(
-                window.model,
-                window.state_in_params,
-                window.state_out_params,
-                s_in,
-                targets
+                window.model, window.state_in_params, window.state_out_params, s_in, targets
             )
 
             s_out = DecisionRules.get_last_realized_state(
-                window.model,
-                window.state_in_params,
-                window.state_out_params,
-                s_in,
-                targets
+                window.model, window.state_in_params, window.state_out_params, s_in, targets
             )
-            
+
             @test obj > 0
             @test length(s_out) == 1  # State dimension is 1
             @test !isnan(s_out[1])
@@ -960,8 +1284,10 @@ end
             num_stages = 1
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
 
             subproblems[1] = quiet_diffopt_ipopt_model()
             @variable(subproblems[1], x)
@@ -987,7 +1313,7 @@ end
                 [1.0],
                 uncertainty_samples;
                 window_size=1,
-                model_factory=() -> quiet_conic_ipopt_model()
+                model_factory=() -> quiet_conic_ipopt_model(),
             )
 
             window = windows[1]
@@ -1003,21 +1329,23 @@ end
                 window.state_in_params,
                 window.state_out_params,
                 Float32[1.0],
-                [target_val]
+                [target_val],
             )
             @test isfinite(obj)
         end
-        
+
         # Test solve_window gradients
         @testset "solve_window gradients" begin
             Random.seed!(321)
-            
+
             num_stages = 2
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
-            
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
+
             for t in 1:num_stages
                 subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
@@ -1030,14 +1358,14 @@ end
                 @constraint(subproblems[t], state_out_var >= state_out - 5.0)
                 @constraint(subproblems[t], state_out_var <= state_out + 5.0)
                 @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
-                
+
                 state_params_in[t] = [state_in]
                 state_params_out[t] = [(state_out, state_out_var)]
                 uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.3, 0.5, 0.7])]
             end
-            
+
             initial_state = [1.5]
-            
+
             windows = DecisionRules.setup_shooting_windows(
                 subproblems,
                 state_params_in,
@@ -1045,50 +1373,54 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> quiet_nonlinear_ipopt_model()
+                model_factory=() -> quiet_nonlinear_ipopt_model(),
             )
-            
+
             window = windows[1]
-            
+
             # Set uncertainty values
             for t in 1:num_stages
                 for param in window.uncertainty_params[t]
                     set_parameter_value(param, 0.4)
                 end
             end
-            
+
             # Test gradients using a neural network
             nn = Chain(Dense(2, 4, relu), Dense(4, 1))
-            
+
             s_in = Float32[1.5]
             uncertainties_vec = [Float32[0.4], Float32[0.4]]
-            
+
             loss, grads = Flux.withgradient(nn) do model
-                targets = DecisionRules.predict_window_targets(model, s_in, uncertainties_vec)
+                targets = DecisionRules.predict_window_targets(
+                    model, s_in, uncertainties_vec
+                )
                 obj = DecisionRules.solve_window(
                     window.model,
                     window.state_in_params,
                     window.state_out_params,
                     s_in,
-                    targets
+                    targets,
                 )
                 return Float32(obj)
             end
-            
+
             @test loss > 0
             @test grads[1] !== nothing  # Gradients should flow
         end
-        
+
         # Test full multiple shooting simulation
         @testset "simulate_multiple_shooting" begin
             Random.seed!(111)
-            
+
             num_stages = 4
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
-            
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
+
             for t in 1:num_stages
                 subproblems[t] = quiet_diffopt_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
@@ -1101,14 +1433,14 @@ end
                 @constraint(subproblems[t], state_out_var >= state_out - 5.0)
                 @constraint(subproblems[t], state_out_var <= state_out + 5.0)
                 @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
-                
+
                 state_params_in[t] = [state_in]
                 state_params_out[t] = [(state_out, state_out_var)]
                 uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.3, 0.5, 0.7])]
             end
-            
+
             initial_state = [1.5]
-            
+
             # Setup windows (2 windows of 2 stages each)
             windows = DecisionRules.setup_shooting_windows(
                 subproblems,
@@ -1117,22 +1449,25 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> quiet_nonlinear_ipopt_model()
+                model_factory=() -> quiet_nonlinear_ipopt_model(),
             )
-            
+
             @test length(windows) == 2
-            
+
             # Sample uncertainties
-            uncertainty_sample = [[[(windows[w].uncertainty_params[t][1], 0.4)] 
-                for t in 1:length(windows[w].stage_range)] 
-                for w in 1:length(windows)]
+            uncertainty_sample = [
+                [
+                    [(windows[w].uncertainty_params[t][1], 0.4)] for
+                    t in 1:length(windows[w].stage_range)
+                ] for w in 1:length(windows)
+            ]
             # Flatten to per-stage format
             flat_uncertainty_sample = vcat(uncertainty_sample...)
             uncertainties_vec = [Float32[0.4] for _ in 1:num_stages]
-            
+
             # Simple decision rule
             simple_rule(x) = x[2:2] .+ 0.1f0  # state_out = state + 0.1
-            
+
             # Manually set uncertainty values in windows
             for (w, window) in enumerate(windows)
                 for t in 1:length(window.stage_range)
@@ -1141,29 +1476,31 @@ end
                     end
                 end
             end
-            
+
             # Simulate
             total_obj = DecisionRules.simulate_multiple_shooting(
                 windows,
                 simple_rule,
                 Float32.(initial_state),
                 flat_uncertainty_sample,
-                uncertainties_vec
+                uncertainties_vec,
             )
-            
+
             @test total_obj > 0
         end
-        
+
         # Test gradients flow across windows in simulate_multiple_shooting
         @testset "simulate_multiple_shooting gradients" begin
             Random.seed!(222)
-            
+
             num_stages = 4
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
-            
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
+
             for t in 1:num_stages
                 subproblems[t] = quiet_nonlinear_ipopt_model()
                 @variable(subproblems[t], x[1:4] >= 0)
@@ -1176,14 +1513,14 @@ end
                 @constraint(subproblems[t], state_out_var >= state_out - 5.0)
                 @constraint(subproblems[t], state_out_var <= state_out + 5.0)
                 @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
-                
+
                 state_params_in[t] = [state_in]
                 state_params_out[t] = [(state_out, state_out_var)]
                 uncertainty_samples[t] = [(subproblems[t][:uncertainty], [0.3, 0.5, 0.7])]
             end
-            
+
             initial_state = [1.5]
-            
+
             windows = DecisionRules.setup_shooting_windows(
                 subproblems,
                 state_params_in,
@@ -1191,9 +1528,9 @@ end
                 initial_state,
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> quiet_nonlinear_ipopt_model()
+                model_factory=() -> quiet_nonlinear_ipopt_model(),
             )
-            
+
             # Set uncertainty values
             for window in windows
                 for t in 1:length(window.stage_range)
@@ -1202,23 +1539,26 @@ end
                     end
                 end
             end
-            
-            flat_uncertainty_sample = [[(windows[ceil(Int, t/2)].uncertainty_params[mod1(t, 2)][1], 0.4)] for t in 1:num_stages]
+
+            flat_uncertainty_sample = [
+                [(windows[ceil(Int, t / 2)].uncertainty_params[mod1(t, 2)][1], 0.4)] for
+                t in 1:num_stages
+            ]
             uncertainties_vec = [Float32[0.4] for _ in 1:num_stages]
-            
+
             # Use neural network
             nn = Chain(Dense(2, 4, relu), Dense(4, 1))
-            
+
             loss, grads = Flux.withgradient(nn) do model
-                DecisionRules.simulate_multiple_shooting(
+                return DecisionRules.simulate_multiple_shooting(
                     windows,
                     model,
                     Float32.(initial_state),
                     flat_uncertainty_sample,
-                    uncertainties_vec
+                    uncertainties_vec,
                 )
             end
-            
+
             @test loss > 0
             @test grads[1] !== nothing  # Gradients should flow across windows
         end
@@ -1227,8 +1567,10 @@ end
             num_stages = 2
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
 
             for t in 1:num_stages
                 subproblems[t] = quiet_diffopt_ipopt_model()
@@ -1255,21 +1597,23 @@ end
                 Float64.(initial_state),
                 uncertainty_samples;
                 window_size=2,
-                model_factory=() -> quiet_conic_ipopt_model()
+                model_factory=() -> quiet_conic_ipopt_model(),
             )
 
             # Policy expects flat [u1, u2, state] input
             decision_rule(x) = [x[3] + x[1] + x[2]]
 
             uncertainty_sample = DecisionRules.sample(uncertainty_samples)
-            uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample]
+            uncertainties_vec = [
+                [Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample
+            ]
 
             obj = DecisionRules.simulate_multiple_shooting(
                 windows,
                 decision_rule,
                 Float32.(initial_state),
                 uncertainty_sample,
-                uncertainties_vec
+                uncertainties_vec,
             )
 
             @test obj > 0
@@ -1279,8 +1623,10 @@ end
             num_stages = 1
             subproblems = Vector{JuMP.Model}(undef, num_stages)
             state_params_in = Vector{Vector{Any}}(undef, num_stages)
-            state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-            uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+            state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+            uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                undef, num_stages
+            )
 
             subproblems[1] = quiet_diffopt_ipopt_model()
             @variable(subproblems[1], x)
@@ -1331,8 +1677,10 @@ end
             function build_consistent_subproblems(num_stages)
                 subproblems = Vector{JuMP.Model}(undef, num_stages)
                 state_params_in = Vector{Vector{Any}}(undef, num_stages)
-                state_params_out = Vector{Vector{Tuple{Any, VariableRef}}}(undef, num_stages)
-                uncertainty_samples = Vector{Vector{Tuple{VariableRef, Vector{Float64}}}}(undef, num_stages)
+                state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+                uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+                    undef, num_stages
+                )
 
                 for t in 1:num_stages
                     subproblems[t] = quiet_diffopt_ipopt_model()
@@ -1341,15 +1689,23 @@ end
                     @variable(subproblems[t], inflow)
                     @variable(subproblems[t], deficit >= 0)
                     @variable(subproblems[t], release >= 0)
-                    @constraint(subproblems[t], reservoir_out == reservoir_in + inflow - release)
+                    @constraint(
+                        subproblems[t], reservoir_out == reservoir_in + inflow - release
+                    )
                     @constraint(subproblems[t], reservoir_out >= 0)
-                    @objective(subproblems[t], Min, release + 0.1 * reservoir_out + 100.0 * deficit)
+                    @objective(
+                        subproblems[t], Min, release + 0.1 * reservoir_out + 100.0 * deficit
+                    )
 
-                    state_in_param = DecisionRules.variable_to_parameter(subproblems[t], reservoir_in)
+                    state_in_param = DecisionRules.variable_to_parameter(
+                        subproblems[t], reservoir_in
+                    )
                     state_out_param, realized_out = DecisionRules.variable_to_parameter(
                         subproblems[t], reservoir_out; deficit=deficit
                     )
-                    inflow_param = DecisionRules.variable_to_parameter(subproblems[t], inflow)
+                    inflow_param = DecisionRules.variable_to_parameter(
+                        subproblems[t], inflow
+                    )
 
                     state_params_in[t] = [state_in_param]
                     state_params_out[t] = [(state_out_param, realized_out)]
@@ -1365,14 +1721,17 @@ end
             decision_rule(x) = [x[2] + 0.5 * x[1]]  # next_state = prev_state + 0.5*uncertainty
 
             # Per-stage simulation
-            subproblems_s, state_in_s, state_out_s, uncertainty_samples_s =
-                build_consistent_subproblems(num_stages)
+            subproblems_s, state_in_s, state_out_s, uncertainty_samples_s = build_consistent_subproblems(
+                num_stages
+            )
             # Use a single draw of uncertainty values across all three methods
             Random.seed!(1234)
             base_sample = DecisionRules.sample(uncertainty_samples_s)
             base_values = [[u[2] for u in stage_u] for stage_u in base_sample]
-            uncertainties_s = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
-                               for (t, stage_u) in enumerate(uncertainty_samples_s)]
+            uncertainties_s = [
+                [(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)] for
+                (t, stage_u) in enumerate(uncertainty_samples_s)
+            ]
             obj_stage = DecisionRules.simulate_multistage(
                 subproblems_s,
                 state_in_s,
@@ -1391,8 +1750,9 @@ end
             end
 
             # Deterministic equivalent
-            subproblems_d, state_in_d, state_out_d, uncertainty_samples_d =
-                build_consistent_subproblems(num_stages)
+            subproblems_d, state_in_d, state_out_d, uncertainty_samples_d = build_consistent_subproblems(
+                num_stages
+            )
             det_model = JuMP.Model(quiet_ipopt_optimizer())
             det_model, uncertainty_samples_d = DecisionRules.deterministic_equivalent!(
                 det_model,
@@ -1402,10 +1762,16 @@ end
                 Float64.(initial_state),
                 uncertainty_samples_d,
             )
-            uncertainties_d = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
-                               for (t, stage_u) in enumerate(uncertainty_samples_d)]
-            states_policy = DecisionRules.simulate_states(initial_state, uncertainties_d, decision_rule)
-            obj_det = DecisionRules.simulate_multistage(det_model, state_in_d, state_out_d, uncertainties_d, states_policy)
+            uncertainties_d = [
+                [(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)] for
+                (t, stage_u) in enumerate(uncertainty_samples_d)
+            ]
+            states_policy = DecisionRules.simulate_states(
+                initial_state, uncertainties_d, decision_rule
+            )
+            obj_det = DecisionRules.simulate_multistage(
+                det_model, state_in_d, state_out_d, uncertainties_d, states_policy
+            )
 
             states_det = Vector{Vector{Float64}}(undef, num_stages + 1)
             states_det[1] = initial_state
@@ -1417,8 +1783,9 @@ end
             end
 
             # Multiple shooting
-            subproblems_w, state_in_w, state_out_w, uncertainty_samples_w =
-                build_consistent_subproblems(num_stages)
+            subproblems_w, state_in_w, state_out_w, uncertainty_samples_w = build_consistent_subproblems(
+                num_stages
+            )
             windows = DecisionRules.setup_shooting_windows(
                 subproblems_w,
                 state_in_w,
@@ -1437,16 +1804,20 @@ end
             expected_windows = stage_var_count - (num_stages - length(windows)) * state_dim
             @test det_var_count == expected_det
             @test windows_var_count == expected_windows
-            uncertainties_w = [[(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)]
-                               for (t, stage_u) in enumerate(uncertainty_samples_w)]
-            uncertainties_vec = [[Float32(u[2]) for u in stage_u] for stage_u in uncertainties_w]
+            uncertainties_w = [
+                [(stage_u[i][1], base_values[t][i]) for i in eachindex(stage_u)] for
+                (t, stage_u) in enumerate(uncertainty_samples_w)
+            ]
+            uncertainties_vec = [
+                [Float32(u[2]) for u in stage_u] for stage_u in uncertainties_w
+            ]
 
             obj_shoot = DecisionRules.simulate_multiple_shooting(
                 windows,
                 decision_rule,
                 Float32.(initial_state),
                 uncertainties_w,
-                uncertainties_vec
+                uncertainties_vec,
             )
 
             states_shoot = Vector{Vector{Float64}}()
@@ -1457,9 +1828,7 @@ end
                 window_range = window.stage_range
                 window_uncertainties_vec = uncertainties_vec[window_range]
                 targets = DecisionRules.predict_window_targets(
-                    decision_rule,
-                    current_state,
-                    window_uncertainties_vec,
+                    decision_rule, current_state, window_uncertainties_vec
                 )
                 DecisionRules.set_window_uncertainties!(window, uncertainties_w)
                 DecisionRules.solve_window(
@@ -1481,7 +1850,7 @@ end
             @test length(states_stage) == length(states_det) == length(states_shoot)
             for t in 1:length(states_stage)
                 @test states_stage[t][1] ≈ states_det[t][1] rtol=1.0e-4
-                @test states_stage[t][1] ≈ states_shoot[t][1] rtol=1.0e-4   
+                @test states_stage[t][1] ≈ states_shoot[t][1] rtol=1.0e-4
             end
 
             @test obj_stage ≈ obj_det rtol=1.0e-4
@@ -1641,11 +2010,15 @@ end
 
     @testset "get_objective_no_target_deficit (vector)" begin
         sp1 = build_subproblem(10; subproblem=quiet_conic_ipopt_model())[1]
-        sp2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model())[1]
+        sp2 = build_subproblem(
+            10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_conic_ipopt_model()
+        )[1]
         optimize!(sp1)
         optimize!(sp2)
         total = DecisionRules.get_objective_no_target_deficit([sp1, sp2])
-        indiv = DecisionRules.get_objective_no_target_deficit(sp1) + DecisionRules.get_objective_no_target_deficit(sp2)
+        indiv =
+            DecisionRules.get_objective_no_target_deficit(sp1) +
+            DecisionRules.get_objective_no_target_deficit(sp2)
         @test total ≈ indiv
     end
 
@@ -1708,9 +2081,11 @@ end
             sp, si, so, sov, u = build_subproblem(10; subproblem=Model(MadNLP.Optimizer))
             set_optimizer_attribute(sp, "print_level", MadNLP.ERROR)
             state_param_in = Vector{Any}([si])
-            state_param_out = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            state_param_out = Vector{Tuple{Any,VariableRef}}([(so, sov)])
             uncertainty_sample = [(u, 2.0)]
-            obj = DecisionRules.simulate_stage(sp, state_param_in, state_param_out, uncertainty_sample, [5.0], [4.0])
+            obj = DecisionRules.simulate_stage(
+                sp, state_param_in, state_param_out, uncertainty_sample, [5.0], [4.0]
+            )
             @test obj ≈ 210 rtol=0.1
         end
 
@@ -1730,68 +2105,102 @@ end
 
         @testset "deterministic_equivalent with MadNLP" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+            )
             sps = [sp1, sp2]
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
 
             det_eq = Model(MadNLP.Optimizer)
             set_optimizer_attribute(det_eq, "print_level", MadNLP.ERROR)
             det_eq, usamples = DecisionRules.deterministic_equivalent!(
-                det_eq, sps, spi, spo, [5.0], usamples)
+                det_eq, sps, spi, spo, [5.0], usamples
+            )
 
-            obj_val = DecisionRules.simulate_multistage(det_eq, spi, spo,
-                sample(usamples), [[9.0], [7.], [4.0]])
+            obj_val = DecisionRules.simulate_multistage(
+                det_eq, spi, spo, sample(usamples), [[9.0], [7.0], [4.0]]
+            )
             @test obj_val ≈ 359 rtol=0.1
         end
 
         @testset "train_multistage (subproblems) with MadNLP" begin
-            madnlp_diff_model = () -> DiffOpt.conic_diff_model(
-                optimizer_with_attributes(MadNLP.Optimizer, "print_level" => MadNLP.ERROR)
-            )
+            madnlp_diff_model =
+                () -> DiffOpt.conic_diff_model(
+                    optimizer_with_attributes(
+                        MadNLP.Optimizer, "print_level" => MadNLP.ERROR
+                    ),
+                )
             sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=madnlp_diff_model())
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=madnlp_diff_model())
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=1.0, state_out_val=9.0, subproblem=madnlp_diff_model()
+            )
             sps = [sp1, sp2]
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
 
             Random.seed!(222)
             m = Chain(Dense(2, 4), Dense(4, 1))
             obj_before = DecisionRules.simulate_multistage(
-                sps, spi, spo, [5.0], sample(usamples), m)
-            train_multistage(m, [5.0], sps, spi, spo, usamples;
-                num_batches=3, num_train_per_batch=1)
+                sps, spi, spo, [5.0], sample(usamples), m
+            )
+            train_multistage(
+                m, [5.0], sps, spi, spo, usamples; num_batches=3, num_train_per_batch=1
+            )
             obj_after = DecisionRules.simulate_multistage(
-                sps, spi, spo, [5.0], sample(usamples), m)
+                sps, spi, spo, [5.0], sample(usamples), m
+            )
             @test obj_after <= obj_before + 50.0  # some tolerance for stochastic training
         end
 
         @testset "get_next_state rrule with MadNLP through DiffOpt" begin
-            sp, si, so, sov, u = build_subproblem(10; subproblem=DiffOpt.conic_diff_model(
-                optimizer_with_attributes(MadNLP.Optimizer, "print_level" => MadNLP.ERROR)
-            ))
+            sp, si, so, sov, u = build_subproblem(
+                10;
+                subproblem=DiffOpt.conic_diff_model(
+                    optimizer_with_attributes(
+                        MadNLP.Optimizer, "print_level" => MadNLP.ERROR
+                    ),
+                ),
+            )
             state_param_in = Vector{Any}([si])
-            state_param_out = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            state_param_out = Vector{Tuple{Any,VariableRef}}([(so, sov)])
             uncertainty_sample = [(u, 2.0)]
             state_in_val = [5.0]
             state_out_val = [4.0]
-            DecisionRules.simulate_stage(sp, state_param_in, state_param_out,
-                uncertainty_sample, state_in_val, state_out_val)
-            jac = Zygote.jacobian(DecisionRules.get_next_state, sp,
-                state_param_in, state_param_out, state_in_val, state_out_val)
+            DecisionRules.simulate_stage(
+                sp,
+                state_param_in,
+                state_param_out,
+                uncertainty_sample,
+                state_in_val,
+                state_out_val,
+            )
+            jac = Zygote.jacobian(
+                DecisionRules.get_next_state,
+                sp,
+                state_param_in,
+                state_param_out,
+                state_in_val,
+                state_out_val,
+            )
             @test jac[4][1] ≈ 0.0 atol=1.0e-4
             @test jac[5][1] ≈ 1.0 rtol=1.0e-1
         end
 
         @testset "train_multistage (det_eq) with MadNLP and penalty_schedule" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+            )
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
 
@@ -1799,22 +2208,36 @@ end
             set_optimizer_attribute(det_eq, "print_level", MadNLP.ERROR)
             set_optimizer_attribute(det_eq, "tol", 1e-6)
             det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
-                det_eq, [sp1, sp2], spi, spo, [5.0], usamples)
+                det_eq, [sp1, sp2], spi, spo, [5.0], usamples
+            )
 
             Random.seed!(222)
             m = Chain(Dense(2, 10), Dense(10, 1))
-            train_multistage(m, [5.0], det_eq, spi, spo, usamples_det;
-                num_batches=4, num_train_per_batch=1,
-                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)])
-            nd_copies = [v for v in all_variables(det_eq) if occursin("norm_deficit", JuMP.name(v))]
+            train_multistage(
+                m,
+                [5.0],
+                det_eq,
+                spi,
+                spo,
+                usamples_det;
+                num_batches=4,
+                num_train_per_batch=1,
+                penalty_schedule=[(1, 2, 1.0), (3, 4, 3.0)],
+            )
+            nd_copies = [
+                v for v in all_variables(det_eq) if occursin("norm_deficit", JuMP.name(v))
+            ]
             @test all(coefficient(objective_function(det_eq), v) ≈ 3.0e4 for v in nd_copies)
         end
 
         @testset "StateConditionedPolicy + MadNLP det_eq training" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+            )
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
 
@@ -1822,28 +2245,41 @@ end
             set_optimizer_attribute(det_eq, "print_level", MadNLP.ERROR)
             set_optimizer_attribute(det_eq, "tol", 1e-6)
             det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
-                det_eq, [sp1, sp2], spi, spo, [5.0], usamples)
+                det_eq, [sp1, sp2], spi, spo, [5.0], usamples
+            )
 
             Random.seed!(222)
-            policy = state_conditioned_policy(1, 1, 1, [8];
-                activation=sigmoid, encoder_type=Flux.LSTM)
+            policy = state_conditioned_policy(
+                1, 1, 1, [8]; activation=sigmoid, encoder_type=Flux.LSTM
+            )
             obj_before = DecisionRules.simulate_multistage(
-                det_eq, spi, spo, [5.0],
-                sample(usamples_det), policy)
-            train_multistage(policy, [5.0], det_eq, spi, spo, usamples_det;
-                num_batches=4, num_train_per_batch=1,
-                penalty_schedule=:default_annealed)
+                det_eq, spi, spo, [5.0], sample(usamples_det), policy
+            )
+            train_multistage(
+                policy,
+                [5.0],
+                det_eq,
+                spi,
+                spo,
+                usamples_det;
+                num_batches=4,
+                num_train_per_batch=1,
+                penalty_schedule=:default_annealed,
+            )
             obj_after = DecisionRules.simulate_multistage(
-                det_eq, spi, spo, [5.0],
-                sample(usamples_det), policy)
+                det_eq, spi, spo, [5.0], sample(usamples_det), policy
+            )
             @test isfinite(obj_after)
         end
 
         @testset "full training pipeline with MadNLP det_eq" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+            )
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
 
@@ -1851,19 +2287,28 @@ end
             set_optimizer_attribute(det_eq, "print_level", MadNLP.ERROR)
             set_optimizer_attribute(det_eq, "tol", 1e-6)
             det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
-                det_eq, [sp1, sp2], spi, spo, [5.0], usamples)
+                det_eq, [sp1, sp2], spi, spo, [5.0], usamples
+            )
 
             Random.seed!(222)
             m = Chain(Dense(2, 10), Dense(10, 1))
             obj_before = DecisionRules.simulate_multistage(
-                det_eq, spi, spo, [5.0],
-                sample(usamples_det), m)
-            train_multistage(m, [5.0], det_eq, spi, spo, usamples_det;
-                num_batches=5, num_train_per_batch=1,
-                penalty_schedule=:default_annealed)
+                det_eq, spi, spo, [5.0], sample(usamples_det), m
+            )
+            train_multistage(
+                m,
+                [5.0],
+                det_eq,
+                spi,
+                spo,
+                usamples_det;
+                num_batches=5,
+                num_train_per_batch=1,
+                penalty_schedule=:default_annealed,
+            )
             obj_after = DecisionRules.simulate_multistage(
-                det_eq, spi, spo, [5.0],
-                sample(usamples_det), m)
+                det_eq, spi, spo, [5.0], sample(usamples_det), m
+            )
             @test isfinite(obj_after)
             @test obj_after < obj_before + 100.0
         end
@@ -1883,7 +2328,7 @@ end
         @testset "simulate_stage rrule vs finite differences" begin
             sp, si, so, sov, u = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
             spi_v = Vector{Any}([si])
-            spo_v = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            spo_v = Vector{Tuple{Any,VariableRef}}([(so, sov)])
             usamp = [(u, 2.0)]
             s_in = [5.0]
             s_out = [4.0]
@@ -1891,14 +2336,25 @@ end
             # AD gradient
             grad = Zygote.gradient(
                 (si, so) -> DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, si, so),
-                s_in, s_out
+                s_in,
+                s_out,
             )
 
             # Finite-difference gradient
             ε = 1e-5
             f0 = DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, s_in, s_out)
-            fd_in = (DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, s_in .+ ε, s_out) - f0) / ε
-            fd_out = (DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, s_in, s_out .+ ε) - f0) / ε
+            fd_in =
+                (
+                    DecisionRules.simulate_stage(
+                        sp, spi_v, spo_v, usamp, s_in .+ ε, s_out
+                    ) - f0
+                ) / ε
+            fd_out =
+                (
+                    DecisionRules.simulate_stage(
+                        sp, spi_v, spo_v, usamp, s_in, s_out .+ ε
+                    ) - f0
+                ) / ε
 
             @test grad[1][1] ≈ fd_in atol=1e-2
             @test grad[2][1] ≈ fd_out atol=1e-2
@@ -1906,33 +2362,44 @@ end
 
         @testset "simulate_multistage (det_eq) rrule vs finite differences" begin
             sp1, si1, so1, sov1, u1 = build_subproblem(10)
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+            )
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
             det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
-                quiet_nonlinear_ipopt_model(),
-                [sp1, sp2], spi, spo, [5.0], usamples)
+                quiet_nonlinear_ipopt_model(), [sp1, sp2], spi, spo, [5.0], usamples
+            )
             usamp = sample(usamples_det)
             states0 = [[9.0], [7.0], [4.0]]
 
             # AD gradient
             grad = Zygote.gradient(
                 st -> DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, st),
-                states0
+                states0,
             )
 
             # Finite-difference gradient for initial state (states0[1])
             ε = 1e-5
             f0 = DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states0)
             states_p = [states0[1] .+ ε, states0[2], states0[3]]
-            fd_s1 = (DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states_p) - f0) / ε
+            fd_s1 =
+                (
+                    DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states_p) -
+                    f0
+                ) / ε
             @test grad[1][1][1] ≈ fd_s1 atol=1e-1
 
             # Finite-difference gradient for last target (states0[3])
             states_p3 = [states0[1], states0[2], states0[3] .+ ε]
-            fd_s3 = (DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states_p3) - f0) / ε
+            fd_s3 =
+                (
+                    DecisionRules.simulate_multistage(det_eq, spi, spo, usamp, states_p3) -
+                    f0
+                ) / ε
             @test grad[1][3][1] ≈ fd_s3 atol=1e-1
         end
 
@@ -1941,15 +2408,29 @@ end
             # At deficit=0 (achievable targets), the NormOneCone |·| is non-smooth
             # and FD vs pdual disagree. With infeasible targets the deficit stays
             # on one side of the kink and the function is smooth.
-            sp1, si1, so1, sov1, u1 = build_subproblem(10; subproblem=quiet_diffopt_ipopt_model())
-            sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=1.0, state_out_val=9.0, subproblem=quiet_diffopt_ipopt_model())
-            spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-            spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+            sp1, si1, so1, sov1, u1 = build_subproblem(
+                10; subproblem=quiet_diffopt_ipopt_model()
+            )
+            sp2, si2, so2, sov2, u2 = build_subproblem(
+                10;
+                state_i_val=1.0,
+                state_out_val=9.0,
+                subproblem=quiet_diffopt_ipopt_model(),
+            )
+            spi = Vector{Vector{Any}}(undef, 2);
+            spi .= [[si1], [si2]]
+            spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
             spo .= [[(so1, sov1)], [(so2, sov2)]]
             usamples = [[(u1, [2.0])], [(u2, [1.0])]]
             windows = DecisionRules.setup_shooting_windows(
-                [sp1, sp2], spi, spo, [5.0], usamples;
-                window_size=2, model_factory=() -> quiet_conic_ipopt_model())
+                [sp1, sp2],
+                spi,
+                spo,
+                [5.0],
+                usamples;
+                window_size=2,
+                model_factory=() -> quiet_conic_ipopt_model(),
+            )
             window = windows[1]
             for t in 1:2
                 for p in window.uncertainty_params[t]
@@ -1962,15 +2443,31 @@ end
             # AD gradient w.r.t. targets
             grad = Zygote.gradient(
                 tgts -> DecisionRules.solve_window(
-                    window.model, window.state_in_params, window.state_out_params, s_in, tgts),
-                targets
+                    window.model,
+                    window.state_in_params,
+                    window.state_out_params,
+                    s_in,
+                    tgts,
+                ),
+                targets,
             )
 
             # Finite-difference gradient for targets[1]
             ε = 1e-5
-            f0 = DecisionRules.solve_window(window.model, window.state_in_params, window.state_out_params, s_in, targets)
+            f0 = DecisionRules.solve_window(
+                window.model, window.state_in_params, window.state_out_params, s_in, targets
+            )
             targets_p = [targets[1] .+ Float32(ε), targets[2]]
-            fd_t1 = (DecisionRules.solve_window(window.model, window.state_in_params, window.state_out_params, s_in, targets_p) - f0) / ε
+            fd_t1 =
+                (
+                    DecisionRules.solve_window(
+                        window.model,
+                        window.state_in_params,
+                        window.state_out_params,
+                        s_in,
+                        targets_p,
+                    ) - f0
+                ) / ε
             @test grad[1][1][1] ≈ fd_t1 rtol=0.2
         end
 
@@ -1988,12 +2485,14 @@ end
             DecisionRules.STRICT_GRADIENTS[] = true
             sp, si, so, sov, u = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
             spi_v = Vector{Any}([si])
-            spo_v = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            spo_v = Vector{Tuple{Any,VariableRef}}([(so, sov)])
             usamp = [(u, 2.0)]
 
             grad = Zygote.gradient(
-                (si_val, so_val) -> DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, si_val, so_val),
-                [5.0], [4.0]
+                (si_val, so_val) ->
+                    DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, si_val, so_val),
+                [5.0],
+                [4.0],
             )
             @test abs(grad[1][1]) > 1.0
             @test abs(grad[2][1]) > 1.0
@@ -2006,7 +2505,7 @@ end
             # the two gradient paths in the rrule.
             sp, si, so, sov, u = build_subproblem(10; subproblem=quiet_conic_ipopt_model())
             spi_v = Vector{Any}([si])
-            spo_v = Vector{Tuple{Any, VariableRef}}([(so, sov)])
+            spo_v = Vector{Tuple{Any,VariableRef}}([(so, sov)])
             usamp = [(u, 2.0)]
             DecisionRules.simulate_stage(sp, spi_v, spo_v, usamp, [5.0], [4.0])
 
@@ -2055,9 +2554,12 @@ end
 
             @testset "deterministic_equivalent GPU training" begin
                 sp1, si1, so1, sov1, u1 = build_subproblem(10)
-                sp2, si2, so2, sov2, u2 = build_subproblem(10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0)
-                spi = Vector{Vector{Any}}(undef, 2); spi .= [[si1], [si2]]
-                spo = Vector{Vector{Tuple{Any, VariableRef}}}(undef, 2)
+                sp2, si2, so2, sov2, u2 = build_subproblem(
+                    10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+                )
+                spi = Vector{Vector{Any}}(undef, 2);
+                spi .= [[si1], [si2]]
+                spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
                 spo .= [[(so1, sov1)], [(so2, sov2)]]
                 usamples = [[(u1, [2.0])], [(u2, [1.0])]]
 
@@ -2066,20 +2568,30 @@ end
                 set_optimizer_attribute(det_eq, "linear_solver", MadNLPGPU.CUDSSSolver)
                 set_optimizer_attribute(det_eq, "print_level", MadNLP.ERROR)
                 det_eq, usamples_det = DecisionRules.deterministic_equivalent!(
-                    det_eq, [sp1, sp2], spi, spo, [5.0], usamples)
+                    det_eq, [sp1, sp2], spi, spo, [5.0], usamples
+                )
 
                 Random.seed!(222)
-                policy = state_conditioned_policy(1, 1, 1, [8];
-                    activation=sigmoid, encoder_type=Flux.LSTM)
+                policy = state_conditioned_policy(
+                    1, 1, 1, [8]; activation=sigmoid, encoder_type=Flux.LSTM
+                )
                 obj_before = DecisionRules.simulate_multistage(
-                    det_eq, spi, spo, [5.0],
-                    sample(usamples_det), policy)
-                train_multistage(policy, [5.0], det_eq, spi, spo, usamples_det;
-                    num_batches=4, num_train_per_batch=1,
-                    penalty_schedule=:default_annealed)
+                    det_eq, spi, spo, [5.0], sample(usamples_det), policy
+                )
+                train_multistage(
+                    policy,
+                    [5.0],
+                    det_eq,
+                    spi,
+                    spo,
+                    usamples_det;
+                    num_batches=4,
+                    num_train_per_batch=1,
+                    penalty_schedule=:default_annealed,
+                )
                 obj_after = DecisionRules.simulate_multistage(
-                    det_eq, spi, spo, [5.0],
-                    sample(usamples_det), policy)
+                    det_eq, spi, spo, [5.0], sample(usamples_det), policy
+                )
                 @test isfinite(obj_after)
             end
         else

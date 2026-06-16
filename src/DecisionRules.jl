@@ -10,14 +10,34 @@ import ChainRulesCore.rrule
 using DiffOpt
 using Logging
 
-export simulate_multistage, sample, train_multistage, simulate_states, simulate_stage, dense_multilayer_nn, variable_to_parameter, create_deficit!,
+export simulate_multistage,
+    sample,
+    train_multistage,
+    simulate_states,
+    simulate_stage,
+    dense_multilayer_nn,
+    variable_to_parameter,
+    create_deficit!,
     default_annealed_schedule,
-    SampleLog, default_record, RolloutEvaluation,
-    SaveBest, find_variables, compute_parameter_dual, StallingCriterium, policy_input_dim, normalize_recur_state,
-    StateConditionedPolicy, state_conditioned_policy, materialize_tangent,
+    SampleLog,
+    default_record,
+    RolloutEvaluation,
+    SaveBest,
+    find_variables,
+    compute_parameter_dual,
+    StallingCriterium,
+    policy_input_dim,
+    normalize_recur_state,
+    StateConditionedPolicy,
+    state_conditioned_policy,
+    materialize_tangent,
     # Multiple shooting exports
-    train_multiple_shooting, setup_shooting_windows, solve_window, predict_window_targets,
-    simulate_multiple_shooting, WindowData
+    train_multiple_shooting,
+    setup_shooting_windows,
+    solve_window,
+    predict_window_targets,
+    simulate_multiple_shooting,
+    WindowData
 
 """
     STRICT_GRADIENTS

@@ -42,7 +42,7 @@ Manifest.toml
 
 *.cuts.json
 *subproblem*.json
-*.png
+
 *.arrow
 *.csv
 *.out.*
@@ -51,3 +51,4 @@ examples/**/.CondaPkg/*
 *.err
 *.tsv
 *.pdf
+plan.md
