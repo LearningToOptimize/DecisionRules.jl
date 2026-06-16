@@ -130,9 +130,10 @@ function ChainRulesCore.rrule(
     y = DecisionRules.get_next_state(
         subproblem, state_param_in, state_param_out, state_in, state_out_target
     )
+    forward_status = JuMP.termination_status(subproblem)
 
     function pullback(Δy)
-        status = @ignore_derivatives JuMP.termination_status(subproblem)
+        status = forward_status
         if !(status in _SUCCESSFUL_TERM_STATUSES)
             if STRICT_GRADIENTS[]
                 error(
@@ -423,8 +424,9 @@ function ChainRulesCore.rrule(
     y = simulate_stage(
         subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out
     )
+    forward_status = JuMP.termination_status(subproblem)
     function _pullback(Δy)
-        status = @ignore_derivatives JuMP.termination_status(subproblem)
+        status = forward_status
         if !(status in _SUCCESSFUL_TERM_STATUSES)
             if STRICT_GRADIENTS[]
                 error(
@@ -513,8 +515,9 @@ function ChainRulesCore.rrule(
     y = simulate_multistage(
         det_equivalent, state_params_in, state_params_out, uncertainties, states
     )
+    forward_status = JuMP.termination_status(det_equivalent)
     function _pullback(Δy)
-        status = @ignore_derivatives JuMP.termination_status(det_equivalent)
+        status = forward_status
         Δ_states = similar(states)
         if !(status in _SUCCESSFUL_TERM_STATUSES)
             if STRICT_GRADIENTS[]

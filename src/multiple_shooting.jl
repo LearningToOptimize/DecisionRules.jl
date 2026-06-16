@@ -440,9 +440,10 @@ function ChainRulesCore.rrule(
     s_out = get_last_realized_state(
         window_model, window_state_in_params, window_state_out_params, s_in, targets
     )
+    forward_status = JuMP.termination_status(window_model)
 
     function pullback(Δs_out)
-        status = @ignore_derivatives JuMP.termination_status(window_model)
+        status = forward_status
         if !(status in _SUCCESSFUL_TERM_STATUSES)
             if STRICT_GRADIENTS[]
                 error(
