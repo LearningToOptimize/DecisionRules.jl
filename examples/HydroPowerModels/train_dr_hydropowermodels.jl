@@ -40,7 +40,7 @@ save_file = "$(case_name)-$(formulation)-h$(num_stages)-deteq-$(solver_tag)-$(no
 formulation_file = formulation * ".mof.json"
 
 # Training parameters
-num_epochs = 20
+num_epochs = 40
 num_batches = 100
 _num_train_per_batch = 1
 activation = sigmoid                     # tanh, identity, relu, sigmoid
@@ -167,7 +167,9 @@ best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
-convergence_criterium = StallingCriterium(100, best_obj, 0)
+stall_train = StallingCriterium(100, best_obj, 0)
+stall_rollout = StallingCriterium(5, best_obj, 0)
+
 
 # Rollout evaluation (stage-wise subproblems, CPU)
 Random.seed!(8789)
@@ -195,6 +197,8 @@ realized_rollout_evaluation = RolloutEvaluation(
 resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
     DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
 
+converged_rollout = false
+converged_training = false
 # Train Model using deterministic equivalent.
 train_multistage(
     models,
@@ -215,7 +219,9 @@ train_multistage(
         )
         rollout_evaluation(iter, model)
         realized_rollout_evaluation(iter, model)
+        converged_training = stall_train(training_loss)
         if iter % eval_every == 0
+            converged_rollout = stall_rollout(rollout_evaluation.last_objective_no_deficit)
             metrics["metrics/rollout_objective_no_deficit"] =
                 rollout_evaluation.last_objective_no_deficit
             metrics["metrics/rollout_target_violation_share"] =
@@ -231,7 +237,7 @@ train_multistage(
         end
         Wandb.log(lg, metrics)
         save_control(iter, model, training_loss)
-        return convergence_criterium(iter, model, training_loss)
+        return converged_training && converged_rollout && isapprox(training_loss, rollout_evaluation.last_objective_no_deficit; rtol=0.01)
     end,
     penalty_schedule=penalty_schedule,
 )

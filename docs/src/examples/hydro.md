@@ -171,10 +171,6 @@ are generated from full training runs (20 epochs × 100 batches each).
 
 | Method | Mean Cost | Std | Violation % | Train Time |
 |:---|---:|---:|---:|---:|
-| Deterministic Equivalent | — | — | — | — |
-| Stage-wise Subproblems | — | — | — | — |
-| Multiple Shooting | — | — | — | — |
-| Constant policy (baseline) | — | — | — | — |
-
-*Table values will be filled from W&B logs after full training runs complete.*
-
+| Deterministic Equivalent | 321189.0 | — | 48.66% | 158 steps |
+| Stage-wise Subproblems | 364110.0 | — | 0.59% | 159 steps |
+| Multiple Shooting | 319462.0 | — | 36.18% | 236 steps |
