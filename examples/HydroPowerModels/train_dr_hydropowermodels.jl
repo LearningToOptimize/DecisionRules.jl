@@ -219,11 +219,9 @@ train_multistage(
         )
         rollout_evaluation(iter, model)
         realized_rollout_evaluation(iter, model)
-        converged_training = stall_train(iter, model, training_loss)
+        converged_training = stall_train(training_loss)
         if iter % eval_every == 0
-            converged_rollout = stall_rollout(
-                iter, model, rollout_evaluation.last_objective_no_deficit
-            )
+            converged_rollout = stall_rollout(rollout_evaluation.last_objective_no_deficit)
             metrics["metrics/rollout_objective_no_deficit"] =
                 rollout_evaluation.last_objective_no_deficit
             metrics["metrics/rollout_target_violation_share"] =
