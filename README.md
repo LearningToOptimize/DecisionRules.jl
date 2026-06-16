@@ -1,5 +1,6 @@
 [![Build Status](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/LearningToOptimize/DecisionRules.jl/graph/badge.svg)](https://app.codecov.io/gh/LearningToOptimize/DecisionRules.jl)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://LearningToOptimize.github.io/DecisionRules.jl/dev/)
 
 # DecisionRules.jl
 
