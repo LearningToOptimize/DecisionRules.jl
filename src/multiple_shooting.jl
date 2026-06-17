@@ -312,6 +312,24 @@ function solve_window(
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
     s_in::AbstractVector,
     targets::AbstractVector,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    return _solve_window(
+        window_model,
+        window_state_in_params,
+        window_state_out_params,
+        s_in,
+        targets,
+        integer_strategy,
+    )
+end
+
+function _set_window_parameters!(
+    window_state_in_params,
+    window_state_out_params,
+    s_in,
+    targets,
 )
     num_stages = length(window_state_out_params)
 
@@ -330,12 +348,47 @@ function solve_window(
             set_parameter_value(target_param, tgt_vec[i])
         end
     end
+    return nothing
+end
 
-    optimize!(window_model)
+function _solve_window(
+    window_model::JuMP.Model,
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
+    s_in::AbstractVector,
+    targets::AbstractVector,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_window_parameters!(
+        window_state_in_params, window_state_out_params, s_in, targets
+    )
 
-    obj = objective_value(window_model)
+    return with_sensitivity_solution(window_model, integer_strategy) do sensitivity_model
+        return objective_value(sensitivity_model)
+    end
+end
 
-    return obj
+function _solve_window_with_parameter_duals(
+    window_model::JuMP.Model,
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
+    s_in::AbstractVector,
+    targets::AbstractVector,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_window_parameters!(
+        window_state_in_params, window_state_out_params, s_in, targets
+    )
+
+    return with_sensitivity_solution(window_model, integer_strategy) do sensitivity_model
+        obj = objective_value(sensitivity_model)
+        dual_s_in = pdual.(window_state_in_params)
+        dual_targets = [
+            pdual.([s[1] for s in stage_pairs]) for
+            stage_pairs in window_state_out_params
+        ]
+        return obj, dual_s_in, dual_targets
+    end
 end
 
 """
@@ -350,19 +403,27 @@ Given cotangents (Δobj_val), we:
 - read reverse sensitivities w.r.t. window_state_in_params and all target params
 """
 function ChainRulesCore.rrule(
-    ::typeof(solve_window),
+    ::typeof(_solve_window),
     window_model::JuMP.Model,
     window_state_in_params::AbstractVector,
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
     s_in::AbstractVector,
     targets::AbstractVector,
+    integer_strategy::AbstractIntegerStrategy,
 )
-    obj = solve_window(
-        window_model, window_state_in_params, window_state_out_params, s_in, targets
+    obj, dual_s_in, dual_targets = _solve_window_with_parameter_duals(
+        window_model,
+        window_state_in_params,
+        window_state_out_params,
+        s_in,
+        targets,
+        integer_strategy,
     )
     @assert JuMP.owner_model(window_state_in_params[1]) === window_model "window_model must be DiffOpt-enabled"
     @assert JuMP.owner_model(window_state_out_params[1][1][1]) === window_model "window_model must be DiffOpt-enabled"
-    status = @ignore_derivatives JuMP.termination_status(window_model)
+    status = @ignore_derivatives _sensitivity_forward_status(
+        window_model, integer_strategy
+    )
     if !(status in _SUCCESSFUL_TERM_STATUSES)
         function pullback_failed(Δobj_val)
             if STRICT_GRADIENTS[]
@@ -379,23 +440,54 @@ function ChainRulesCore.rrule(
                 NoTangent(),
                 zeros(Float32, length(s_in)),
                 [zeros(Float32, length(targets[t])) for t in eachindex(targets)],
+                NoTangent(),
             )
         end
         return obj, pullback_failed
     end
-    dual_s_in = pdual.(window_state_in_params)
-    dual_targets = [
-        pdual.([s[1] for s in stage_pairs]) for stage_pairs in window_state_out_params
-    ]
 
     function pullback(Δobj_val)
         Δobj = (Δobj_val isa NoTangent || Δobj_val isa ZeroTangent) ? 0.0 : float(Δobj_val)
         d_s_in = Δobj .* dual_s_in
         d_targets = Δobj .* dual_targets
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_s_in, d_targets)
+        return (
+            NoTangent(),
+            NoTangent(),
+            NoTangent(),
+            NoTangent(),
+            d_s_in,
+            d_targets,
+            NoTangent(),
+        )
     end
 
     return obj, pullback
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(solve_window),
+    window_model::JuMP.Model,
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
+    s_in::AbstractVector,
+    targets::AbstractVector,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    obj, pullback = ChainRulesCore.rrule(
+        _solve_window,
+        window_model,
+        window_state_in_params,
+        window_state_out_params,
+        s_in,
+        targets,
+        integer_strategy,
+    )
+    function public_pullback(Δobj_val)
+        result = pullback(Δobj_val)
+        return result[1:6]
+    end
+    return obj, public_pullback
 end
 
 """
@@ -410,11 +502,48 @@ function get_last_realized_state(
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
     s_in::AbstractVector,
     targets::AbstractVector,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    return _get_last_realized_state(
+        window_model,
+        window_state_in_params,
+        window_state_out_params,
+        s_in,
+        targets,
+        integer_strategy,
+    )
+end
+
+function _get_last_realized_state(
+    window_model::JuMP.Model,
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
+    s_in::AbstractVector,
+    targets::AbstractVector,
+    ::NoIntegerStrategy,
 )
     last_stage = window_state_out_params[end]
     s_out = Float32[value(pair[2]) for pair in last_stage]
 
     return s_out
+end
+
+function _get_last_realized_state(
+    window_model::JuMP.Model,
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
+    s_in::AbstractVector,
+    targets::AbstractVector,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_window_parameters!(
+        window_state_in_params, window_state_out_params, s_in, targets
+    )
+    return with_sensitivity_solution(window_model, integer_strategy) do sensitivity_model
+        last_stage = window_state_out_params[end]
+        return Float32[value(pair[2]) for pair in last_stage]
+    end
 end
 
 """
@@ -430,17 +559,23 @@ Given cotangents (Δs_out), we:
 - read reverse sensitivities w.r.t. window_state_in_params and all target params
 """
 function ChainRulesCore.rrule(
-    ::typeof(get_last_realized_state),
+    ::typeof(_get_last_realized_state),
     window_model::JuMP.Model,
     window_state_in_params::AbstractVector,
     window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
     s_in::AbstractVector,
     targets::AbstractVector,
+    integer_strategy::AbstractIntegerStrategy,
 )
-    s_out = get_last_realized_state(
-        window_model, window_state_in_params, window_state_out_params, s_in, targets
+    s_out = _get_last_realized_state(
+        window_model,
+        window_state_in_params,
+        window_state_out_params,
+        s_in,
+        targets,
+        integer_strategy,
     )
-    forward_status = JuMP.termination_status(window_model)
+    forward_status = _sensitivity_forward_status(window_model, integer_strategy)
 
     function pullback(Δs_out)
         status = forward_status
@@ -459,6 +594,7 @@ function ChainRulesCore.rrule(
                 NoTangent(),
                 zeros(Float32, length(s_in)),
                 [zeros(Float32, length(targets[t])) for t in 1:length(window_state_out_params)],
+                NoTangent(),
             )
         end
 
@@ -473,43 +609,85 @@ function ChainRulesCore.rrule(
         d_s_in = zeros(Float32, length(s_in))
         d_targets = [zeros(Float32, length(targets[t])) for t in 1:num_stages]
 
-        DiffOpt.empty_input_sensitivities!(window_model)
+        return _with_current_or_sensitivity_solution(
+            window_model, integer_strategy
+        ) do sensitivity_model
+            DiffOpt.empty_input_sensitivities!(sensitivity_model)
 
-        # (B) end-state contribution
-        if !all(iszero, Δs_out_vec)
-            last_stage = window_state_out_params[end]
-            @inbounds for i in eachindex(last_stage)
-                realized_var = last_stage[i][2]
-                DiffOpt.set_reverse_variable(window_model, realized_var, Δs_out_vec[i])
+            # (B) end-state contribution
+            if !all(iszero, Δs_out_vec)
+                last_stage = window_state_out_params[end]
+                @inbounds for i in eachindex(last_stage)
+                    realized_var = last_stage[i][2]
+                    DiffOpt.set_reverse_variable(
+                        sensitivity_model, realized_var, Δs_out_vec[i]
+                    )
+                end
             end
-        end
 
-        DiffOpt.reverse_differentiate!(window_model)
+            DiffOpt.reverse_differentiate!(sensitivity_model)
 
-        # gradient w.r.t. window start parameters
-        @inbounds for i in eachindex(window_state_in_params)
-            d_s_in[i] = Float32(
-                DiffOpt.get_reverse_parameter(window_model, window_state_in_params[i])
-            )
-        end
-
-        # gradient w.r.t. all target parameters in all stages
-        @inbounds for t in 1:num_stages
-            stage_pairs = window_state_out_params[t]
-            @inbounds for i in eachindex(stage_pairs)
-                target_param = stage_pairs[i][1]
-                d_targets[t][i] = Float32(
-                    DiffOpt.get_reverse_parameter(window_model, target_param)
+            # gradient w.r.t. window start parameters
+            @inbounds for i in eachindex(window_state_in_params)
+                d_s_in[i] = Float32(
+                    DiffOpt.get_reverse_parameter(
+                        sensitivity_model, window_state_in_params[i]
+                    )
                 )
             end
+
+            # gradient w.r.t. all target parameters in all stages
+            @inbounds for t in 1:num_stages
+                stage_pairs = window_state_out_params[t]
+                @inbounds for i in eachindex(stage_pairs)
+                    target_param = stage_pairs[i][1]
+                    d_targets[t][i] = Float32(
+                        DiffOpt.get_reverse_parameter(sensitivity_model, target_param)
+                    )
+                end
+            end
+
+            DiffOpt.empty_input_sensitivities!(sensitivity_model)
+
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                d_s_in,
+                d_targets,
+                NoTangent(),
+            )
         end
-
-        DiffOpt.empty_input_sensitivities!(window_model)
-
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), d_s_in, d_targets)
     end
 
     return s_out, pullback
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(get_last_realized_state),
+    window_model::JuMP.Model,
+    window_state_in_params::AbstractVector,
+    window_state_out_params::AbstractVector{<:AbstractVector{<:Tuple{<:Any,VariableRef}}},
+    s_in::AbstractVector,
+    targets::AbstractVector,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    s_out, pullback = ChainRulesCore.rrule(
+        _get_last_realized_state,
+        window_model,
+        window_state_in_params,
+        window_state_out_params,
+        s_in,
+        targets,
+        integer_strategy,
+    )
+    function public_pullback(Δs_out)
+        result = pullback(Δs_out)
+        return result[1:6]
+    end
+    return s_out, public_pullback
 end
 
 #=============================================================================
@@ -643,6 +821,8 @@ function simulate_multiple_shooting(
     initial_state::AbstractVector{T},
     uncertainty_sample,
     uncertainties_vec,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 ) where {T}
     total_objective = zero(T)
     current_real_state = initial_state
@@ -665,10 +845,11 @@ function simulate_multiple_shooting(
             window.state_in_params,
             window.state_out_params,
             current_real_state,
-            targets,
+            targets;
+            integer_strategy=integer_strategy,
         )
         @ignore_derivatives begin
-            status = termination_status(window.model)
+            status = _sensitivity_forward_status(window.model, integer_strategy)
             if !(status in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED))
                 _print_window_status_and_params(
                     window, status; context="simulate_multiple_shooting"
@@ -681,7 +862,8 @@ function simulate_multiple_shooting(
             window.state_in_params,
             window.state_out_params,
             current_real_state,
-            targets,
+            targets;
+            integer_strategy=integer_strategy,
         )
 
         total_objective += window_obj
@@ -718,6 +900,7 @@ function train_multiple_shooting(
     end,
     get_objective_no_target_deficit=get_objective_no_target_deficit,
     penalty_schedule=nothing,
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 )
     opt_state = Flux.setup(optimizer, model)
 
@@ -768,7 +951,12 @@ function train_multiple_shooting(
                 ]
 
                 objective += simulate_multiple_shooting(
-                    windows, m, initial_state_f32, uncertainty_sample, uncertainties_vec
+                    windows,
+                    m,
+                    initial_state_f32,
+                    uncertainty_sample,
+                    uncertainties_vec;
+                    integer_strategy=integer_strategy,
                 )
             end
             objective /= num_train_per_batch
@@ -797,10 +985,11 @@ function train_multiple_shooting(
                         win.state_in_params,
                         win.state_out_params,
                         current_state,
-                        targs,
+                        targs;
+                        integer_strategy=integer_strategy,
                     )
                     @ignore_derivatives begin
-                        status = termination_status(win.model)
+                        status = _sensitivity_forward_status(win.model, integer_strategy)
                         if !(
                             status in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED)
                         )
@@ -814,7 +1003,8 @@ function train_multiple_shooting(
                         win.state_in_params,
                         win.state_out_params,
                         current_state,
-                        targs,
+                        targs;
+                        integer_strategy=integer_strategy,
                     )
                     total += get_objective_no_target_deficit(win.model)
                 end

@@ -58,7 +58,27 @@ function simulate_stage(
     uncertainty::Vector{Tuple{VariableRef,T}},
     state_in::Vector{Z},
     state_out_target::Vector{V},
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 ) where {T<:Real,V<:Real,Z<:Real}
+    return _simulate_stage(
+        subproblem,
+        state_param_in,
+        state_param_out,
+        uncertainty,
+        state_in,
+        state_out_target,
+        integer_strategy,
+    )
+end
+
+function _set_stage_parameters!(
+    state_param_in,
+    state_param_out,
+    uncertainty,
+    state_in,
+    state_out_target,
+)
     # Update state parameters
     for (i, state_var) in enumerate(state_param_in)
         set_parameter_value(state_var, state_in[i])
@@ -74,14 +94,45 @@ function simulate_stage(
         state_var = state_param_out[i][1]
         set_parameter_value(state_var, state_out_target[i])
     end
+    return nothing
+end
 
-    # Solve subproblem
-    optimize!(subproblem)
+function _simulate_stage(
+    subproblem::JuMP.Model,
+    state_param_in,
+    state_param_out,
+    uncertainty,
+    state_in,
+    state_out_target,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_stage_parameters!(
+        state_param_in, state_param_out, uncertainty, state_in, state_out_target
+    )
 
-    # objective value
-    obj = objective_value(subproblem)
+    return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
+        return objective_value(sensitivity_model)
+    end
+end
 
-    return obj
+function _simulate_stage_with_parameter_duals(
+    subproblem,
+    state_param_in,
+    state_param_out,
+    uncertainty,
+    state_in,
+    state_out_target,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_stage_parameters!(
+        state_param_in, state_param_out, uncertainty, state_in, state_out_target
+    )
+    return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
+        objective = objective_value(sensitivity_model)
+        d_state_in = pdual.(state_param_in)
+        d_state_out_target = pdual.([s[1] for s in state_param_out])
+        return objective, d_state_in, d_state_out_target
+    end
 end
 
 """
@@ -97,9 +148,44 @@ function get_next_state(
     state_param_out::Vector{Tuple{Any,VariableRef}},
     state_in::Vector{T},
     state_out_target::Vector{Z},
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 ) where {T<:Real,Z<:Real}
-    state_out = [value(state_param_out[i][2]) for i in 1:length(state_param_out)]
-    return state_out
+    return _get_next_state(
+        subproblem,
+        state_param_in,
+        state_param_out,
+        state_in,
+        state_out_target,
+        integer_strategy,
+    )
+end
+
+function _get_next_state(
+    subproblem::JuMP.Model,
+    state_param_in,
+    state_param_out,
+    state_in,
+    state_out_target,
+    ::NoIntegerStrategy,
+)
+    return [value(state_param_out[i][2]) for i in 1:length(state_param_out)]
+end
+
+function _get_next_state(
+    subproblem::JuMP.Model,
+    state_param_in,
+    state_param_out,
+    state_in,
+    state_out_target,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_stage_parameters!(state_param_in, state_param_out, (), state_in, state_out_target)
+    return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
+        return [
+            value(state_param_out[i][2]) for i in 1:length(state_param_out)
+        ]
+    end
 end
 
 """
@@ -118,19 +204,25 @@ Assumptions:
 - `get_next_state(...)` updates parameter values, `optimize!`s, and returns a Vector matching the realized-state variables
 """
 function ChainRulesCore.rrule(
-    ::typeof(get_next_state),
+    ::typeof(_get_next_state),
     subproblem::JuMP.Model,
     state_param_in,
     state_param_out,
     state_in,
     state_out_target,
+    integer_strategy::AbstractIntegerStrategy,
 )
 
     # Forward pass: run the solver via the user's function
-    y = DecisionRules.get_next_state(
-        subproblem, state_param_in, state_param_out, state_in, state_out_target
+    y = DecisionRules._get_next_state(
+        subproblem,
+        state_param_in,
+        state_param_out,
+        state_in,
+        state_out_target,
+        integer_strategy,
     )
-    forward_status = JuMP.termination_status(subproblem)
+    forward_status = _sensitivity_forward_status(subproblem, integer_strategy)
 
     function pullback(Δy)
         status = forward_status
@@ -149,55 +241,65 @@ function ChainRulesCore.rrule(
                 NoTangent(),
                 zeros(length(state_in)),
                 zeros(length(state_out_target)),
+                NoTangent(),
             )
         end
 
         try
             Δy = collect(Δy)  # ensure indexable, concrete element type
 
-            # Best practice: clear previous seeds
-            DiffOpt.empty_input_sensitivities!(subproblem)
+            return _with_current_or_sensitivity_solution(
+                subproblem, integer_strategy
+            ) do sensitivity_model
+                # Best practice: clear previous seeds
+                DiffOpt.empty_input_sensitivities!(sensitivity_model)
 
-            # 1) Seed reverse on the realized output variables with Δy
-            #    Each entry in state_param_out is (param_target, realized_state_var)
-            @inbounds for i in eachindex(state_param_out)
-                realized_var = state_param_out[i][2]
-                # J' * Δ: set reverse seed on variable primal
-                DiffOpt.set_reverse_variable(subproblem, realized_var, Δy[i])
+                # 1) Seed reverse on the realized output variables with Δy
+                #    Each entry in state_param_out is (param_target, realized_state_var)
+                @inbounds for i in eachindex(state_param_out)
+                    realized_var = state_param_out[i][2]
+                    # J' * Δ: set reverse seed on variable primal
+                    DiffOpt.set_reverse_variable(sensitivity_model, realized_var, Δy[i])
+                end
+
+                # 2) Reverse differentiate
+                DiffOpt.reverse_differentiate!(sensitivity_model)  # computes all needed products
+
+                # 3) Read sensitivities w.r.t. parameter variables
+                #    These are vector-Jacobian products dL/d(param) = (∂y/∂param)^T * Δy
+                d_state_in = similar(
+                    state_in, promote_type(eltype(state_in), eltype(Δy))
+                )
+                @inbounds for i in eachindex(state_param_in)
+                    pin = state_param_in[i]  # JuMP.Parameter variable
+                    d_state_in[i] = DiffOpt.get_reverse_parameter(sensitivity_model, pin)
+                end
+
+                d_state_out_target = similar(
+                    state_out_target, promote_type(eltype(state_out_target), eltype(Δy))
+                )
+                @inbounds for i in eachindex(state_param_out)
+                    pout = state_param_out[i][1]  # target Parameter variable
+                    d_state_out_target[i] = DiffOpt.get_reverse_parameter(
+                        sensitivity_model, pout
+                    )
+                end
+
+                # Optional: clear seeds so they don't accumulate between calls
+                DiffOpt.empty_input_sensitivities!(sensitivity_model)
+
+                # Return cotangents for each primal argument, in order:
+                #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target, integer_strategy)
+                return (
+                    NoTangent(),
+                    NoTangent(),
+                    NoTangent(),
+                    NoTangent(),
+                    d_state_in,
+                    d_state_out_target,
+                    NoTangent(),
+                )
             end
-
-            # 2) Reverse differentiate
-            DiffOpt.reverse_differentiate!(subproblem)  # computes all needed products
-
-            # 3) Read sensitivities w.r.t. parameter variables
-            #    These are vector-Jacobian products dL/d(param) = (∂y/∂param)^T * Δy
-            d_state_in = similar(state_in, promote_type(eltype(state_in), eltype(Δy)))
-            @inbounds for i in eachindex(state_param_in)
-                pin = state_param_in[i]  # JuMP.Parameter variable            
-                d_state_in[i] = DiffOpt.get_reverse_parameter(subproblem, pin)
-            end
-
-            d_state_out_target = similar(
-                state_out_target, promote_type(eltype(state_out_target), eltype(Δy))
-            )
-            @inbounds for i in eachindex(state_param_out)
-                pout = state_param_out[i][1]  # target Parameter variable
-                d_state_out_target[i] = DiffOpt.get_reverse_parameter(subproblem, pout)
-            end
-
-            # Optional: clear seeds so they don't accumulate between calls
-            DiffOpt.empty_input_sensitivities!(subproblem)
-
-            # Return cotangents for each primal argument, in order:
-            #  (f, subproblem, state_param_in, state_param_out, state_in, state_out_target)
-            return (
-                NoTangent(),
-                NoTangent(),
-                NoTangent(),
-                NoTangent(),
-                d_state_in,
-                d_state_out_target,
-            )
         catch e
             msg = sprint(showerror, e)
             throw(
@@ -216,17 +318,47 @@ function ChainRulesCore.rrule(
     return y, pullback
 end
 
+function ChainRulesCore.rrule(
+    ::typeof(get_next_state),
+    subproblem::JuMP.Model,
+    state_param_in,
+    state_param_out,
+    state_in,
+    state_out_target,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    y, pullback = ChainRulesCore.rrule(
+        _get_next_state,
+        subproblem,
+        state_param_in,
+        state_param_out,
+        state_in,
+        state_out_target,
+        integer_strategy,
+    )
+    function public_pullback(Δy)
+        result = pullback(Δy)
+        return result[1:6]
+    end
+    return y, public_pullback
+end
+
 function get_objective_no_target_deficit(
     subproblem::JuMP.Model; norm_deficit::AbstractString="norm_deficit"
 )
-    obj = JuMP.objective_function(subproblem)
-    objective_val = objective_value(subproblem)
-    for term in obj.terms
-        if occursin(norm_deficit, JuMP.name(term[1]))
-            objective_val -= term[2] * value(term[1])
+    try
+        obj = JuMP.objective_function(subproblem)
+        objective_val = objective_value(subproblem)
+        for term in obj.terms
+            if occursin(norm_deficit, JuMP.name(term[1]))
+                objective_val -= term[2] * value(term[1])
+            end
         end
+        return objective_val
+    catch
+        return get(subproblem.ext, :_last_obj_no_deficit, 0.0)
     end
-    return objective_val
 end
 
 function get_objective_no_target_deficit(
@@ -276,6 +408,8 @@ function simulate_multistage(
     initial_state::Vector{T},
     uncertainties,
     decision_rules,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 ) where {T<:Real,U}
     @ignore_derivatives Flux.reset!(decision_rules)
 
@@ -289,10 +423,21 @@ function simulate_multistage(
         uncertainty = uncertainties[stage]
         state_out = apply_rule(stage, decision_rules, uncertainty, state_in)
         objective_value += simulate_stage(
-            subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out
+            subproblem,
+            state_param_in,
+            state_param_out,
+            uncertainty,
+            state_in,
+            state_out;
+            integer_strategy=integer_strategy,
         )
         state_in = DecisionRules.get_next_state(
-            subproblem, state_param_in, state_param_out, state_in, state_out
+            subproblem,
+            state_param_in,
+            state_param_out,
+            state_in,
+            state_out;
+            integer_strategy=integer_strategy,
         )
     end
 
@@ -314,7 +459,25 @@ function simulate_multistage(
     state_params_out::Vector{Vector{Tuple{Z,VariableRef}}},
     uncertainties,
     states,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 ) where {Z}
+    return _simulate_multistage_det(
+        det_equivalent,
+        state_params_in,
+        state_params_out,
+        uncertainties,
+        states,
+        integer_strategy,
+    )
+end
+
+function _set_multistage_parameters!(
+    state_params_in,
+    state_params_out,
+    uncertainties,
+    states,
+)
     for t in 1:length(state_params_in)
         state = states[t]
         # Update state parameters in
@@ -335,11 +498,50 @@ function simulate_multistage(
             set_parameter_value(state_var, states[t + 1][i])
         end
     end
+    return nothing
+end
 
-    # Solve det_equivalent
-    optimize!(det_equivalent)
+function _simulate_multistage_det(
+    det_equivalent::JuMP.Model,
+    state_params_in,
+    state_params_out,
+    uncertainties,
+    states,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_multistage_parameters!(state_params_in, state_params_out, uncertainties, states)
 
-    return objective_value(det_equivalent)
+    return with_sensitivity_solution(det_equivalent, integer_strategy) do sensitivity_model
+        obj = objective_value(sensitivity_model)
+        sensitivity_model.ext[:_last_obj] = obj
+        sensitivity_model.ext[:_last_obj_no_deficit] =
+            get_objective_no_target_deficit(sensitivity_model)
+        return obj
+    end
+end
+
+function _simulate_multistage_det_with_parameter_duals(
+    det_equivalent,
+    state_params_in,
+    state_params_out,
+    uncertainties,
+    states,
+    integer_strategy::AbstractIntegerStrategy,
+)
+    _set_multistage_parameters!(state_params_in, state_params_out, uncertainties, states)
+
+    return with_sensitivity_solution(det_equivalent, integer_strategy) do sensitivity_model
+        objective = objective_value(sensitivity_model)
+        sensitivity_model.ext[:_last_obj] = objective
+        sensitivity_model.ext[:_last_obj_no_deficit] =
+            get_objective_no_target_deficit(sensitivity_model)
+        Δ_states = similar(states)
+        Δ_states[1] = pdual.(state_params_in[1])
+        for t in 1:length(state_params_out)
+            Δ_states[t + 1] = pdual.([s[1] for s in state_params_out[t]])
+        end
+        return objective, Δ_states
+    end
 end
 
 """
@@ -356,11 +558,18 @@ function simulate_multistage(
     initial_state::Vector{T},
     uncertainties,
     decision_rules,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 ) where {T<:Real,U}
     Flux.reset!(decision_rules)
     states = simulate_states(initial_state, uncertainties, decision_rules)
     return simulate_multistage(
-        subproblems, state_params_in, state_params_out, uncertainties, states
+        subproblems,
+        state_params_in,
+        state_params_out,
+        uncertainties,
+        states;
+        integer_strategy=integer_strategy,
     )
 end
 
@@ -413,18 +622,42 @@ and exact whenever the solver exposes constraint duals.
    emitted.  Set `DecisionRules.STRICT_GRADIENTS[] = true` to throw instead.
 """
 function ChainRulesCore.rrule(
-    ::typeof(simulate_stage),
+    ::typeof(_simulate_stage),
     subproblem,
     state_param_in,
     state_param_out,
     uncertainty,
     state_in,
     state_out,
+    integer_strategy::AbstractIntegerStrategy,
 )
-    y = simulate_stage(
-        subproblem, state_param_in, state_param_out, uncertainty, state_in, state_out
-    )
-    forward_status = JuMP.termination_status(subproblem)
+    y = nothing
+    d_state_in_pdual = nothing
+    d_state_out_pdual = nothing
+    pdual_available = false
+    try
+        y, d_state_in_pdual, d_state_out_pdual = _simulate_stage_with_parameter_duals(
+            subproblem,
+            state_param_in,
+            state_param_out,
+            uncertainty,
+            state_in,
+            state_out,
+            integer_strategy,
+        )
+        pdual_available = true
+    catch
+        y = _simulate_stage(
+            subproblem,
+            state_param_in,
+            state_param_out,
+            uncertainty,
+            state_in,
+            state_out,
+            integer_strategy,
+        )
+    end
+    forward_status = _sensitivity_forward_status(subproblem, integer_strategy)
     function _pullback(Δy)
         status = forward_status
         if !(status in _SUCCESSFUL_TERM_STATUSES)
@@ -444,39 +677,76 @@ function ChainRulesCore.rrule(
                 NoTangent(),
                 zeros(length(state_param_in)),
                 zeros(length(state_param_out)),
+                NoTangent(),
             )
         end
 
         # Preferred: parameter duals (closed-form, Eq. 1.2 / 2.5)
-        try
+        if pdual_available
             return (
                 NoTangent(),
                 NoTangent(),
                 NoTangent(),
                 NoTangent(),
                 NoTangent(),
-                pdual.(state_param_in) * Δy,
-                pdual.([s[1] for s in state_param_out]) * Δy,
+                d_state_in_pdual * Δy,
+                d_state_out_pdual * Δy,
+                NoTangent(),
             )
-        catch
-            # pdual unavailable (e.g. DiffOpt wrapper hides conic duals)
         end
 
         # Fallback: DiffOpt reverse differentiation (same math, implicit diff of KKT)
-        DiffOpt.empty_input_sensitivities!(subproblem)
-        MOI.set(subproblem, DiffOpt.ReverseObjectiveSensitivity(), Δy)
-        DiffOpt.reverse_differentiate!(subproblem)
-        return (
-            NoTangent(),
-            NoTangent(),
-            NoTangent(),
-            NoTangent(),
-            NoTangent(),
-            DiffOpt.get_reverse_parameter.(subproblem, state_param_in),
-            DiffOpt.get_reverse_parameter.(subproblem, [s[1] for s in state_param_out]),
-        )
+        return _with_current_or_sensitivity_solution(
+            subproblem, integer_strategy
+        ) do sensitivity_model
+            DiffOpt.empty_input_sensitivities!(sensitivity_model)
+            MOI.set(sensitivity_model, DiffOpt.ReverseObjectiveSensitivity(), Δy)
+            DiffOpt.reverse_differentiate!(sensitivity_model)
+            result = (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                DiffOpt.get_reverse_parameter.(sensitivity_model, state_param_in),
+                DiffOpt.get_reverse_parameter.(
+                    sensitivity_model, [s[1] for s in state_param_out]
+                ),
+                NoTangent(),
+            )
+            DiffOpt.empty_input_sensitivities!(sensitivity_model)
+            return result
+        end
     end
     return y, _pullback
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(simulate_stage),
+    subproblem,
+    state_param_in,
+    state_param_out,
+    uncertainty,
+    state_in,
+    state_out,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    y, pullback = ChainRulesCore.rrule(
+        _simulate_stage,
+        subproblem,
+        state_param_in,
+        state_param_out,
+        uncertainty,
+        state_in,
+        state_out,
+        integer_strategy,
+    )
+    function public_pullback(Δy)
+        result = pullback(Δy)
+        return result[1:7]
+    end
+    return y, public_pullback
 end
 
 """
@@ -505,17 +775,38 @@ Solver failure (bad termination status) returns zero gradients or throws
 depending on [`STRICT_GRADIENTS`](@ref).
 """
 function ChainRulesCore.rrule(
-    ::typeof(simulate_multistage),
+    ::typeof(_simulate_multistage_det),
     det_equivalent::JuMP.Model,
     state_params_in,
     state_params_out,
     uncertainties,
     states,
+    integer_strategy::AbstractIntegerStrategy,
 )
-    y = simulate_multistage(
-        det_equivalent, state_params_in, state_params_out, uncertainties, states
-    )
-    forward_status = JuMP.termination_status(det_equivalent)
+    y = nothing
+    Δ_states_pdual = nothing
+    pdual_available = false
+    try
+        y, Δ_states_pdual = _simulate_multistage_det_with_parameter_duals(
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            uncertainties,
+            states,
+            integer_strategy,
+        )
+        pdual_available = true
+    catch
+        y = _simulate_multistage_det(
+            det_equivalent,
+            state_params_in,
+            state_params_out,
+            uncertainties,
+            states,
+            integer_strategy,
+        )
+    end
+    forward_status = _sensitivity_forward_status(det_equivalent, integer_strategy)
     function _pullback(Δy)
         status = forward_status
         Δ_states = similar(states)
@@ -532,41 +823,83 @@ function ChainRulesCore.rrule(
                 Δ_states[t + 1] = zeros(length(state_params_out[t]))
             end
             return (
-                NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                Δ_states,
+                NoTangent(),
             )
         end
 
         # Preferred: parameter duals (closed-form, Eq. 1.2)
-        try
-            Δ_states[1] = pdual.(state_params_in[1])
-            for t in 1:length(state_params_out)
-                Δ_states[t + 1] = pdual.([s[1] for s in state_params_out[t]])
-            end
+        if pdual_available
             return (
                 NoTangent(),
                 NoTangent(),
                 NoTangent(),
                 NoTangent(),
                 NoTangent(),
-                Δ_states * Δy,
+                Δ_states_pdual * Δy,
+                NoTangent(),
             )
-        catch
-            # pdual unavailable; fall back to DiffOpt
         end
 
         # Fallback: DiffOpt reverse differentiation
-        DiffOpt.empty_input_sensitivities!(det_equivalent)
-        MOI.set(det_equivalent, DiffOpt.ReverseObjectiveSensitivity(), Δy)
-        DiffOpt.reverse_differentiate!(det_equivalent)
-        Δ_states[1] = DiffOpt.get_reverse_parameter.(det_equivalent, state_params_in[1])
-        for t in 1:length(state_params_out)
-            Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(
-                det_equivalent, [s[1] for s in state_params_out[t]]
+        return _with_current_or_sensitivity_solution(
+            det_equivalent, integer_strategy
+        ) do sensitivity_model
+            DiffOpt.empty_input_sensitivities!(sensitivity_model)
+            MOI.set(sensitivity_model, DiffOpt.ReverseObjectiveSensitivity(), Δy)
+            DiffOpt.reverse_differentiate!(sensitivity_model)
+            Δ_states[1] = DiffOpt.get_reverse_parameter.(
+                sensitivity_model, state_params_in[1]
+            )
+            for t in 1:length(state_params_out)
+                Δ_states[t + 1] = DiffOpt.get_reverse_parameter.(
+                    sensitivity_model, [s[1] for s in state_params_out[t]]
+                )
+            end
+            DiffOpt.empty_input_sensitivities!(sensitivity_model)
+            return (
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                NoTangent(),
+                Δ_states,
+                NoTangent(),
             )
         end
-        return (NoTangent(), NoTangent(), NoTangent(), NoTangent(), NoTangent(), Δ_states)
     end
     return y, _pullback
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(simulate_multistage),
+    det_equivalent::JuMP.Model,
+    state_params_in,
+    state_params_out,
+    uncertainties,
+    states,
+    ;
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+)
+    y, pullback = ChainRulesCore.rrule(
+        _simulate_multistage_det,
+        det_equivalent,
+        state_params_in,
+        state_params_out,
+        uncertainties,
+        states,
+        integer_strategy,
+    )
+    function public_pullback(Δy)
+        result = pullback(Δy)
+        return result[1:6]
+    end
+    return y, public_pullback
 end
 
 function sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where {T<:Real}
@@ -608,6 +941,7 @@ function train_multistage(
     sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
     record=default_record,
     penalty_schedule=nothing,
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 )
     record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
@@ -643,7 +977,8 @@ function train_multistage(
                     state_params_out,
                     initial_state,
                     uncertainty_samples[s],
-                    m,
+                    m;
+                    integer_strategy=integer_strategy,
                 )
                 @ignore_derivatives sample_log(s, subproblems)
             end
@@ -700,6 +1035,7 @@ function train_multistage(
     sample_log=SampleLog(objective_no_deficit_fn=get_objective_no_target_deficit),
     record=default_record,
     penalty_schedule=nothing,
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 )
     record = _resolve_record(record, record_loss)
     # Initialise the optimiser for this model:
@@ -754,7 +1090,8 @@ function train_multistage(
                     state_params_in,
                     state_params_out,
                     uncertainty_samples[s],
-                    states,
+                    states;
+                    integer_strategy=integer_strategy,
                 )
                 @ignore_derivatives sample_log(s, det_equivalent)
             end

@@ -1,7 +1,7 @@
 name = "DecisionRules"
 uuid = "47937410-f832-486f-8300-12c95b225dfc"
-authors = ["Andrew Rosemberg <arosemberg3@gatech.edu> and contributors"]
 version = "0.1.0"
+authors = ["Andrew Rosemberg <arosemberg3@gatech.edu> and contributors"]
 
 [deps]
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
@@ -27,6 +27,8 @@ DiffOpt = "0.5.6, 0.6"
 FillArrays = "1.14.0"
 Flux = "0.16"
 Functors = "0.5.2"
+HiGHS = "1"
+Ipopt = "1.14.3"
 JLD2 = "0.6.3"
 JuMP = "1.29.4"
 MadNLP = "0.8, 0.9, 0.10"
@@ -48,4 +50,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [targets]
-test = ["Test", "Zygote", "Ipopt", "MadNLP", "CUDA", "CUDSS", "MadNLPGPU"]
+test = ["Test", "Zygote", "Ipopt", "MadNLP", "CUDA", "CUDSS", "MadNLPGPU", "HiGHS"]

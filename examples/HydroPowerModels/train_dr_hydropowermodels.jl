@@ -194,8 +194,6 @@ realized_rollout_evaluation = RolloutEvaluation(
 resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
     DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
 
-converged_rollout = false
-converged_training = false
 # Train Model using deterministic equivalent.
 train_multistage(
     models,
@@ -217,6 +215,7 @@ train_multistage(
         rollout_evaluation(iter, model)
         realized_rollout_evaluation(iter, model)
         converged_training = stall_train(iter, model, training_loss)
+        converged_rollout = false
         if iter % eval_every == 0
             converged_rollout = stall_rollout(
                 iter, model, rollout_evaluation.last_objective_no_deficit

@@ -27,6 +27,7 @@ makedocs(;
         "Examples" => [
             "Hydropower Scheduling" => "examples/hydro.md",
             "Rocket Control" => "examples/rocket.md",
+            "Stochastic Lot-Sizing (Integer Variables)" => "examples/inventory.md",
         ],
         "API Reference" => "api.md",
     ],

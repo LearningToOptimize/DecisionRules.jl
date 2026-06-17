@@ -25,6 +25,9 @@ export simulate_multistage,
     SaveBest,
     find_variables,
     compute_parameter_dual,
+    AbstractIntegerStrategy,
+    NoIntegerStrategy,
+    FixedDiscreteIntegerStrategy,
     StallingCriterium,
     policy_input_dim,
     normalize_recur_state,
@@ -58,6 +61,7 @@ const STRICT_GRADIENTS = Ref(false)
 
 const _SUCCESSFUL_TERM_STATUSES = (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_SOLVED)
 
+include("integer_strategies.jl")
 include("parameter_duals.jl")
 include("simulate_multistage.jl")
 include("dense_multilayer_nn.jl")
