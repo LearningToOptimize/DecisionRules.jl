@@ -1,14 +1,9 @@
 """
-Stochastic lot-sizing solved with SDDP.jl using FixedDiscreteDuality.
+Solve the seasonal ex-ante lot-sizing problem with SDDP.jl.
 
-SDDP.FixedDiscreteDuality and DecisionRules.FixedDiscreteIntegerStrategy share
-the same idea: fix the binary ordering decision z to its MIP incumbent, re-solve
-the resulting LP, and read LP duals as gradient/cut information. SDDP uses those
-duals to build Benders cuts that approximate the value function; TS-DDR uses them
-to back-propagate through the neural policy.
-
-Run this script after activate the inventory_control project:
-  julia --project=examples/inventory_control examples/inventory_control/solve_sddp.jl
+The SDDP model uses 2T stages:
+  odd stages  = order before demand is observed
+  even stages = demand realization and inventory/backlog cost
 """
 
 using SDDP
@@ -18,125 +13,144 @@ using CSV, DataFrames
 using Statistics
 using Random
 
-# ── Same problem parameters as build_inventory_problem.jl ─────────────────────
-const T_STAGES    = 12
-const K_COST      = 30.0    # fixed ordering cost
-const C_COST      = 2.0     # unit ordering cost
-const H_COST      = 1.0     # holding cost
-const P_COST      = 10.0    # backlog penalty
-const Q_MAX       = 80.0    # max order quantity
-const I_0         = 20.0    # initial inventory
-const D_MIN       = 10.0    # demand lower bound
-const D_MAX       = 30.0    # demand upper bound
-const N_TRAIN     = 30      # scenarios per stage for training
-const N_SIM       = 200     # out-of-sample simulations
+include(joinpath(@__DIR__, "build_inventory_problem.jl"))
+
+const N_TRAIN = 40
+const N_SIM = 300
+const ITERATION_LIMIT = 350
 
 rng_train = MersenneTwister(42)
-demand_scenarios = [
-    D_MIN .+ (D_MAX - D_MIN) .* rand(rng_train, N_TRAIN)
-    for _ in 1:T_STAGES
-]
+training_paths = [sample_inventory_demand_path(rng_train) for _ in 1:N_TRAIN]
+demand_scenarios = [[path[t] for path in training_paths] for t in 1:INVENTORY_T]
 
-# ── Build the SDDP model ───────────────────────────────────────────────────────
 model = SDDP.LinearPolicyGraph(
-    stages      = T_STAGES,
-    sense       = :Min,
-    lower_bound = 0.0,
-    optimizer   = HiGHS.Optimizer,
-) do sp, t
+    stages=2 * INVENTORY_T,
+    sense=:Min,
+    lower_bound=0.0,
+    optimizer=HiGHS.Optimizer,
+) do sp, stage
     set_silent(sp)
+    @variable(sp, s, SDDP.State, initial_value=INVENTORY_I0)
 
-    # State variable: net inventory (continuous)
-    @variable(sp, s, SDDP.State, initial_value = I_0)
-
-    # Local decisions
-    @variable(sp, 0 <= q <= Q_MAX)     # order quantity (continuous)
-    @variable(sp, z, Bin)              # order indicator (binary)
-    @variable(sp, inv_hold >= 0)       # inventory on hand
-    @variable(sp, back >= 0)           # backlog
-
-    # Uncertain demand — fixed inside parameterize callback
-    @variable(sp, d_par)
-    SDDP.parameterize(sp, demand_scenarios[t]) do d_val
-        JuMP.fix(d_par, d_val)
+    if isodd(stage)
+        @variable(sp, 0 <= q <= INVENTORY_Q_MAX)
+        @variable(sp, 0 <= z <= 1)
+        @constraint(sp, q <= INVENTORY_Q_MAX * z)
+        @constraint(sp, s.out == s.in + q)
+        @stageobjective(sp, INVENTORY_K * z + INVENTORY_C * q)
+    else
+        t = stage ÷ 2
+        @variable(sp, d_par)
+        @variable(sp, inv_hold >= 0)
+        @variable(sp, back >= 0)
+        SDDP.parameterize(sp, demand_scenarios[t]) do d_val
+            JuMP.fix(d_par, d_val; force=true)
+        end
+        @constraint(sp, s.out == s.in - d_par)
+        @constraint(sp, inv_hold - back == s.out)
+        @stageobjective(sp, INVENTORY_H * inv_hold + INVENTORY_P * back)
     end
-
-    # Constraints
-    @constraint(sp, s.out == s.in + q - d_par)     # inventory balance
-    @constraint(sp, inv_hold - back == s.out)       # split into on-hand / backlog
-    @constraint(sp, q <= Q_MAX * z)                 # order only if z = 1
-
-    @stageobjective(sp, K_COST * z + C_COST * q + H_COST * inv_hold + P_COST * back)
 end
 
-# ── Train ──────────────────────────────────────────────────────────────────────
-# FixedDiscreteDuality: identical concept to FixedDiscreteIntegerStrategy.
-# Fix z to its MIP incumbent → solve LP → read LP duals as Benders subgradients.
-# FixedDiscreteDuality keeps z ∈ {0,1} in the forward pass, giving honest
-# integer-feasible policies.  ContinuousConicDuality relaxes z in the forward
-# pass too, which makes simulation costs artificially low (below DP optimal).
-println("Training SDDP with FixedDiscreteDuality...")
+println("Training 24-stage SDDP relaxation...")
+sddp_train_start = time()
 SDDP.train(
     model;
-    duality_handler = SDDP.FixedDiscreteDuality(),
-    iteration_limit = 500,
-    stopping_rules  = [SDDP.BoundStalling(50, 1e-3)],
-    print_level     = 1,
+    duality_handler=SDDP.ContinuousConicDuality(),
+    iteration_limit=ITERATION_LIMIT,
+    stopping_rules=[SDDP.BoundStalling(80, 1e-3)],
+    print_level=1,
 )
+sddp_train_seconds = time() - sddp_train_start
 
 lower_bound = SDDP.calculate_bound(model)
-println("\nSDDP lower bound (expected cost): $lower_bound")
+println("\nSDDP LP lower bound (expected cost): $lower_bound")
 
-# ── Out-of-sample simulation on fresh U[D_MIN, D_MAX] draws ───────────────────
-# SDDP.simulate samples from the N_TRAIN training scenarios (possibly biased mean).
-# Manual rollout fixes each subproblem's state and demand directly so we can
-# use fresh draws from the true U[D_MIN, D_MAX] distribution.
-println("\nManual rollout on $N_SIM fresh U[$D_MIN,$D_MAX] scenarios...")
-
-rng_eval = MersenneTwister(99999)
+function training_log_dataframe(model)
+    log = model.most_recent_training_results.log
+    rows = DataFrame(iteration=Int[], bound=Float64[], simulation_value=Float64[], time=Float64[])
+    for row in log
+        iter = hasproperty(row, :iteration) ? row.iteration : row[:iteration]
+        bound = hasproperty(row, :bound) ? row.bound : row[:bound]
+        sim = try
+            hasproperty(row, :simulation_value) ? row.simulation_value : row[:simulation_value]
+        catch
+            NaN
+        end
+        tm = try
+            hasproperty(row, :time) ? row.time : row[:time]
+        catch
+            NaN
+        end
+        push!(rows, (iteration=iter, bound=bound, simulation_value=sim, time=tm))
+    end
+    return rows
+end
 
 function rollout_sddp(model, n_sim, rng)
     costs = Vector{Float64}(undef, n_sim)
+    traj_inv = Matrix{Float64}(undef, n_sim, INVENTORY_T + 1)
+
     for sim in 1:n_sim
-        state      = I_0
+        state = INVENTORY_I0
         total_cost = 0.0
-        for t in 1:T_STAGES
-            d  = D_MIN + (D_MAX - D_MIN) * rand(rng)
-            sp = model.nodes[t].subproblem
+        traj_inv[sim, 1] = state
+        demand_path = sample_inventory_demand_path(rng)
 
-            JuMP.fix(sp[:s].in,  state; force = true)
-            JuMP.fix(sp[:d_par], d;     force = true)
-            optimize!(sp)
+        for t in 1:INVENTORY_T
+            order_sp = model.nodes[2t - 1].subproblem
+            JuMP.fix(order_sp[:s].in, state; force=true)
+            optimize!(order_sp)
 
-            z     = round(value(sp[:z]))    # round to enforce {0,1}
-            q     = value(sp[:q])
-            s_out = value(sp[:s].out)
+            q = clamp(value(order_sp[:q]), 0.0, INVENTORY_Q_MAX)
+            z = q <= 1e-7 ? 0.0 : 1.0
+            s_mid = state + q
 
-            total_cost += K_COST * z + C_COST * q +
-                          H_COST * max(s_out, 0.0) + P_COST * max(-s_out, 0.0)
+            d = demand_path[t]
+            s_out = s_mid - d
+
+            total_cost += INVENTORY_K * z + INVENTORY_C * q +
+                          INVENTORY_H * max(s_out, 0.0) +
+                          INVENTORY_P * max(-s_out, 0.0)
             state = s_out
+            traj_inv[sim, t+1] = state
         end
         costs[sim] = total_cost
     end
-    return costs
+    return costs, traj_inv
 end
 
-sddp_costs = rollout_sddp(model, N_SIM, rng_eval)
+println("\nInteger rollout on $N_SIM fresh seasonal scenarios...")
+rng_eval = MersenneTwister(99999)
+sddp_eval_start = time()
+sddp_costs, sddp_traj = rollout_sddp(model, N_SIM, rng_eval)
+sddp_eval_seconds = time() - sddp_eval_start
 
 μ = mean(sddp_costs)
 σ = std(sddp_costs)
-println("SDDP policy — mean cost: $(round(μ, digits=1)) ± $(round(σ, digits=1))")
-println("SDDP lower bound:        $(round(lower_bound, digits=1))")
-println("Optimality gap (upper):  $(round(100*(μ - lower_bound)/μ, digits=1))%")
+println("SDDP policy — mean cost: $(round(μ, digits=1)) +/- $(round(σ, digits=1))")
+println("SDDP LP lower bound:    $(round(lower_bound, digits=1))")
+println("LP gap to rollout:      $(round(100 * (μ - lower_bound) / μ, digits=1))%")
 
-# ── Save results ───────────────────────────────────────────────────────────────
 result_dir = joinpath(@__DIR__, "results")
 mkpath(result_dir)
+CSV.write(joinpath(result_dir, "sddp_costs.csv"), DataFrame(operational_cost=sddp_costs))
 CSV.write(
-    joinpath(result_dir, "sddp_costs.csv"),
-    DataFrame(operational_cost = sddp_costs),
+    joinpath(result_dir, "sddp_trajectories.csv"),
+    DataFrame(sddp_traj, [Symbol("t$i") for i in 0:INVENTORY_T]),
+)
+CSV.write(joinpath(result_dir, "sddp_training_log.csv"), training_log_dataframe(model))
+CSV.write(
+    joinpath(result_dir, "sddp_timing.csv"),
+    DataFrame(
+        method=["SDDP.jl integer rollout"],
+        fit_seconds=[sddp_train_seconds],
+        inference_seconds=[sddp_eval_seconds],
+        n_eval=[N_SIM],
+        inference_ms_per_scenario=[1000 * sddp_eval_seconds / N_SIM],
+    ),
 )
 open(joinpath(result_dir, "sddp_bound.txt"), "w") do io
     println(io, lower_bound)
 end
-println("\nSaved results to $(result_dir)/sddp_costs.csv")
+println("\nSaved SDDP results to $(relpath(result_dir, @__DIR__))")

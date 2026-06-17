@@ -2,207 +2,191 @@
 EditURL = "inventory.jl"
 ```
 
-# Stochastic Lot-Sizing with Integer Variables
+# Inventory Control with Fixed Ordering Costs
 
-This example trains a TS-DDR policy for a stochastic uncapacitated lot-sizing
-(SULS) problem — an inventory control problem with binary ordering decisions.
+This example is a finite-horizon inventory-control problem with the feature that
+makes lot-sizing difficult in practice: placing an order has a fixed setup cost.
+The controller therefore faces a genuine batching decision. It may be better to
+order a large quantity now and carry inventory, or to skip an order and risk
+backlog later.
 
-The problem contains a binary variable ``z_t \in \{0,1\}`` at each stage,
-which standard dual-based gradient methods cannot handle directly.
-DecisionRules.jl provides `FixedDiscreteIntegerStrategy` to bridge this gap:
-after solving the MIP, it fixes the binary variables to their incumbent
-values, re-solves the resulting LP, and reads LP duals as gradient signal.
+The example is designed to stress methods that rely on stagewise-independent
+uncertainty. Each simulated demand trajectory has a latent seasonal phase,
+persistent high/low demand regimes, and autocorrelated shocks. The phase is
+randomized independently across sample paths, so a method cannot solve the
+problem by memorizing that a particular calendar period is always the peak.
+Useful decisions require reacting to observed demand history.
 
-## Problem formulation
+## Information Pattern
 
-**State**: net inventory ``s_t = s_{t-1} + q_t - d_t``.
+At the start of period ``t``, the controller observes:
 
-**Binary decision**: ``z_t \in \{0, 1\}`` — whether to place an order.
+- current net inventory ``s_{t-1}``,
+- the last two realized demands.
 
-**Continuous decision**: ``q_t \in [0, Q_\text{max}]`` — order quantity
-(``q_t = 0`` is forced when ``z_t = 0``).
+It does **not** observe the demand that will arrive in the current period.
+The order decision is therefore ex-ante. After the order is placed, current
+demand is realized and becomes part of the history available next period.
 
-**Random demand**: ``d_t \sim U[10, 30]`` per period.
+TS-DDR uses the same neural policy at every period. The policy is time-invariant:
+it receives demand history and inventory, but not the period index.
 
-**Stage cost**: ``K \cdot z_t + c \cdot q_t + h \cdot I_t + p \cdot B_t``
-where ``I_t = \max(s_t, 0)`` and ``B_t = \max(-s_t, 0)``.
+## Inventory Model
 
-**Parameters**: ``K = 30``, ``c = 2``, ``h = 1``, ``p = 10``,
-``Q_\text{max} = 80``, ``s_0 = 20``, ``T = 12`` stages.
+The binary variable has the standard lot-sizing interpretation:
 
-The TS-DDR policy predicts a target net inventory ``\hat{s}_t`` at each stage.
-A deficit penalty ``|\hat{s}_t - s_t|`` encourages the realized state to track
-the policy's prediction.
-
-````@example inventory
-using DecisionRules
-using JuMP, HiGHS
-using Flux
-using Statistics, Random
-````
-
-## Integer postprocessing strategy
-
-DecisionRules.jl introduces an extensible `AbstractIntegerStrategy` abstraction.
-The built-in `FixedDiscreteIntegerStrategy` implements the workflow from the
-[JuMP MIP duality tutorial](https://jump.dev/JuMP.jl/stable/tutorials/linear/mip_duality/):
-
-1. Solve the original MIP to get incumbent binary values ``z^*_t``.
-2. Call `JuMP.fix_discrete_variables(model)` to fix ``z_t = z^*_t`` and
-   relax integrality constraints.
-3. Re-solve the resulting continuous LP.
-4. Read LP duals for the target parameters ``\hat{s}_t``.
-5. Restore the original MIP structure (via the undo function).
-
-The resulting gradient approximation is local to the current binary assignment
-and should be interpreted as a postprocessing surrogate — not a global
-derivative of the mixed-integer solution map.
-
-## Building the model
-
-`build_inventory_subproblems` creates T per-stage JuMP models with binary
-ordering variables. `build_inventory_det_equivalent` assembles all stages
-into a single deterministic-equivalent MIP used for training.
-
-```julia
-include("build_inventory_problem.jl")
-
-det_eq, spi, spo, unc_samples, init_state = build_inventory_det_equivalent(;
-    T=12, K=30.0, c=2.0, h=1.0, p=10.0, Q_max=80.0,
-    I_0=20.0, d_min=10.0, d_max=30.0, num_scenarios=30, penalty=500.0,
-)
+```math
+z_t =
+\begin{cases}
+1, & \text{place an order in period } t,\\
+0, & \text{do not place an order.}
+\end{cases}
 ```
 
-## Policy architecture
+If ``z_t=0``, no units can be ordered. If ``z_t=1``, the model pays the fixed
+setup cost ``K`` and may order up to capacity:
 
-The policy receives `[demand_t, net_inventory_{t-1}]` and outputs a target
-net inventory ``\hat{s}_t``:
-
-```julia
-policy = Chain(
-    Dense(2, 16, relu),
-    Dense(16, 8, relu),
-    Dense(8, 1),
-)
+```math
+0 \le q_t \le Q_{\max} z_t.
 ```
 
-## Training with `FixedDiscreteIntegerStrategy`
+The ordered units arrive before demand:
 
-Pass `integer_strategy = FixedDiscreteIntegerStrategy()` to `train_multistage`.
-Internally, every forward pass solves the full T-stage MIP, fixes all
-``z_t^*``, re-solves as an LP, and reads LP duals for ``\hat{s}_t`` as the
-gradient of the objective with respect to the policy targets.
-
-```julia
-train_multistage(
-    policy,
-    init_state,
-    det_eq,
-    spi,
-    spo,
-    unc_samples;
-    num_batches         = 200,
-    num_train_per_batch = 4,
-    optimizer           = Flux.Adam(0.01),
-    integer_strategy    = FixedDiscreteIntegerStrategy(),
-    penalty_schedule    = :default_annealed,
-)
+```math
+s^{mid}_t = s_{t-1} + q_t,
+\qquad
+s_t = s^{mid}_t - d_t.
 ```
 
-## Evaluation
+Positive ``s_t`` is inventory on hand; negative ``s_t`` is backlog. The period
+cost is
 
-After training, the policy is rolled out stage-wise.  For each period,
-the policy predicts ``\hat{s}_t``, the stage MIP is solved, and the realized
-net inventory is passed to the next stage.
+```math
+K z_t + c q_t + h \max(s_t,0) + p \max(-s_t,0).
+```
+
+The numerical parameters are:
+
+| Parameter | Value | Meaning |
+|:--|--:|:--|
+| ``T`` | 12 | periods |
+| ``K`` | 100 | fixed order/setup cost |
+| ``c`` | 2 | unit ordering cost |
+| ``h`` | 1 | holding cost |
+| ``p`` | 15 | backlog penalty |
+| ``Q_{\max}`` | 200 | order capacity |
+| ``s_0`` | 30 | initial inventory |
+
+## TS-DDR Formulation
+
+The TS-DDR policy predicts a pre-demand order-up-to target ``\hat{s}^{mid}_t``.
+The mixed-integer subproblem chooses ``z_t`` and ``q_t`` to track that target
+while respecting setup and capacity constraints. The target penalty is imposed on
+``s^{mid}_t-\hat{s}^{mid}_t``, not on post-demand inventory.
+
+Although current demand is present as an uncertainty parameter in the JuMP model,
+the policy does not use it to choose the order target. The policy output has two
+roles:
+
+- choose the current pre-demand inventory target,
+- copy realized demand into the state so it can be used next period.
+
+The state carried between periods is:
 
 ```julia
-subproblems, spi_eval, spo_eval, unc_eval, _ = build_inventory_subproblems(;
-    T=12, K=30.0, c=2.0, h=1.0, p=10.0, Q_max=80.0,
-    I_0=20.0, d_min=10.0, d_max=30.0, num_scenarios=100, penalty=500.0,
-)
-
-# Evaluation loop (one test scenario):
-for t in 1:T
-    d_val  = demand_realization[t]
-    target = policy(Float32[d_val, state[1]])[1]
-    set_parameter_value(spi_eval[t][1], state[1])
-    set_parameter_value(demand_param, d_val)
-    set_parameter_value(spo_eval[t][1][1], target)
-    optimize!(subproblems[t])
-    state = [value(subproblems[t][:s_out])]
-end
+[net_inventory, last_demand, previous_demand]
 ```
+
+This lets a time-invariant policy infer the latent demand regime from recent
+observations without receiving a period counter or synthetic seasonal features.
+
+## Demand Process
+
+Let ``\phi`` be a path-level phase shift, sampled uniformly from
+``\{0,\ldots,T-1\}``, and let
+``\kappa_t = 1 + ((t+\phi-1) \bmod T)`` denote the shifted seasonal index. The
+nominal lower and upper seasonal bands are ``D^{lo}_{\kappa_t}`` and
+``D^{hi}_{\kappa_t}``, with midpoint ``m_{\kappa_t}`` and half-width
+``w_{\kappa_t}``.
+
+Demand also contains a persistent latent regime ``r_t\in\{-1,0,1\}`` and an
+autoregressive shock ``\epsilon_t``. In the implementation,
+
+```math
+\epsilon_t = 0.84\,\epsilon_{t-1}+0.35\,\eta_t,
+\qquad
+d_t =
+\operatorname{clip}\!\left(
+  m_{\kappa_t}
+  + w_{\kappa_t}
+    (0.78 r_t + 0.42 \epsilon_t + 0.12 \eta'_t)
+\right),
+```
+
+where the regime is resampled with probability ``0.08`` each period. The phase,
+regime, and shocks are not observed directly. The controller sees their effect
+only through realized demand history.
+
+The plot below shows 24 sampled demand paths. The dashed curve is the nominal
+seasonal center before the random phase shift. Because each trajectory has a
+different phase and persistent regime, the same period can correspond to high,
+medium, or low demand across scenarios.
+
+![Demand process](../assets/inventory_demand_process.png)
+
+## Benchmarks
+
+The comparison uses four baselines:
+
+- **SDDP.jl**: a 24-stage order/demand graph trained with a stagewise sampling
+  approximation. It sees the stage index through the policy graph, but not the
+  latent phase of each sample path.
+- **Base-stock**: a tuned constant order-up-to policy.
+- **Marginal DP**: a specialized dynamic program for the nominal marginal
+  seasonal model. It is intentionally included as a structure-aware reference,
+  but it is not exact for the true random-phase latent process.
+- **Random**: an untrained neural policy with the same ex-ante information
+  pattern as TS-DDR.
 
 ## Results
 
-The trained TS-DDR policy is compared against two baselines:
+All costs below are out-of-sample operational costs, excluding the auxiliary
+TS-DDR target-tracking penalty used during training. Fit time is the wall-clock
+time spent training or tuning the method. Evaluation time is reported per
+simulated scenario.
 
-- **Base-stock (S\* = 25)**: always order to bring inventory to a fixed target.
-  Classical heuristic for stochastic lot-sizing.
-- **Random (untrained)**: freshly initialised network, showing the benefit
-  of training.
-
-Training curve (operational cost, no deficit penalty, mean over batch):
+TS-DDR training:
 
 ![Training curve](../assets/inventory_training_curve.png)
 
-Net-inventory trajectories (TS-DDR in blue, base-stock in orange):
+SDDP learning curve:
+
+![SDDP learning](../assets/inventory_sddp_learning.png)
+
+Net-inventory trajectories:
 
 ![Inventory trajectories](../assets/inventory_trajectories.png)
 
-Cost distribution across 100 out-of-sample scenarios:
+Cost distribution:
 
 ![Cost comparison](../assets/inventory_cost_comparison.png)
 
-| Method              | N   | Mean cost | Std  |
-|:--------------------|----:|----------:|-----:|
-| TS-DDR (trained)    | 100 |     —     |  —   |
-| Base-stock (S*=25)  | 100 |     —     |  —   |
-| Random (untrained)  | 100 |     —     |  —   |
+SDDP LP relaxation bound: **2449.1**
 
-*(Fill values from `compare_results.jl` after a full training run.)*
+| Method                  | N    | Mean cost | Std    | 95% CI | vs TS-DDR | Fit (s) | Eval ms/scen |
+|:------------------------|-----:|----------:|-------:|-------:|----------:|--------:|-------------:|
+| TS-DDR (trained)        |  300 |    3152.9 |  375.2 |   42.5 |     +0.0% |    72.2 |       133.24 |
+| SDDP.jl integer rollout |  300 |    3460.4 |  653.3 |   73.9 |     +9.8% |    18.5 |         0.82 |
+| Base-stock (S*=112)     |  300 |    3433.7 |  387.8 |   43.9 |     +8.9% |     0.4 |         0.15 |
+| Marginal DP policy      | 3000 |    3706.0 | 1301.1 |   46.6 |    +17.5% |     1.4 |         0.04 |
+| Random (untrained)      |  300 |    3453.8 |  445.4 |   50.4 |     +9.5% |     0.0 |       207.05 |
 
-!!! note
-    The two-stage LDR methodology used here follows Bodur & Luedtke (2022)[^1],
-    who study a related multi-factory continuous-production inventory problem.
-    Their paper does not include results for the binary lot-sizing formulation above,
-    so direct numerical comparison is not available.
+The main qualitative point is not that TS-DDR is faster at rollout; it still
+solves mixed-integer subproblems during evaluation. The point is that a
+time-invariant policy trained through the deterministic equivalent learns a
+useful reaction to demand history, whereas methods built around stagewise
+independence or fixed order-up-to rules are misled by the random phase and
+persistent latent regimes.
 
-[^1]: Bodur, M. & Luedtke, J. (2022). *Two-stage linear decision rules for
-multi-stage stochastic programming.*
-Mathematical Programming **191**, 347–380.
-[arXiv:1701.04102](https://arxiv.org/abs/1701.04102)
-
-See `examples/inventory_control/` for the runnable scripts:
-- `build_inventory_problem.jl` — problem definition
-- `train_dr_inventory.jl` — training + trajectory evaluation
-- `evaluate_inventory.jl` — baseline policy evaluation
-- `compare_results.jl` — plots and summary table
-
-## Extending to custom integer strategies
-
-The abstraction is designed for easy extension. To add a new strategy,
-subtype `AbstractIntegerStrategy` and define `with_sensitivity_solution`:
-
-```julia
-struct MyIntegerStrategy <: DecisionRules.AbstractIntegerStrategy
-    # custom fields
-end
-
-function DecisionRules.with_sensitivity_solution(
-    f::Function,
-    model::JuMP.Model,
-    strategy::MyIntegerStrategy,
-)
-    optimize!(model)
-    # ... custom postprocessing ...
-    try
-        return f(model)
-    finally
-        # ... restore model ...
-    end
-end
-```
-
-The method must call the callback `f` only when duals can be read,
-and must restore any temporary model mutations before returning.
+The scripts used to generate these numbers are in
+`examples/inventory_control/`.

@@ -50,7 +50,12 @@ optimizers = [Flux.Adam()]
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
-penalty_schedule = :default_annealed
+penalty_schedule = [
+    (1, 60, 0.1),
+    (61, 120, 1.0),
+    (121, 180, 10.0),
+    (181, num_epochs * num_batches, 30.0),
+]
 num_eval_scenarios = 4
 eval_every = 25
 
