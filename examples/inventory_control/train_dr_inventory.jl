@@ -162,9 +162,8 @@ CSV.write(
     DataFrame(
         method=["TS-DDR (trained)"],
         fit_seconds=[train_seconds],
-        inference_seconds=[eval_seconds],
+        eval_seconds=[eval_seconds / (N_TEST * INVENTORY_T)],
         n_eval=[N_TEST],
-        inference_ms_per_scenario=[1000 * eval_seconds / N_TEST],
     ),
 )
 

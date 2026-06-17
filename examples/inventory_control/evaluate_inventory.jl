@@ -19,12 +19,8 @@ subproblems, spi, spo, unc_eval, init_state = build_inventory_subproblems(;
     seed=99,
 )
 
-function sampled_demand_path(rng)
-    return sample_inventory_demand_path(rng)
-end
-
 function evaluate_basestock_direct(S_star; n_test=N_EVAL, seed=555, keep_traj=false)
-    rng = MersenneTwister(seed)
+    Random.seed!(seed)
     traj_inv = Matrix{Float64}(undef, n_test, INVENTORY_T + 1)
     op_costs = Vector{Float64}(undef, n_test)
 
@@ -32,7 +28,7 @@ function evaluate_basestock_direct(S_star; n_test=N_EVAL, seed=555, keep_traj=fa
         inventory = INVENTORY_I0
         traj_inv[s, 1] = inventory
         op_costs[s] = 0.0
-        demands = sampled_demand_path(rng)
+        demands = sample_inventory_demand_path()
 
         for t in 1:INVENTORY_T
             q = inventory < S_star ? min(S_star - inventory, INVENTORY_Q_MAX) : 0.0
@@ -130,6 +126,8 @@ println("  Mean: $(round(mean(bs_costs), digits=1)) +/- $(round(std(bs_costs), d
 
 println("\nEvaluating random untrained ex-ante network...")
 random_policy = build_exante_policy(; seed=7)
+# Warmup: trigger JIT compilation before timing
+evaluate_policy_stagewise(random_policy; n_test=1, seed=0)
 random_eval_start = time()
 rand_costs, _ = evaluate_policy_stagewise(random_policy; n_test=N_EVAL, seed=555)
 random_eval_seconds = time() - random_eval_start
