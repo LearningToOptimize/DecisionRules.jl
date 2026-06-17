@@ -146,12 +146,8 @@ CSV.write(
     DataFrame(
         method=["Base-stock", "Random (untrained)"],
         fit_seconds=[tune_seconds, 0.0],
-        inference_seconds=[bs_eval_seconds, random_eval_seconds],
+        eval_seconds=[bs_eval_seconds / N_EVAL, random_eval_seconds / (N_EVAL * INVENTORY_T)],
         n_eval=[N_EVAL, N_EVAL],
-        inference_ms_per_scenario=[
-            1000 * bs_eval_seconds / N_EVAL,
-            1000 * random_eval_seconds / N_EVAL,
-        ],
     ),
 )
 open(joinpath(result_dir, "basestock_S_star.txt"), "w") do io

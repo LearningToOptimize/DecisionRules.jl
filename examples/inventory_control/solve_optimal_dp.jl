@@ -15,7 +15,7 @@ const S_LO = -260.0
 const S_HI = 280.0
 const DS = 1.0
 const N_QUAD = 121
-const N_SIM = 3000
+const N_SIM = 300
 
 s_grid = collect(S_LO:DS:S_HI)
 const N_S = length(s_grid)
@@ -119,14 +119,14 @@ dp_seconds = time() - dp_start
 optimal_expected_cost = interp_grid(V_final, INVENTORY_I0)
 println("\nMarginal DP expected cost (from I_0=$INVENTORY_I0): $(@sprintf("%.4f", optimal_expected_cost))")
 
-rng = MersenneTwister(7777)
+Random.seed!(555)
 sim_costs = Vector{Float64}(undef, N_SIM)
 
 dp_eval_start = time()
 for sim in 1:N_SIM
     s = INVENTORY_I0
     total_cost = 0.0
-    demand_path = sample_inventory_demand_path(rng)
+    demand_path = sample_inventory_demand_path()
     for t in 1:INVENTORY_T
         idx = clamp(floor(Int, (s - S_LO) / DS) + 1, 1, N_S)
         y = policy_y[t, idx]
@@ -163,9 +163,8 @@ CSV.write(
     DataFrame(
         method=["Marginal DP policy"],
         fit_seconds=[dp_seconds],
-        inference_seconds=[dp_eval_seconds],
+        eval_seconds=[dp_eval_seconds / N_SIM],
         n_eval=[N_SIM],
-        inference_ms_per_scenario=[1000 * dp_eval_seconds / N_SIM],
     ),
 )
 open(joinpath(result_dir, "optimal_dp_value.txt"), "w") do io

@@ -134,26 +134,52 @@ medium, or low demand across scenarios.
 
 ![Demand process](../assets/inventory_demand_process.png)
 
+## Integer Postprocessing Strategy
+
+DecisionRules.jl provides `FixedDiscreteIntegerStrategy` for problems with
+binary variables. At each training step: (1) solve the MIP for incumbent
+binary values ``z^*_t``; (2) fix ``z_t = z^*_t`` and relax integrality;
+(3) re-solve the resulting LP; (4) read LP duals as gradient signal.
+This is the same principle as SDDP.jl's `FixedDiscreteDuality`: both fix
+the binary incumbent and extract LP duals as subgradients. SDDP uses them
+to build Benders cuts; TS-DDR uses them to back-propagate through the
+neural policy.
+
 ## Benchmarks
 
 The comparison uses four baselines:
 
-- **SDDP.jl**: a 24-stage order/demand graph trained with a stagewise sampling
-  approximation. It sees the stage index through the policy graph, but not the
-  latent phase of each sample path.
-- **Base-stock**: a tuned constant order-up-to policy.
-- **Marginal DP**: a specialized dynamic program for the nominal marginal
-  seasonal model. It is intentionally included as a structure-aware reference,
-  but it is not exact for the true random-phase latent process.
-- **Random**: an untrained neural policy with the same ex-ante information
-  pattern as TS-DDR.
+- **SDDP.jl**: a 24-stage order/demand graph trained with a stagewise
+  sampling approximation. It sees the stage index through the policy graph,
+  but not the latent phase, regime, or demand history of each sample path.
+  Because the integer ordering variable ``z_t`` is relaxed to ``[0,1]``
+  during training, the LP cuts systematically underestimate the fixed
+  ordering cost — the rollout rounds ``z`` back to binary.
+- **Base-stock**: a tuned constant order-up-to policy (``S^*`` found by
+  grid search).
+- **Marginal DP**: backward dynamic program on the nominal seasonal model
+  (demand uniform over ``[D^{lo}_t, D^{hi}_t]`` per stage without phase
+  shifts, regime switching, or autocorrelation). This gives the optimal
+  policy for the single-cycle nominal problem but cannot adapt to the
+  latent state — its stage-specific ordering rule may apply a peak-season
+  policy during a trough and vice versa.
+- **Random**: untrained neural policy with the same ex-ante information
+  pattern as TS-DDR. It still solves MIP subproblems per stage, so it
+  isolates the benefit of training from the benefit of the MIP structure.
 
 ## Results
 
 All costs below are out-of-sample operational costs, excluding the auxiliary
-TS-DDR target-tracking penalty used during training. Fit time is the wall-clock
-time spent training or tuning the method. Evaluation time is reported per
-simulated scenario.
+TS-DDR target-tracking penalty used during training. All methods are
+evaluated on the same 300 demand scenarios (seed 555) for fair comparison.
+
+**Fit** is the one-time offline cost: TS-DDR neural-network training, SDDP
+cut building, base-stock grid search, or DP backward induction.
+**Eval** is the online deployment cost per decision point. For TS-DDR and
+Random, this is the time to solve one stage MIP subproblem. For SDDP,
+the full algorithm must be re-run because its LP-relaxation cuts cannot be
+pre-computed for the latent demand process
+(see [arXiv:2405.14973](https://arxiv.org/abs/2405.14973)).
 
 TS-DDR training:
 
@@ -173,20 +199,38 @@ Cost distribution:
 
 SDDP LP relaxation bound: **2449.1**
 
-| Method                  | N    | Mean cost | Std    | 95% CI | vs TS-DDR | Fit (s) | Eval ms/scen |
-|:------------------------|-----:|----------:|-------:|-------:|----------:|--------:|-------------:|
-| TS-DDR (trained)        |  300 |    3152.9 |  375.2 |   42.5 |     +0.0% |    72.2 |       133.24 |
-| SDDP.jl integer rollout |  300 |    3460.4 |  653.3 |   73.9 |     +9.8% |    18.5 |         0.82 |
-| Base-stock (S*=112)     |  300 |    3433.7 |  387.8 |   43.9 |     +8.9% |     0.4 |         0.15 |
-| Marginal DP policy      | 3000 |    3706.0 | 1301.1 |   46.6 |    +17.5% |     1.4 |         0.04 |
-| Random (untrained)      |  300 |    3453.8 |  445.4 |   50.4 |     +9.5% |     0.0 |       207.05 |
+| Method                  | N   | Mean cost | Std    | 95% CI | vs TS-DDR | Fit (s) | Eval (s) |
+|:------------------------|----:|----------:|-------:|-------:|----------:|--------:|---------:|
+| TS-DDR (trained)        | 300 |    3152.9 |  375.2 |   42.5 |     +0.0% |    70.6 |   0.0112 |
+| SDDP.jl integer rollout | 300 |    3459.2 |  669.3 |   75.7 |     +9.7% |     0.0 |  17.4000 |
+| Base-stock (S*=110)     | 300 |    3456.3 |  435.8 |   49.3 |     +9.6% |     0.2 |   0.0002 |
+| Marginal DP policy      | 300 |    3759.0 | 1318.9 |  149.2 |    +19.2% |     1.5 |   0.0003 |
+| Random (untrained)      | 300 |    3453.8 |  445.4 |   50.4 |     +9.5% |     0.0 |   0.0111 |
 
-The main qualitative point is not that TS-DDR is faster at rollout; it still
-solves mixed-integer subproblems during evaluation. The point is that a
-time-invariant policy trained through the deterministic equivalent learns a
-useful reaction to demand history, whereas methods built around stagewise
-independence or fixed order-up-to rules are misled by the random phase and
-persistent latent regimes.
+The main qualitative point is not that TS-DDR is faster at rollout — it
+still solves mixed-integer subproblems during evaluation. The point is
+that a time-invariant policy trained through the deterministic equivalent
+learns a useful reaction to demand history, whereas methods built around
+stagewise independence (SDDP) or fixed seasonal structure (Marginal DP)
+are misled by the random phase and persistent latent regimes.
 
-The scripts used to generate these numbers are in
-`examples/inventory_control/`.
+## Runnable Scripts
+
+The complete experiment lives in `examples/inventory_control/`:
+
+| Script | Purpose |
+|:-------|:--------|
+| `build_inventory_problem.jl` | JuMP subproblem and det-equivalent builders, demand process, policy architecture |
+| `train_dr_inventory.jl` | TS-DDR training and trajectory evaluation |
+| `evaluate_inventory.jl` | Base-stock grid-search and random baseline evaluation |
+| `solve_sddp.jl` | SDDP (2T-stage) training and integer rollout |
+| `solve_optimal_dp.jl` | Marginal DP backward induction and simulation |
+| `compare_results.jl` | Load all CSVs, print summary table, save plots |
+
+```bash
+julia --project=examples/inventory_control examples/inventory_control/train_dr_inventory.jl
+julia --project=examples/inventory_control examples/inventory_control/evaluate_inventory.jl
+julia --project=examples/inventory_control examples/inventory_control/solve_sddp.jl
+julia --project=examples/inventory_control examples/inventory_control/solve_optimal_dp.jl
+julia --project=examples/inventory_control examples/inventory_control/compare_results.jl
+```

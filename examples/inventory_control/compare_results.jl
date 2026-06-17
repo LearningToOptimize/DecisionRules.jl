@@ -41,8 +41,8 @@ println()
 println("Marginal DP model value:        $(@sprintf("%.1f", dp_value))")
 println("SDDP LP relaxation bound:       $(@sprintf("%.1f", sddp_bound))")
 println()
-println("| Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR | Fit (s) | Eval ms/scen |")
-println("|:-------------------------|----:|----------:|------:|-------:|---------:|--------:|-------------:|")
+println("| Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR | Fit (s) | Eval (s) |")
+println("|:-------------------------|----:|----------:|------:|-------:|---------:|--------:|---------:|")
 
 entries = [
     ("TS-DDR (trained)", dr_costs),
@@ -58,7 +58,7 @@ for (name, costs) in entries
     row = timing[timing_key]
     gap = (mean(costs) - dr_mean) / dr_mean * 100
     @printf(
-        "| %-24s | %3d | %9.1f | %5.1f | %6.1f | %+8.1f%% | %7.1f | %12.2f |\n",
+        "| %-24s | %3d | %9.1f | %5.1f | %6.1f | %+8.1f%% | %7.1f | %8.4f |\n",
         name,
         length(costs),
         mean(costs),
@@ -66,7 +66,7 @@ for (name, costs) in entries
         ci95(costs),
         gap,
         row.fit_seconds,
-        row.inference_ms_per_scenario,
+        row.eval_seconds,
     )
 end
 println()
