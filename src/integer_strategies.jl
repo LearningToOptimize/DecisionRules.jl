@@ -93,6 +93,42 @@ function _with_current_or_sensitivity_solution(
     return with_sensitivity_solution(f, model, integer_strategy)
 end
 
+"""
+    ContinuousRelaxationIntegerStrategy()
+
+Relax all binary/integer constraints to continuous bounds (binary → [0,1]),
+solve the resulting LP, and read duals in that relaxed state.
+
+Compared to [`FixedDiscreteIntegerStrategy`](@ref):
+- **Faster**: one LP solve instead of MIP + LP.
+- **Smoother gradients**: no integer fixing means no zero-gradient dead zones.
+- **Less accurate**: the LP solution may have fractional integer variables,
+  so the gradient does not correspond to any feasible integer assignment.
+
+A practical pattern is to train with `ContinuousRelaxationIntegerStrategy`
+during warmup (smooth landscape for initial learning) and switch to
+`FixedDiscreteIntegerStrategy` later (integer-accurate gradients for
+fine-tuning).
+"""
+struct ContinuousRelaxationIntegerStrategy <: AbstractIntegerStrategy end
+
+function with_sensitivity_solution(
+    f::Function, model::JuMP.Model, ::ContinuousRelaxationIntegerStrategy
+)
+    has_discrete_variables(model) || begin
+        optimize!(model)
+        return f(model)
+    end
+    undo = JuMP.relax_integrality(model)
+    try
+        optimize!(model)
+        _assert_successful_solve(model; context="continuous relaxation sensitivity solve")
+        return f(model)
+    finally
+        undo()
+    end
+end
+
 _sensitivity_forward_status(model::JuMP.Model, ::NoIntegerStrategy) =
     JuMP.termination_status(model)
 

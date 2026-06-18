@@ -1,15 +1,14 @@
-# # Inventory Control with Fixed Ordering Costs
+# # Inventory Control with Ordering Costs
 #
-# This example is a finite-horizon inventory-control problem with a fixed setup
-# cost for ordering. The binary variable ``z_t`` indicates whether an order is
-# placed in period ``t``. If ``z_t=0``, the order quantity must be zero; if
-# ``z_t=1``, the model pays a setup cost and may order up to capacity.
+# This example studies a 12-period stochastic lot-sizing problem with two
+# formulations — a **relaxed** (continuous) case and an **integer** (MIP) case
+# with fixed ordering costs.  The comparison shows:
 #
-# Demand trajectories have a latent seasonal phase, persistent high/low regimes,
-# and autocorrelated shocks. The phase is randomized across sample paths, so the
-# calendar period is not a reliable signal of where the trajectory is in the
-# cycle. TS-DDR is used as a time-invariant policy that reacts to inventory and
-# realized demand history.
+# 1. **Relaxed problem**: SDDP with a PAR(1) demand approximation is
+#    near-optimal and outperforms TS-DDR.
+# 2. **Integer problem**: TS-DDR with `FixedDiscreteIntegerStrategy` outperforms
+#    both SDDP and TS-DDR with `ContinuousRelaxationIntegerStrategy`, because
+#    SDDP and continuous relaxation both underestimate the fixed ordering cost.
 
 using DecisionRules
 using JuMP, HiGHS
@@ -19,122 +18,155 @@ using Statistics, Random
 # ## Information Pattern
 #
 # At the beginning of a period, the controller observes current inventory and
-# recent realized demand. It does **not** observe current demand before ordering.
-# The order is therefore ex-ante. After ordering, demand is realized and becomes
+# recent realized demand.  It does **not** observe current demand before ordering.
+# The order is therefore ex-ante.  After ordering, demand is realized and becomes
 # part of the state for the next period.
-
-# ## Inventory Model
 #
-# ```math
-# 0 \le q_t \le Q_{\max} z_t,\quad z_t\in\{0,1\}
-# ```
-#
-# ```math
-# s^{mid}_t = s_{t-1}+q_t,\qquad s_t=s^{mid}_t-d_t.
-# ```
-#
-# Positive ``s_t`` is inventory and negative ``s_t`` is backlog. The stage cost is
-#
-# ```math
-# Kz_t+cq_t+h\max(s_t,0)+p\max(-s_t,0).
-# ```
-#
-# The example uses ``T=12``, ``K=100``, ``c=2``, ``h=1``, ``p=15``,
-# ``Q_{\max}=200``, and ``s_0=30``.
-
-# ## TS-DDR Policy
-#
-# The policy predicts a pre-demand order-up-to target. The target penalty is
-# imposed on ``s^{mid}_t-\hat{s}^{mid}_t``. Current demand is a model uncertainty
-# parameter, but the policy does not use it to choose the order target. It only
-# copies realized demand into the history state for the next period.
-#
-# The state is:
+# The state carried between periods is:
 #
 # ```julia
 # [net_inventory, last_demand, previous_demand]
 # ```
+#
+# This lets a time-invariant policy infer the latent demand regime from recent
+# observations without receiving a period counter or synthetic seasonal features.
+
+# ## Inventory Model
+#
+# ### Relaxed formulation
+#
+# The order quantity is continuous with no setup cost:
+#
+# ```math
+# 0 \le q_t \le Q_{\max}, \qquad
+# \text{cost}_t = c\,q_t + h\max(s_t,0) + p\max(-s_t,0).
+# ```
+#
+# ### Integer formulation
+#
+# A binary variable ``z_t \in \{0,1\}`` controls whether an order is placed.
+# If ``z_t = 0``, then ``q_t`` must be zero; if ``z_t = 1``, the model pays a
+# fixed setup cost ``K``:
+#
+# ```math
+# 0 \le q_t \le Q_{\max}\,z_t, \qquad
+# \text{cost}_t = K\,z_t + c\,q_t + h\max(s_t,0) + p\max(-s_t,0).
+# ```
+#
+# In both cases, ordered units arrive before demand:
+#
+# ```math
+# s^{mid}_t = s_{t-1} + q_t, \qquad s_t = s^{mid}_t - d_t.
+# ```
+#
+# | Parameter | Value | Meaning |
+# |:--|--:|:--|
+# | ``T`` | 12 | periods |
+# | ``K`` | 500 | fixed order/setup cost (integer case) |
+# | ``c`` | 2 | unit ordering cost |
+# | ``h`` | 1 | holding cost |
+# | ``p`` | 25 | backlog penalty |
+# | ``Q_{\max}`` | 350 | order capacity |
+# | ``s_0`` | 30 | initial inventory |
 
 # ## Demand Process
 #
-# Each trajectory has a path-level phase shift, a persistent latent high/low
-# regime, and an autoregressive shock. The implementation samples
-# ``\phi\sim\mathrm{Unif}\{0,\ldots,T-1\}``, shifts the seasonal demand band by
-# ``\phi``, and then perturbs the shifted midpoint using the latent regime and
-# AR shock. None of these latent variables is observed directly; the policy sees
-# only inventory and realized demand history.
+# Each trajectory has a path-level phase shift ``\phi \sim \mathrm{Unif}\{0,\ldots,T-1\}``,
+# a persistent latent regime ``r_t \in \{-1,0,1\}`` (switch probability 0.04),
+# and an autoregressive shock ``\epsilon_t``:
+#
+# ```math
+# \epsilon_t = 0.92\,\epsilon_{t-1} + 0.35\,\eta_t, \qquad
+# d_t = \operatorname{clip}\!\bigl(
+#   m_{\kappa_t} + w_{\kappa_t}(0.85\,r_t + 0.42\,\epsilon_t + 0.12\,\eta'_t)
+# \bigr),
+# ```
+#
+# where ``\kappa_t = 1 + ((t + \phi - 1) \bmod T)`` is the shifted seasonal
+# index, and ``m_{\kappa_t}`` and ``w_{\kappa_t}`` are the midpoint and
+# half-width of the seasonal demand band.  None of the latent variables are
+# observed; the policy sees only inventory and realized demand history.
+#
+# The plot below shows 24 sampled demand paths.  Because each trajectory has a
+# different phase and persistent regime, the same calendar period can correspond
+# to high, medium, or low demand across scenarios.
 #
 # ![Demand process](../assets/inventory_demand_process.png)
 
-# ## Integer Postprocessing Strategy
+# ## Integer Postprocessing Strategies
 #
-# DecisionRules.jl provides `FixedDiscreteIntegerStrategy` for problems with
-# binary variables. At each training step: (1) solve the MIP for incumbent
-# binary values ``z^*_t``; (2) fix ``z_t = z^*_t`` and relax integrality;
-# (3) re-solve the resulting LP; (4) read LP duals as gradient signal.
-# This is the same principle as SDDP.jl's `FixedDiscreteDuality`: both fix
-# the binary incumbent and extract LP duals as subgradients.  SDDP uses them
-# to build Benders cuts; TS-DDR uses them to back-propagate through the
-# neural policy.
+# DecisionRules.jl provides two strategies for extracting gradient information
+# from subproblems with discrete variables:
 #
-# ## Benchmarks
+# **`FixedDiscreteIntegerStrategy`**: (1) solve the MIP for incumbent binary
+# values ``z^*_t``; (2) fix ``z_t = z^*_t`` and relax integrality; (3) re-solve
+# the resulting LP; (4) read LP duals as gradient signal.  This is the same
+# principle as SDDP.jl's `FixedDiscreteDuality`.
 #
-# - **SDDP.jl**: a 24-stage order/demand graph trained with a stagewise
-#   sampling approximation. It sees the stage index through the policy graph,
-#   but not the latent phase, regime, or demand history of each sample path.
-#   Because the integer ordering variable ``z_t`` is relaxed to ``[0,1]``
-#   during training, the LP cuts systematically underestimate the fixed
-#   ordering cost — the rollout rounds ``z`` back to binary.
-# - **Base-stock**: a tuned constant order-up-to policy (``S^*`` found by
-#   grid search).
-# - **Marginal DP**: backward dynamic program on the nominal seasonal model
-#   (demand uniform over ``[D^{lo}_t, D^{hi}_t]`` per stage without phase
-#   shifts, regime switching, or autocorrelation).  This gives the optimal
-#   policy for the single-cycle nominal problem but cannot adapt to the
-#   latent state — its stage-specific ordering rule may apply a peak-season
-#   policy during a trough and vice versa.
-# - **Random**: untrained neural policy with the same ex-ante information
-#   pattern as TS-DDR.  It still solves MIP subproblems per stage, so it
-#   isolates the benefit of training from the benefit of the MIP structure.
+# **`ContinuousRelaxationIntegerStrategy`**: relax all binary/integer
+# constraints to continuous bounds (binary → [0,1]), solve the resulting LP,
+# and read duals directly.  This is faster (one LP instead of MIP + LP) and
+# gives smoother gradients, but the solution may have fractional integer
+# variables — the gradient does not correspond to any feasible integer
+# assignment.
+#
+# For the relaxed formulation (no integer variables), `NoIntegerStrategy` is
+# used and subproblems are solved as-is.
 
-# ## Results
+# ## Relaxed (Continuous) Problem
 #
-# All costs below are out-of-sample operational costs, excluding the auxiliary
-# TS-DDR target-tracking penalty used during training.  All methods are
-# evaluated on the same 300 demand scenarios (seed 555) for fair comparison.
+# When there are no integer variables, SDDP can model the demand process
+# exactly via a PAR(1) approximation that carries ``d_{t-1}`` as a state
+# variable.  This makes SDDP near-optimal for the relaxed problem.
 #
-# **Fit** is the one-time offline cost: TS-DDR neural-network training, SDDP
-# cut building, base-stock grid search, or DP backward induction.
-# **Eval** is the online deployment cost per decision point.  For TS-DDR and
-# Random, this is the time to solve one stage MIP subproblem.  For SDDP,
-# the full algorithm must be re-run because its LP-relaxation cuts cannot be
-# pre-computed for the latent demand process (see [arXiv:2405.14973](https://arxiv.org/abs/2405.14973)).
+# SDDP uses a PAR(1) fit: ``d_t \approx \mu_t + \alpha(d_{t-1} - \mu_{t-1}) + \omega_t``
+# with per-stage means ``\mu_t``, autocorrelation ``\alpha \approx 0.86``, and
+# 9 equiprobable innovation points fitted from 10,000 simulated demand paths.
 #
-# ![Training curve](../assets/inventory_training_curve.png)
+# ![Relaxed results](../assets/inventory_relaxed_results.png)
 #
-# ![SDDP learning](../assets/inventory_sddp_learning.png)
+# | Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR | Fit (s) | Eval (s) |
+# |:-------------------------|----:|----------:|------:|-------:|----------:|--------:|---------:|
+# | TS-DDR (trained)         | 300 |    2667.3 | 594.5 |   67.3 |     +0.0% |    54.6 |   0.0018 |
+# | SDDP (PAR)              | 300 |    2434.2 | 774.8 |   87.7 |     -8.7% |     0.0 |  20.6455 |
+# | Base-stock (S\*=160)    | 300 |    3035.6 | 506.8 |   57.3 |    +13.8% |     0.0 |   0.0002 |
+# | Random (untrained)      | 300 |    3751.7 | 221.7 |   25.1 |    +40.7% |     0.0 |   0.0018 |
 #
-# ![Inventory trajectories](../assets/inventory_trajectories.png)
+# SDDP clearly dominates: 8.7% lower cost than TS-DDR, 40.7% lower than
+# Random.  The SDDP and Random cost distributions are non-overlapping,
+# confirming that informed methods have a clear edge on this demand process.
+
+# ## Integer (MIP) Problem
 #
-# ![Cost comparison](../assets/inventory_cost_comparison.png)
+# Introducing the binary ``z_t`` and fixed cost ``K=500`` changes the
+# landscape.  SDDP can only use LP relaxation for training (``z \in [0,1]``),
+# which systematically underestimates ``K``: when the LP says ``z=0.3``,
+# ``q=20``, the relaxed cost is ``0.3 \times 500 + 2 \times 20 = 190``, but
+# the true integer cost with ``z=1`` is ``500 + 40 = 540``.
 #
-# SDDP LP relaxation bound: **2449.1**
+# TS-DDR with `FixedDiscreteIntegerStrategy` handles this correctly: it
+# solves the full MIP, fixes the binary incumbent, and reads LP duals in
+# that integer-consistent state.
 #
-# | Method                  | N   | Mean cost | Std    | 95% CI | vs TS-DDR | Fit (s) | Eval (s) |
-# |:------------------------|----:|----------:|-------:|-------:|----------:|--------:|---------:|
-# | TS-DDR (trained)        | 300 |    3152.9 |  375.2 |   42.5 |     +0.0% |    70.6 |   0.0112 |
-# | SDDP.jl integer rollout | 300 |    3459.2 |  669.3 |   75.7 |     +9.7% |     0.0 |  17.4000 |
-# | Base-stock (S*=110)     | 300 |    3456.3 |  435.8 |   49.3 |     +9.6% |     0.2 |   0.0002 |
-# | Marginal DP policy      | 300 |    3759.0 | 1318.9 |  149.2 |    +19.2% |     1.5 |   0.0003 |
-# | Random (untrained)      | 300 |    3453.8 |  445.4 |   50.4 |     +9.5% |     0.0 |   0.0111 |
+# ![Integer results](../assets/inventory_integer_results.png)
 #
-# The main qualitative point is not that TS-DDR is faster at rollout — it
-# still solves mixed-integer subproblems during evaluation.  The point is
-# that a time-invariant policy trained through the deterministic equivalent
-# learns a useful reaction to demand history, whereas methods built around
-# stagewise independence (SDDP) or fixed seasonal structure (Marginal DP)
-# are misled by the random phase and persistent latent regimes.
+# | Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR (FD) | Fit (s) | Eval (s) |
+# |:-------------------------|----:|----------:|------:|-------:|---------------:|--------:|---------:|
+# | TS-DDR (FixedDiscrete)   | 300 |    8015.8 | 719.5 |   81.4 |          +0.0% |   339.2 |   0.0112 |
+# | TS-DDR (ContRelax)       | 300 |    8318.1 | 720.0 |   81.5 |          +3.8% |   109.4 |   0.0117 |
+# | SDDP integer rollout     | 300 |    8274.2 | 912.5 |  103.3 |          +3.2% |     0.0 |   7.9088 |
+# | Base-stock (S\*=160)    | 300 |    9035.6 | 506.8 |   57.3 |         +12.7% |     0.0 |   0.0000 |
+# | Random (untrained)      | 300 |    9594.6 | 361.1 |   40.9 |         +19.7% |     0.0 |   0.0120 |
 #
+# `FixedDiscreteIntegerStrategy` achieves the lowest cost (8016), beating both
+# SDDP (8274, +3.2%) and `ContinuousRelaxationIntegerStrategy` (8318, +3.8%).
+# The continuous relaxation strategy performs similarly to SDDP — both use LP
+# relaxation and both underestimate the fixed ordering cost.
+#
+# `ContinuousRelaxationIntegerStrategy` trains 3× faster (109s vs 339s)
+# because it only solves LPs, but the resulting policy is less accurate on
+# integer-constrained problems.
+
 # ## Runnable Scripts
 #
 # The complete experiment lives in `examples/inventory_control/`:
@@ -142,16 +174,14 @@ using Statistics, Random
 # | Script | Purpose |
 # |:-------|:--------|
 # | `build_inventory_problem.jl` | JuMP subproblem and det-equivalent builders, demand process, policy architecture |
-# | `train_dr_inventory.jl` | TS-DDR training and trajectory evaluation |
+# | `train_dr_inventory.jl` | TS-DDR training (relaxed, FixedDiscrete, ContRelax) and trajectory evaluation |
 # | `evaluate_inventory.jl` | Base-stock grid-search and random baseline evaluation |
-# | `solve_sddp.jl` | SDDP (2T-stage) training and integer rollout |
-# | `solve_optimal_dp.jl` | Marginal DP backward induction and simulation |
-# | `compare_results.jl` | Load all CSVs, print summary table, save plots |
+# | `solve_sddp.jl` | SDDP (2T-stage PAR(1)) training and rollout |
+# | `compare_results.jl` | Load all CSVs, print summary tables, save plots |
 #
 # ```bash
 # julia --project=examples/inventory_control examples/inventory_control/train_dr_inventory.jl
 # julia --project=examples/inventory_control examples/inventory_control/evaluate_inventory.jl
 # julia --project=examples/inventory_control examples/inventory_control/solve_sddp.jl
-# julia --project=examples/inventory_control examples/inventory_control/solve_optimal_dp.jl
 # julia --project=examples/inventory_control examples/inventory_control/compare_results.jl
 # ```

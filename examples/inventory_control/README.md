@@ -1,8 +1,8 @@
 # Inventory Control Example
 
-This example studies a 12-period stochastic lot-sizing problem with fixed order
-costs. It is meant to be a hard mixed-integer inventory benchmark for TS-DDR,
-not a toy newsvendor example.
+This example studies a 12-period stochastic lot-sizing problem with two
+formulations — relaxed (continuous LP) and integer (MIP with fixed ordering
+costs). It benchmarks TS-DDR against SDDP, base-stock, and random policies.
 
 ## Problem
 
@@ -15,6 +15,13 @@ It does **not** know the demand that will arrive in the current period. The
 controller chooses whether to order and how much to order before current demand
 is realized.
 
+### Relaxed formulation
+
+No binary variable. The order quantity `q_t ∈ [0, Q_max]` is continuous.
+Cost per period: `c·q + h·max(s,0) + p·max(-s,0)`.
+
+### Integer formulation
+
 The binary variable `z_t` means "place an order in period `t`." If `z_t = 0`,
 then the order quantity `q_t` must be zero. If `z_t = 1`, the model pays the
 fixed setup cost `K` and may order up to `Q_max` units:
@@ -23,16 +30,7 @@ fixed setup cost `K` and may order up to `Q_max` units:
 0 <= q_t <= Q_max * z_t
 ```
 
-After the order arrives, demand is realized:
-
-```julia
-s_mid[t] = s_in[t] + q[t]
-s_out[t] = s_mid[t] - demand[t]
-```
-
-Positive `s_out` is held as inventory; negative `s_out` is backlog. The realized
-state for the next period is `[s_out[t], demand[t], demand[t-1]]`, so policies
-may react to demand history without seeing current demand before ordering.
+Cost per period: `K·z + c·q + h·max(s,0) + p·max(-s,0)`.
 
 ## Demand Process
 
@@ -48,6 +46,28 @@ In code, each path samples a phase shift `phi`, a latent regime in
 `D_LO[mod1(t + phi, T)]` to `D_HI[mod1(t + phi, T)]`. The latent variables are
 never passed to policies; they must infer the process from recent demands.
 
+SDDP uses a PAR(1) approximation fitted to the true process, carrying
+`d_lag` as a state variable to capture autocorrelation.
+
+## Integer Postprocessing Strategies
+
+TS-DDR uses `AbstractIntegerStrategy` to handle discrete variables in
+subproblems. Two strategies are available:
+
+- **`FixedDiscreteIntegerStrategy`**: Solve the MIP, fix binary/integer
+  variables at their incumbent values, relax integrality, re-solve the
+  fixed continuous LP, and read duals. The gradient is local to the
+  incumbent integer assignment.
+
+- **`ContinuousRelaxationIntegerStrategy`**: Relax all binary/integer
+  constraints to continuous bounds (binary → [0,1]), solve the resulting
+  LP, and read duals directly. Faster (one LP solve instead of MIP + LP)
+  with smoother gradients, but the solution may have fractional integer
+  variables.
+
+For the relaxed formulation (no integer variables), `NoIntegerStrategy`
+is used — subproblems are solved and duals read as-is.
+
 ## Scripts
 
 Run from the repository root:
@@ -56,50 +76,40 @@ Run from the repository root:
 julia --project=examples/inventory_control examples/inventory_control/train_dr_inventory.jl
 julia --project=examples/inventory_control examples/inventory_control/evaluate_inventory.jl
 julia --project=examples/inventory_control examples/inventory_control/solve_sddp.jl
-julia --project=examples/inventory_control examples/inventory_control/solve_optimal_dp.jl
 julia --project=examples/inventory_control examples/inventory_control/compare_results.jl
 ```
 
-The first four scripts can be run independently. `compare_results.jl` should be
+The first three scripts can be run independently. `compare_results.jl` should be
 run last.
 
 ## Outputs
 
-Results are written to `examples/inventory_control/results/`:
+Results are written to `examples/inventory_control/results/` with `relaxed_`
+and `integer_` prefixes:
 
-- `dr_costs.csv`, `dr_trajectories.csv`, `dr_orders.csv`
-- `basestock_costs.csv`, `basestock_trajectories.csv`, `basestock_S_star.txt`
-- `random_costs.csv`
-- `sddp_costs.csv`, `sddp_bound.txt`, `sddp_training_log.csv`
-- `optimal_costs.csv`, `optimal_dp_value.txt`
-- `training_curve.csv`
-- `dr_timing.csv`, `baseline_timing.csv`, `sddp_timing.csv`,
-  `optimal_timing.csv`
+- `{tag}_dr_costs.csv`, `{tag}_dr_trajectories.csv`
+- `{tag}_basestock_costs.csv`, `{tag}_basestock_trajectories.csv`, `{tag}_basestock_S_star.txt`
+- `{tag}_random_costs.csv`
+- `{tag}_sddp_costs.csv`, `{tag}_sddp_bound.txt`, `{tag}_sddp_training_log.csv`
+- `{tag}_training_curve.csv`
+- `{tag}_dr_timing.csv`, `{tag}_baseline_timing.csv`, `{tag}_sddp_timing.csv`
 
 Figures are written to `docs/src/assets/`:
 
 - `inventory_demand_process.png`
-- `inventory_training_curve.png`
-- `inventory_sddp_learning.png`
-- `inventory_trajectories.png`
-- `inventory_cost_comparison.png`
-
-The final comparison table in the documentation reports out-of-sample
-operational cost, wall-clock fit time, and evaluation milliseconds per
-scenario.
+- `inventory_relaxed_results.png`
+- `inventory_integer_results.png`
 
 ## Benchmarks
 
 - **TS-DDR** learns an ex-ante order target from inventory and demand history,
-  using the same time-invariant policy at every period.
-- **SDDP.jl** uses a 24-stage order/demand graph and is evaluated by integer
-  rollout on the same latent demand process.
+  using the same time-invariant neural policy at every period.
+- **SDDP** uses a PAR(1) demand approximation in a 24-stage order/demand graph.
+  For the integer case, it uses LP relaxation with integer rounding at rollout.
 - **Base-stock** is a tuned constant order-up-to policy.
-- **Marginal DP** is a specialized reference policy for a simplified marginal
-  seasonal model. It is not an exact optimum for the latent demand process.
 - **Random** is an untrained ex-ante neural policy.
 
-The expected qualitative result is that TS-DDR should beat the practical
-baselines, especially SDDP and base-stock. The marginal-DP policy is useful as a
-structure-aware reference for a simplified model, but it is not an oracle for the
-true random-phase process and should not be interpreted as an exact lower bound.
+The expected qualitative result is:
+- **Relaxed**: SDDP dominates (near-optimal for convex problems with Markov noise).
+- **Integer**: TS-DDR dominates (handles MIP subproblems natively via integer
+  postprocessing strategies, while SDDP's LP relaxation underestimates fixed costs).
