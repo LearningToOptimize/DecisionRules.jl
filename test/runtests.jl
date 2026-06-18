@@ -1,5 +1,6 @@
 using DecisionRules
 using Test
+using HiGHS
 using Ipopt
 using MadNLP
 using JuMP
@@ -18,6 +19,7 @@ quiet_ipopt_model() = Model(quiet_ipopt_optimizer())
 quiet_diffopt_ipopt_model() = DiffOpt.diff_model(quiet_ipopt_optimizer())
 quiet_conic_ipopt_model() = DiffOpt.conic_diff_model(quiet_ipopt_optimizer())
 quiet_nonlinear_ipopt_model() = DiffOpt.nonlinear_diff_model(quiet_ipopt_optimizer())
+quiet_highs_model() = Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false))
 
 function build_subproblem(
     d; state_i_val=5.0, state_out_val=4.0, uncertainty_val=2.0, subproblem=JuMP.Model()
@@ -61,6 +63,73 @@ end
     @testset "pdual" begin
         @test DecisionRules.pdual(state_in_1) ≈ -30.0 rtol=1.0e-1
         @test DecisionRules.pdual(state_out_1) ≈ 30.0 rtol=1.0e-1
+    end
+
+    @testset "integer strategies" begin
+        model = quiet_highs_model()
+        @variable(model, x, Bin)
+        @variable(model, y >= 0)
+        @variable(model, p in MOI.Parameter(1.3))
+        @constraint(model, y >= p + 2x)
+        @objective(model, Min, y - 0.1x)
+
+        @test DecisionRules.has_discrete_variables(model)
+        @test x in DecisionRules.discrete_variables(model)
+
+        dual_p = DecisionRules.with_sensitivity_solution(
+            model, FixedDiscreteIntegerStrategy()
+        ) do _
+            @test !JuMP.is_binary(x)
+            @test !JuMP.is_integer(x)
+            @test value(x) ≈ 0.0 atol=1.0e-8
+            return DecisionRules.pdual(p)
+        end
+
+        @test dual_p ≈ 1.0 atol=1.0e-8
+        @test JuMP.is_binary(x)
+        @test DecisionRules.has_discrete_variables(model)
+
+        stage_model = quiet_highs_model()
+        @variable(stage_model, b, Bin)
+        @variable(stage_model, y_stage >= 0)
+        @variable(stage_model, state_out_var >= 0)
+        @variable(stage_model, state_in in MOI.Parameter(2.0))
+        @variable(stage_model, target in MOI.Parameter(3.0))
+        @constraint(stage_model, state_out_var == state_in + b)
+        @constraint(stage_model, y_stage >= target + b)
+        @objective(stage_model, Min, y_stage + 0.1b)
+
+        state_param_in = Any[state_in]
+        state_param_out = Tuple{Any,VariableRef}[(target, state_out_var)]
+        uncertainty = Tuple{VariableRef,Float64}[]
+        strategy = FixedDiscreteIntegerStrategy()
+
+        objective = DecisionRules.simulate_stage(
+            stage_model,
+            state_param_in,
+            state_param_out,
+            uncertainty,
+            [2.0],
+            [3.0];
+            integer_strategy=strategy,
+        )
+        @test objective ≈ 3.0 atol=1.0e-8
+        @test JuMP.is_binary(b)
+
+        grad = Zygote.gradient([2.0], [3.0]) do state_in_value, target_value
+            DecisionRules.simulate_stage(
+                stage_model,
+                state_param_in,
+                state_param_out,
+                uncertainty,
+                state_in_value,
+                target_value;
+                integer_strategy=strategy,
+            )
+        end
+        @test grad[1][1] ≈ 0.0 atol=1.0e-8
+        @test grad[2][1] ≈ 1.0 atol=1.0e-8
+        @test JuMP.is_binary(b)
     end
 
     @testset "simulate_stage" begin

@@ -50,7 +50,12 @@ optimizers = [Flux.Adam()]
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
-penalty_schedule = :default_annealed
+penalty_schedule = [
+    (1, 100, 0.1),
+    (101, 210, 1.0),
+    (211, 300, 10.0),
+    (301, num_epochs * num_batches, 30.0),
+]
 num_eval_scenarios = 4
 eval_every = 25
 
@@ -81,20 +86,17 @@ subproblems_de, state_params_in, state_params_out, uncertainty_samples, _, _ = b
     penalty_l2=penalty_l2,
 )
 
+det_equivalent = Model(MadNLP.Optimizer)
+
 if USE_GPU
-    det_equivalent = Model(MadNLP.Optimizer)
     set_optimizer_attribute(det_equivalent, "array_type", CUDA.CuArray)
     set_optimizer_attribute(det_equivalent, "linear_solver", MadNLPGPU.CUDSSSolver)
     set_optimizer_attribute(det_equivalent, "print_level", MadNLP.ERROR)
     set_optimizer_attribute(det_equivalent, "barrier", MadNLP.LOQOUpdate())
 else
-    det_equivalent = JuMP.Model(
-        optimizer_with_attributes(
-            Ipopt.Optimizer,
-            "print_level" => 0,
-            "linear_solver" => "mumps",
-        ),
-    )
+    set_optimizer_attribute(det_equivalent, "print_level", MadNLP.ERROR)
+    set_optimizer_attribute(det_equivalent, "barrier", MadNLP.LOQOUpdate())
+    # set_optimizer_attribute(det_equivalent, "linear_solver", MadNLPGPU.LapackCPUSolver())
 end
 
 det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
@@ -120,7 +122,7 @@ lg = WandbLogger(;
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
         "training_method" => "deterministic_equivalent",
-        "solver" => USE_GPU ? "MadNLP+CUDSS (GPU)" : "Ipopt+MUMPS (CPU)",
+        "solver" => USE_GPU ? "MadNLP+CUDSS (GPU)" : "MadNLP (CPU)",
         "penalty_l1" => string(penalty_l1),
         "penalty_l2" => string(penalty_l2),
         "penalty_schedule" => string(penalty_schedule),
@@ -197,8 +199,6 @@ realized_rollout_evaluation = RolloutEvaluation(
 resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
     DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
 
-converged_rollout = false
-converged_training = false
 # Train Model using deterministic equivalent.
 train_multistage(
     models,
@@ -220,6 +220,7 @@ train_multistage(
         rollout_evaluation(iter, model)
         realized_rollout_evaluation(iter, model)
         converged_training = stall_train(iter, model, training_loss)
+        converged_rollout = false
         if iter % eval_every == 0
             converged_rollout = stall_rollout(
                 iter, model, rollout_evaluation.last_objective_no_deficit

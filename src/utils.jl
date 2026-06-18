@@ -427,11 +427,17 @@ end
 _reset_sample_log!(sample_log::SampleLog) = empty!(sample_log)
 _reset_sample_log!(sample_log) = sample_log
 
-_total_objective_value(model::JuMP.Model) = objective_value(model)
+function _total_objective_value(model::JuMP.Model)
+    try
+        return objective_value(model)
+    catch
+        return get(model.ext, :_last_obj, 0.0)
+    end
+end
 function _total_objective_value(models::Vector{JuMP.Model})
     total = 0.0
     for model in models
-        total += objective_value(model)
+        total += _total_objective_value(model)
     end
     return total
 end
@@ -568,6 +574,7 @@ mutable struct RolloutEvaluation <: Function
     scenarios::Vector
     stride::Int
     policy_state::Symbol
+    integer_strategy::AbstractIntegerStrategy
     last_objective_no_deficit::Float64
     last_violation_share::Float64
 end
@@ -580,6 +587,7 @@ function RolloutEvaluation(
     scenarios;
     stride=1,
     policy_state::Symbol=:realized,
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 )
     isempty(scenarios) && throw(
         ArgumentError(
@@ -598,6 +606,7 @@ function RolloutEvaluation(
         collect(scenarios),
         stride,
         policy_state,
+        integer_strategy,
         NaN,
         NaN,
     )
@@ -610,6 +619,7 @@ function _simulate_multistage_target_feedback(
     initial_state,
     uncertainties,
     decision_rules,
+    integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
 )
     Flux.reset!(decision_rules)
     target_states = simulate_states(initial_state, uncertainties, decision_rules)
@@ -623,10 +633,21 @@ function _simulate_multistage_target_feedback(
         uncertainty = uncertainties[stage]
         target = target_states[stage + 1]
         objective += simulate_stage(
-            subproblem, state_param_in, state_param_out, uncertainty, state_in, target
+            subproblem,
+            state_param_in,
+            state_param_out,
+            uncertainty,
+            state_in,
+            target;
+            integer_strategy=integer_strategy,
         )
         state_in = get_next_state(
-            subproblem, state_param_in, state_param_out, state_in, target
+            subproblem,
+            state_param_in,
+            state_param_out,
+            state_in,
+            target;
+            integer_strategy=integer_strategy,
         )
     end
 
@@ -645,7 +666,8 @@ function (evaluation::RolloutEvaluation)(iter, model)
                 evaluation.state_params_out,
                 evaluation.initial_state,
                 scenario,
-                model,
+                model;
+                integer_strategy=evaluation.integer_strategy,
             )
         else
             _simulate_multistage_target_feedback(
@@ -655,6 +677,7 @@ function (evaluation::RolloutEvaluation)(iter, model)
                 evaluation.initial_state,
                 scenario,
                 model,
+                evaluation.integer_strategy,
             )
         end
         total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
