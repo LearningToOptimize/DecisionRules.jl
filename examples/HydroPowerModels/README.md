@@ -70,14 +70,24 @@ policy relying on slack.
 
 ## SDDP baselines
 
-These scripts require [HydroPowerModels.jl](https://github.com/andrewrosemberg/HydroPowerModels.jl),
-Gurobi, and Mosek licenses.
+These scripts use a dedicated Julia environment in `sddp/`. The inconsistent
+SOC-backward/AC-forward baseline uses
+[HydroPowerModels.jl](https://github.com/LAMPSPUC/HydroPowerModels.jl), SDDP.jl,
+Clarabel for the SOC backward pass, and MadNLP for the AC forward pass. Training
+runs log iteration and final simulation metrics to Weights & Biases using the
+same keys as the DR runs: `metrics/loss` is the SDDP bound, and
+`metrics/rollout_realized_objective_no_deficit` is the SDDP forward-pass
+objective. SDDP iterations are logged as `batch` so W&B plots can share the same
+x-axis as the DR training runs. Because SDDP solves the forward policy
+stage-wise, that forward-pass objective is already the no-target-penalty
+objective.
 
 | Script | Description |
 |--------|-------------|
-| `run_sddp.jl` | Train SDDP with a consistent convex (SOCWRConic) formulation |
-| `run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward pass and ACP forward pass |
-| `simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP and produce comparison plots |
+| `sddp/run_sddp.jl` | Train SDDP with a consistent convex (SOCWRConic) formulation |
+| `sddp/run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward pass and ACP forward pass |
+| `sddp/run_sddp_inconsistent.sbatch` | Submit the SOC-backward/AC-forward run with a 12-hour wall time |
+| `sddp/simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP and produce comparison plots |
 
 ## Learning-to-Optimize (L2O) pipeline
 

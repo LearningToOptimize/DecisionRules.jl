@@ -1,20 +1,18 @@
 # Simulate a pre-trained SDDP policy (cuts from run_sddp_inconsistent.jl) under
 # the ACP formulation and produce comparison plots/CSVs against TS-DDR baselines.
-# Requires HydroPowerModels.jl, MadNLP, Gurobi, Mosek.
-using MosekTools
 using MadNLP
 using HydroPowerModels
 using JuMP
+using PowerModels
 using Statistics
 using SDDP: SDDP
-using Gurobi
 
 using Random
 seed = 1221
 
 # Load case
 case = "bolivia"
-case_dir = joinpath(dirname(@__FILE__), case)
+case_dir = joinpath(dirname(@__DIR__), case)
 alldata = HydroPowerModels.parse_folder(case_dir);
 for load in values(alldata[1]["powersystem"]["load"])
     load["qd"] = load["qd"] * 0.6
@@ -29,7 +27,7 @@ params = create_param(;
     stages=num_stages,
     model_constructor_grid=formulation,
     post_method=PowerModels.build_opf,
-    optimizer=() -> MadNLP.Optimizer(; print_level=MadNLP.INFO),
+    optimizer=() -> MadNLP.Optimizer(; print_level=0),
 );
 
 m = hydro_thermal_operation(alldata, params);
