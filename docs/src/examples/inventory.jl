@@ -128,7 +128,7 @@ using Statistics, Random
 # | Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR | Fit (s) | Eval (s) |
 # |:-------------------------|----:|----------:|------:|-------:|----------:|--------:|---------:|
 # | TS-DDR (trained)         | 300 |    2667.3 | 594.5 |   67.3 |     +0.0% |    54.6 |   0.0018 |
-# | SDDP (PAR)              | 300 |    2434.2 | 774.8 |   87.7 |     -8.7% |     0.0 |  20.6455 |
+# | SDDP (PAR)              | 300 |    2434.2 | 774.8 |   87.7 |     -8.7% |     0.0 |  37.4613 |
 # | Base-stock (S\*=160)    | 300 |    3035.6 | 506.8 |   57.3 |    +13.8% |     0.0 |   0.0002 |
 # | Random (untrained)      | 300 |    3751.7 | 221.7 |   25.1 |    +40.7% |     0.0 |   0.0018 |
 #
@@ -139,33 +139,43 @@ using Statistics, Random
 # ## Integer (MIP) Problem
 #
 # Introducing the binary ``z_t`` and fixed cost ``K=500`` changes the
-# landscape.  SDDP can only use LP relaxation for training (``z \in [0,1]``),
-# which systematically underestimates ``K``: when the LP says ``z=0.3``,
-# ``q=20``, the relaxed cost is ``0.3 \times 500 + 2 \times 20 = 190``, but
-# the true integer cost with ``z=1`` is ``500 + 40 = 540``.
+# landscape.  Standard SDDP uses LP relaxation for both training and rollout
+# (``z \in [0,1]``), which systematically underestimates ``K``: when the LP
+# says ``z=0.3``, ``q=20``, the relaxed cost is
+# ``0.3 \times 500 + 2 \times 20 = 190``, but the true integer cost with
+# ``z=1`` is ``500 + 40 = 540``.
 #
-# TS-DDR with `FixedDiscreteIntegerStrategy` handles this correctly: it
-# solves the full MIP, fixes the binary incumbent, and reads LP duals in
-# that integer-consistent state.
+# Using SDDP.jl's `AlternativeForwardPass`, we can do much better: the
+# forward pass solves true MIP subproblems (``z \in \{0,1\}``), generating
+# trial points where the binary decisions actually live, while the backward
+# pass uses LP relaxation to compute cuts with valid duals.  The MIP rollout
+# then makes honest binary ordering decisions using those cuts as the value
+# function approximation.
 #
 # ![Integer results](../assets/inventory_integer_results.png)
 #
 # | Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR (FD) | Fit (s) | Eval (s) |
 # |:-------------------------|----:|----------:|------:|-------:|---------------:|--------:|---------:|
 # | TS-DDR (FixedDiscrete)   | 300 |    8015.8 | 719.5 |   81.4 |          +0.0% |   339.2 |   0.0112 |
-# | TS-DDR (ContRelax)       | 300 |    8318.1 | 720.0 |   81.5 |          +3.8% |   109.4 |   0.0117 |
-# | SDDP integer rollout     | 300 |    8274.2 | 912.5 |  103.3 |          +3.2% |     0.0 |   7.9088 |
+# | TS-DDR (ContRelax)       | 300 |    8318.1 | 720.0 |   81.5 |          +3.8% |   111.0 |   0.0117 |
+# | SDDP (MIP fwd)           | 300 |    5871.6 | 1087.4 |  123.1 |         -26.7% |     0.0 | 159.9310 |
+# | SDDP (LP relax)          | 300 |    8274.2 | 912.5 |  103.3 |          +3.2% |     0.0 |  18.5475 |
 # | Base-stock (S\*=160)    | 300 |    9035.6 | 506.8 |   57.3 |         +12.7% |     0.0 |   0.0000 |
 # | Random (untrained)      | 300 |    9594.6 | 361.1 |   40.9 |         +19.7% |     0.0 |   0.0120 |
 #
-# `FixedDiscreteIntegerStrategy` achieves the lowest cost (8016), beating both
-# SDDP (8274, +3.2%) and `ContinuousRelaxationIntegerStrategy` (8318, +3.8%).
-# The continuous relaxation strategy performs similarly to SDDP — both use LP
-# relaxation and both underestimate the fixed ordering cost.
+# `SDDP (MIP fwd)` using `AlternativeForwardPass` achieves the lowest cost
+# (5872), **26.7% below** TS-DDR (8016).  The key insight is that the MIP
+# rollout forces honest binary ordering decisions (order a full batch or
+# nothing), while the default LP relaxation rollout makes decisions with
+# artificially cheap fractional ``z``, then pays the full fixed cost after
+# integer rounding — this explains the large gap between SDDP (LP relax)
+# at 8274 and SDDP (MIP fwd) at 5872.
 #
-# `ContinuousRelaxationIntegerStrategy` trains 3× faster (109s vs 339s)
-# because it only solves LPs, but the resulting policy is less accurate on
-# integer-constrained problems.
+# TS-DDR with `FixedDiscreteIntegerStrategy` (8016) still outperforms the
+# default SDDP LP relaxation approach (8274) and
+# `ContinuousRelaxationIntegerStrategy` (8318), but cannot match the
+# `AlternativeForwardPass` approach which benefits from SDDP's dynamic
+# programming cuts evaluated in a true MIP context.
 
 # ## Runnable Scripts
 #

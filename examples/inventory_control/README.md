@@ -105,11 +105,14 @@ Figures are written to `docs/src/assets/`:
 - **TS-DDR** learns an ex-ante order target from inventory and demand history,
   using the same time-invariant neural policy at every period.
 - **SDDP** uses a PAR(1) demand approximation in a 24-stage order/demand graph.
-  For the integer case, it uses LP relaxation with integer rounding at rollout.
+  For the integer case, it uses `AlternativeForwardPass`: the forward pass solves
+  true MIP subproblems (`z ∈ {0,1}`), while the backward pass uses LP relaxation
+  (`z ∈ [0,1]`) to compute cuts with valid duals.
 - **Base-stock** is a tuned constant order-up-to policy.
 - **Random** is an untrained ex-ante neural policy.
 
 The expected qualitative result is:
 - **Relaxed**: SDDP dominates (near-optimal for convex problems with Markov noise).
 - **Integer**: TS-DDR dominates (handles MIP subproblems natively via integer
-  postprocessing strategies, while SDDP's LP relaxation underestimates fixed costs).
+  postprocessing strategies, while SDDP with `AlternativeForwardPass` generates
+  cuts at MIP-realistic trial points but still relies on LP duals for cuts).

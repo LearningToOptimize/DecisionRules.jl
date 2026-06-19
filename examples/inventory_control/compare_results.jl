@@ -24,7 +24,7 @@ end
 function load_timing(tags)
     dfs = DataFrame[]
     for tag in tags
-        for f in ["dr_timing", "sddp_timing", "baseline_timing"]
+        for f in ["dr_timing", "sddp_timing", "sddp_lp_timing", "baseline_timing"]
             path = joinpath(result_dir, "$(tag)_$(f).csv")
             isfile(path) && push!(dfs, CSV.read(path, DataFrame))
         end
@@ -105,22 +105,27 @@ function make_plots(tag, entries, S_star, title_suffix; sddp_tag=tag, dr_tag=tag
         "TS-DDR (ContRelax)" => "TS-DDR\n(ContRelax)",
         "TS-DDR (trained)" => "TS-DDR",
         "SDDP (PAR)" => "SDDP",
-        "SDDP.jl integer rollout" => "SDDP",
+        "SDDP (MIP fwd)" => "SDDP\n(MIP fwd)",
+        "SDDP (LP relax)" => "SDDP\n(LP relax)",
         "Random (untrained)" => "Random")
     short_labels = [startswith(l, "Base-stock") ? "Base-stock\n(S*=$(round(Int,S_star)))" : l for l in short_labels]
     data = [e[2] for e in entries]
     n_methods = length(entries)
-    colors = if n_methods == 4
-        [:gold :darkgreen :steelblue :gray]
+    method_colors = if n_methods == 4
+        [:steelblue, :darkgreen, :gold, :gray]
     elseif n_methods == 5
-        [:gold :royalblue :darkgreen :steelblue :gray]
+        [:steelblue, :royalblue, :darkgreen, :gold, :gray]
+    elseif n_methods == 6
+        [:steelblue, :royalblue, :darkgreen, :seagreen, :gold, :gray]
     else
-        palette(:auto, n_methods)'
+        palette(:auto, n_methods)
     end
-    p4 = boxplot(short_labels, data;
-        xlabel="Method", ylabel="Operational cost",
-        title="Cost comparison", legend=false,
-        fillcolor=colors, linecolor=:black)
+    p4 = plot(; xlabel="Method", ylabel="Operational cost",
+        title="Cost comparison", legend=false)
+    for i in 1:n_methods
+        violin!(p4, fill(short_labels[i], length(data[i])), data[i];
+            fillcolor=method_colors[i], linecolor=:black, fillalpha=0.7)
+    end
 
     layout = @layout [a b; c d]
     combined = plot(p1, p2, p3, p4; layout=layout, size=(1100, 800),
@@ -182,6 +187,7 @@ println("=" ^ 60)
 i_dr = load_costs("integer", "dr")
 i_dr_cr = load_costs("integer_cr", "dr")
 i_sddp = load_costs("integer", "sddp")
+i_sddp_lp = load_costs("integer", "sddp_lp")
 i_bs = load_costs("integer", "basestock")
 i_rand = load_costs("integer", "random")
 i_timing = load_timing(["integer", "integer_cr"])
@@ -191,7 +197,8 @@ i_bound = parse(Float64, strip(read(joinpath(result_dir, "integer_sddp_bound.txt
 i_entries = [
     ("TS-DDR (FixedDiscrete)", i_dr),
     ("TS-DDR (ContRelax)", i_dr_cr),
-    ("SDDP.jl integer rollout", i_sddp),
+    ("SDDP (MIP fwd)", i_sddp),
+    ("SDDP (LP relax)", i_sddp_lp),
     ("Base-stock (S*=$(round(Int, i_S)))", i_bs),
     ("Random (untrained)", i_rand),
 ]
@@ -199,6 +206,7 @@ print_table(i_entries, i_timing, i_bound)
 
 plt_integer = make_plots("integer", i_entries, i_S, "Integer (MIP) problem";
     sddp_tag="integer", dr_tag="integer")
+println("  SDDP (LP relax) vs SDDP (MIP fwd): LP=$(round(mean(i_sddp_lp),digits=1)), MIP=$(round(mean(i_sddp),digits=1))")
 savefig(plt_integer, joinpath(docs_dir, "inventory_integer_results.png"))
 println("Saved inventory_integer_results.png")
 
