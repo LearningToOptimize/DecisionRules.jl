@@ -7,7 +7,13 @@ This script expects the CSV files written by:
 - `evaluate_inventory.jl`; and
 - `solve_sddp.jl`.
 
-It prints Markdown tables and writes the figures used by the documentation.
+Results live in timestamped subdirectories under `results/`. Pass the run ID as
+the first CLI argument, or omit it to use the most recent run:
+
+```bash
+julia --project=. compare_results.jl                 # latest run
+julia --project=. compare_results.jl 20260619_231417  # specific run
+```
 """
 
 using CSV
@@ -20,8 +26,44 @@ using StatsPlots
 
 include(joinpath(@__DIR__, "build_inventory_problem.jl"))
 
-# All benchmark scripts write their raw CSV files here.
-const RESULT_DIR = joinpath(@__DIR__, "results")
+"""
+    resolve_result_dir(args) -> String
+
+Pick the results directory from CLI args or default to the most recent run.
+
+When the `results/` directory contains timestamped subdirectories
+(e.g. `results/20260619_231417/`), the most recent one is used. If no
+subdirectories exist, the flat `results/` directory itself is used for
+backward compatibility with older runs.
+
+# Arguments
+- `args`: `ARGS` from the script entry point.
+
+# Examples
+```julia
+result_dir = resolve_result_dir(ARGS)
+```
+"""
+function resolve_result_dir(args)
+    base = joinpath(@__DIR__, "results")
+
+    if !isempty(args)
+        dir = joinpath(base, args[1])
+        isdir(dir) || error("Run directory not found: $dir")
+        return dir
+    end
+
+    subdirs = filter(d -> isdir(joinpath(base, d)), readdir(base))
+
+    if isempty(subdirs)
+        return base
+    end
+
+    return joinpath(base, sort(subdirs)[end])
+end
+
+const RESULT_DIR = resolve_result_dir(ARGS)
+println("Loading results from: $RESULT_DIR")
 
 # Documentation figures are checked into the docs asset directory.
 const DOCS_ASSET_DIR = normpath(joinpath(@__DIR__, "..", "..", "docs", "src", "assets"))
@@ -318,7 +360,13 @@ function short_method_label(name::AbstractString, base_stock_level::Real)
         "TS-DDR (FixedDiscrete)" => "TS-DDR\n(FixedDisc)",
         "TS-DDR (ContRelax)" => "TS-DDR\n(ContRelax)",
         "TS-DDR (MixedGrad)" => "TS-DDR\n(MixedGrad)",
+        "TS-DDR (HighPenalty)" => "TS-DDR\n(HighPen)",
+        "TS-DDR (LSTM)" => "TS-DDR\n(LSTM)",
+        "TS-DDR (LSTM+SF)" => "TS-DDR\n(LSTM+SF)",
         "TS-DDR (trained)" => "TS-DDR",
+        "TS-DDR Relaxed (LSTM)" => "TS-DDR\n(LSTM)",
+        "TS-DDR Relaxed (HighPenalty)" => "TS-DDR\n(HighPen)",
+        "TS-DDR Relaxed (LSTM+HP)" => "TS-DDR\n(LSTM+HP)",
         "SDDP (PAR)" => "SDDP",
         "SDDP (MIP fwd)" => "SDDP\n(MIP fwd)",
         "SDDP (LP relax)" => "SDDP\n(LP relax)",
@@ -343,15 +391,14 @@ colors = method_colors(length(results))
 """
 function method_colors(num_methods::Integer)
     # Keep colors stable between documentation rebuilds.
-    if num_methods == 4
-        return [:steelblue, :darkgreen, :gold, :gray]
-    elseif num_methods == 5
-        return [:steelblue, :royalblue, :darkgreen, :gold, :gray]
-    elseif num_methods == 6
-        return [:steelblue, :royalblue, :darkgreen, :seagreen, :gold, :gray]
-    elseif num_methods == 7
-        return [:steelblue, :royalblue, :darkorange, :darkgreen, :seagreen, :gold, :gray]
-    end
+    # Color assignments: TS-DDR variants in blues/oranges, SDDP in greens,
+    # baselines in warm tones and gray.
+    color_bank = [
+        :steelblue, :royalblue, :darkorange, :mediumpurple,
+        :coral, :teal, :darkgreen, :seagreen, :gold, :gray,
+    ]
+
+    num_methods <= length(color_bank) && return color_bank[1:num_methods]
 
     return palette(:auto, num_methods)
 end
@@ -688,6 +735,11 @@ function relaxed_results()
     base_stock_costs = load_costs("relaxed", "basestock")
     random_costs = load_costs("relaxed", "random")
 
+    # Load optional tuned-variant costs.
+    lstm_costs = optional_costs("relaxed_lstm", "dr")
+    hp_costs = optional_costs("relaxed_hp", "dr")
+    lstm_hp_costs = optional_costs("relaxed_lstm_hp", "dr")
+
     # Load scalar baseline metadata.
     base_stock_level = read_scalar(joinpath(RESULT_DIR, "relaxed_basestock_S_star.txt"))
     sddp_bound = read_scalar(joinpath(RESULT_DIR, "relaxed_sddp_bound.txt"))
@@ -695,12 +747,31 @@ function relaxed_results()
     # Build display records in table order.
     results = [
         MethodResult("TS-DDR (trained)", dr_costs),
-        MethodResult("SDDP (PAR)", sddp_costs),
-        MethodResult("Base-stock (S*=$(round(Int, base_stock_level)))", base_stock_costs),
-        MethodResult("Random (untrained)", random_costs),
     ]
 
-    return results, load_timing(["relaxed"]), base_stock_level, sddp_bound
+    # Insert tuned variants after the baseline feedforward.
+    !isnothing(hp_costs) &&
+        push!(results, MethodResult("TS-DDR Relaxed (HighPenalty)", hp_costs))
+    !isnothing(lstm_costs) &&
+        push!(results, MethodResult("TS-DDR Relaxed (LSTM)", lstm_costs))
+    !isnothing(lstm_hp_costs) &&
+        push!(results, MethodResult("TS-DDR Relaxed (LSTM+HP)", lstm_hp_costs))
+
+    # Append non-TS-DDR baselines.
+    push!(results, MethodResult("SDDP (PAR)", sddp_costs))
+    push!(results, MethodResult("Base-stock (S*=$(round(Int, base_stock_level)))", base_stock_costs))
+    push!(results, MethodResult("Random (untrained)", random_costs))
+
+    # Collect timing tags for all present variants.
+    timing_tags = ["relaxed"]
+    isfile(joinpath(RESULT_DIR, "relaxed_lstm_dr_timing.csv")) &&
+        push!(timing_tags, "relaxed_lstm")
+    isfile(joinpath(RESULT_DIR, "relaxed_hp_dr_timing.csv")) &&
+        push!(timing_tags, "relaxed_hp")
+    isfile(joinpath(RESULT_DIR, "relaxed_lstm_hp_dr_timing.csv")) &&
+        push!(timing_tags, "relaxed_lstm_hp")
+
+    return results, load_timing(timing_tags), base_stock_level, sddp_bound
 end
 
 """
@@ -722,32 +793,44 @@ function integer_results()
     base_stock_costs = load_costs("integer", "basestock")
     random_costs = load_costs("integer", "random")
 
-    # The mixed-gradient variant is optional because it may be expensive to run.
+    # Optional variants — load only if the result file exists.
     mixed_gradient_costs = optional_costs("integer_sf", "dr")
+    hp_costs = optional_costs("integer_hp", "dr")
+    lstm_costs = optional_costs("integer_lstm", "dr")
+    lstm_sf_costs = optional_costs("integer_lstm_sf", "dr")
 
     # Load scalar baseline metadata.
     base_stock_level = read_scalar(joinpath(RESULT_DIR, "integer_basestock_S_star.txt"))
     sddp_bound = read_scalar(joinpath(RESULT_DIR, "integer_sddp_bound.txt"))
 
-    # Build the mandatory method list first.
+    # Build the method list: original TS-DDR variants first.
     results = [
         MethodResult("TS-DDR (FixedDiscrete)", fixed_discrete_costs),
         MethodResult("TS-DDR (ContRelax)", continuous_relaxation_costs),
-        MethodResult("SDDP (MIP fwd)", sddp_mip_forward_costs),
-        MethodResult("SDDP (LP relax)", sddp_lp_relaxation_costs),
-        MethodResult("Base-stock (S*=$(round(Int, base_stock_level)))", base_stock_costs),
-        MethodResult("Random (untrained)", random_costs),
     ]
 
-    if !isnothing(mixed_gradient_costs)
-        # Insert mixed gradients after the two TS-DDR dual-only variants.
-        insert!(results, 3, MethodResult("TS-DDR (MixedGrad)", mixed_gradient_costs))
-    end
+    # Insert optional TS-DDR variants in logical order.
+    !isnothing(mixed_gradient_costs) &&
+        push!(results, MethodResult("TS-DDR (MixedGrad)", mixed_gradient_costs))
+    !isnothing(hp_costs) &&
+        push!(results, MethodResult("TS-DDR (HighPenalty)", hp_costs))
+    !isnothing(lstm_costs) &&
+        push!(results, MethodResult("TS-DDR (LSTM)", lstm_costs))
+    !isnothing(lstm_sf_costs) &&
+        push!(results, MethodResult("TS-DDR (LSTM+SF)", lstm_sf_costs))
 
-    # Include optional timing tags only when their result file exists.
+    # Append non-TS-DDR baselines.
+    push!(results, MethodResult("SDDP (MIP fwd)", sddp_mip_forward_costs))
+    push!(results, MethodResult("SDDP (LP relax)", sddp_lp_relaxation_costs))
+    push!(results, MethodResult("Base-stock (S*=$(round(Int, base_stock_level)))", base_stock_costs))
+    push!(results, MethodResult("Random (untrained)", random_costs))
+
+    # Collect timing tags for all present variants.
     timing_tags = ["integer", "integer_cr"]
-    isfile(joinpath(RESULT_DIR, "integer_sf_dr_timing.csv")) &&
-        push!(timing_tags, "integer_sf")
+    for tag in ["integer_sf", "integer_hp", "integer_lstm", "integer_lstm_sf"]
+        isfile(joinpath(RESULT_DIR, "$(tag)_dr_timing.csv")) &&
+            push!(timing_tags, tag)
+    end
 
     return results, load_timing(timing_tags), base_stock_level, sddp_bound
 end
@@ -769,9 +852,46 @@ function integer_curve_specs()
         ("integer_cr", "ContRelax", :royalblue),
     ]
 
-    if isfile(joinpath(RESULT_DIR, "integer_sf_training_curve.csv"))
-        # MixedGrad appears only when that expensive variant has been run.
-        push!(specs, ("integer_sf", "MixedGrad", :darkorange))
+    # Optional variants appear only when their training curve exists.
+    optional = [
+        ("integer_sf", "MixedGrad", :darkorange),
+        ("integer_hp", "HighPenalty", :mediumpurple),
+        ("integer_lstm", "LSTM", :coral),
+        ("integer_lstm_sf", "LSTM+SF", :teal),
+    ]
+
+    for spec in optional
+        isfile(joinpath(RESULT_DIR, "$(spec[1])_training_curve.csv")) &&
+            push!(specs, spec)
+    end
+
+    return specs
+end
+
+"""
+    relaxed_curve_specs()
+
+Return training-curve plot specs for the relaxed comparison.
+
+# Examples
+```julia
+curves = relaxed_curve_specs()
+```
+"""
+function relaxed_curve_specs()
+    # Baseline feedforward is always present.
+    specs = [("relaxed", "Feedforward", :steelblue)]
+
+    # Optional tuned variants.
+    optional = [
+        ("relaxed_hp", "HighPenalty", :mediumpurple),
+        ("relaxed_lstm", "LSTM", :coral),
+        ("relaxed_lstm_hp", "LSTM+HP", :teal),
+    ]
+
+    for spec in optional
+        isfile(joinpath(RESULT_DIR, "$(spec[1])_training_curve.csv")) &&
+            push!(specs, spec)
     end
 
     return specs
@@ -802,7 +922,7 @@ function run_relaxed_comparison()
         base_stock_level = base_stock_level,
         sddp_tag = "relaxed",
         dr_tag = "relaxed",
-        curve_specs = [("relaxed", "TS-DDR", :steelblue)],
+        curve_specs = relaxed_curve_specs(),
     )
 
     savefig(figure, joinpath(DOCS_ASSET_DIR, "inventory_relaxed_results.png"))

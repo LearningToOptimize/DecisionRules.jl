@@ -51,6 +51,7 @@ examples/**/.CondaPkg/*
 *.err
 *.tsv
 *.pdf
-plan.md
-memory.md
+plan/
 *_cuts.json
+settings.json
+*.sh

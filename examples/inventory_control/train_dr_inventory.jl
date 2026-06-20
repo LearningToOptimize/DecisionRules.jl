@@ -1,16 +1,28 @@
 """
 Train TS-DDR policies for the inventory-control benchmark.
 
-The benchmark compares four target-state decision-rule variants:
+The benchmark compares target-state decision-rule variants across two axes:
 
-1. relaxed continuous subproblems with ordinary LP duals;
-2. integer subproblems with fixed-discrete local duals;
-3. integer subproblems with continuous-relaxation duals; and
-4. integer subproblems with fixed-discrete duals plus score-function rollouts.
+**Gradient estimator** — how ∇_θ Q(w; θ) is computed for integer models:
+1. fixed-discrete local duals (solve MIP → fix z → re-solve LP → read duals);
+2. continuous-relaxation duals (relax z ∈ {0,1} → LP → read duals);
+3. mixed gradient (α · dual + (1-α) · score-function REINFORCE correction).
+
+**Policy architecture** — which function class maps observations to targets:
+- `ExAnteInventoryPolicy`: feedforward MLP, sigmoid output;
+- `LSTMExAntePolicy`: recurrent encoder on lagged demand, affine output.
+
+Each variant is independent and can be run via:
+
+    julia --project=. train_dr_inventory.jl <tag>
+
+where `<tag>` is one of `relaxed`, `integer`, `integer_cr`, `integer_sf`,
+`integer_hp`, `integer_lstm`, `integer_lstm_sf`.
 """
 
 using CSV
 using DataFrames
+using Dates
 using DecisionRules
 using Flux
 using JLD2
@@ -22,12 +34,20 @@ include(joinpath(@__DIR__, "build_inventory_problem.jl"))
 
 # The script keeps generated models and CSV files out of the source directory.
 const EXAMPLE_DIR = @__DIR__
-const MODEL_DIR = joinpath(EXAMPLE_DIR, "models")
-const RESULT_DIR = joinpath(EXAMPLE_DIR, "results")
+
+# Each run writes to results/<RUN_ID>/ so concurrent or successive runs never
+# clobber each other. RUN_ID is set by launch_all.sh for batch submissions or
+# generated from the current timestamp for standalone runs.
+const RUN_ID = get(ENV, "RUN_ID", Dates.format(Dates.now(), "yyyymmdd_HHMMss"))
+const RESULT_DIR = joinpath(EXAMPLE_DIR, "results", RUN_ID)
+const MODEL_DIR = joinpath(EXAMPLE_DIR, "models", RUN_ID)
 
 # Create output directories before any training run tries to write into them.
 mkpath(MODEL_DIR)
 mkpath(RESULT_DIR)
+
+println("Run ID: $RUN_ID")
+println("Results → $RESULT_DIR")
 
 # Use one fixed training sample size for every TS-DDR variant.
 const N_TRAIN_SCENARIOS = 50
@@ -60,6 +80,14 @@ gradient descent on sampled deterministic-equivalent objectives
 - `training_integer_strategy::AbstractIntegerStrategy`: dual-path strategy.
 - `score_function::Union{Nothing,ScoreFunctionConfig,ScoreFunctionSchedule}`:
   optional score-function estimator.
+- `penalty::Float64`: target-deficit penalty λ.
+- `policy_builder::Function`: zero-argument callable returning a fresh policy.
+- `penalty_schedule_fn::Function`: `(variant) -> schedule` for target-penalty
+  multiplier ramp.
+
+The 8-argument constructor defaults `penalty = INVENTORY_PENALTY`,
+`policy_builder = () -> build_exante_policy(; seed = 2024)`, and
+`penalty_schedule_fn = penalty_schedule_for`.
 
 # Examples
 ```julia
@@ -84,6 +112,22 @@ struct InventoryTrainingVariant
     warmup_batches::Int
     training_integer_strategy::AbstractIntegerStrategy
     score_function::Union{Nothing,ScoreFunctionConfig,ScoreFunctionSchedule}
+    penalty::Float64
+    policy_builder::Function
+    penalty_schedule_fn::Function
+end
+
+function InventoryTrainingVariant(
+    tag, integer, num_batches, train_per_batch, learning_rate, warmup_batches,
+    training_integer_strategy, score_function,
+)
+    return InventoryTrainingVariant(
+        tag, integer, num_batches, train_per_batch, learning_rate, warmup_batches,
+        training_integer_strategy, score_function,
+        INVENTORY_PENALTY,
+        () -> build_exante_policy(; seed = 2024),
+        penalty_schedule_for,
+    )
 end
 
 """
@@ -138,14 +182,24 @@ label = method_label(variant)
 ```
 """
 function method_label(variant::InventoryTrainingVariant)
-    # Score-function variants are named by the mixed-gradient estimator.
+    tag = variant.tag
+
+    # --- Relaxed tuned variants ---
+    tag == "relaxed_lstm" && return "TS-DDR Relaxed (LSTM)"
+    tag == "relaxed_hp" && return "TS-DDR Relaxed (HighPenalty)"
+    tag == "relaxed_lstm_hp" && return "TS-DDR Relaxed (LSTM+HP)"
+
+    # --- Integer tuned variants ---
+    tag == "integer_lstm" && return "TS-DDR (LSTM)"
+    tag == "integer_lstm_sf" && return "TS-DDR (LSTM+SF)"
+    tag == "integer_hp" && return "TS-DDR (HighPenalty)"
+
+    # --- Original variants ---
     !isnothing(variant.score_function) && return "TS-DDR (MixedGrad)"
 
-    # ContinuousRelaxation means the dual path solves an LP relaxation.
     variant.training_integer_strategy isa ContinuousRelaxationIntegerStrategy &&
         return "TS-DDR (ContRelax)"
 
-    # FixedDiscrete means the dual path fixes the MIP incumbent, then reads LP duals.
     variant.training_integer_strategy isa FixedDiscreteIntegerStrategy &&
         return "TS-DDR (FixedDiscrete)"
 
@@ -269,6 +323,9 @@ function rollout_policy(
     operational_costs = Vector{Float64}(undef, num_scenarios)
 
     for scenario in 1:num_scenarios
+        # Reset recurrent state for LSTM policies.
+        Flux.reset!(policy)
+
         # Draw one demand path for this rollout.
         uncertainty_sample = sample(uncertainty_sampler)
 
@@ -349,7 +406,7 @@ function build_training_problem(variant::InventoryTrainingVariant)
     # Training uses a deterministic equivalent so target-dual gradients are coupled.
     return build_inventory_det_equivalent(;
         num_scenarios = N_TRAIN_SCENARIOS,
-        penalty = INVENTORY_PENALTY,
+        penalty = variant.penalty,
         seed = 42,
         integer = variant.integer,
     )
@@ -373,7 +430,7 @@ function build_evaluation_problem(variant::InventoryTrainingVariant)
     # Evaluation uses stage-wise deployment semantics, not the training DE solve.
     return build_inventory_subproblems(;
         num_scenarios = N_TEST_SCENARIOS,
-        penalty = INVENTORY_PENALTY,
+        penalty = variant.penalty,
         seed = 99,
         integer = variant.integer,
     )
@@ -482,6 +539,8 @@ function train_variant!(
     println("Training TS-DDR [$(variant.tag)]  integer=$(variant.integer)")
     println("  $(variant.num_batches) batches x $(variant.train_per_batch) scenarios")
     println("  learning rate: $(variant.learning_rate)")
+    println("  penalty: $(variant.penalty)")
+    println("  policy: $(typeof(policy))")
     println("  training integer strategy: $(typeof(variant.training_integer_strategy))")
     !isnothing(variant.score_function) &&
         println("  score function: $(typeof(variant.score_function))")
@@ -502,7 +561,7 @@ function train_variant!(
         num_train_per_batch = variant.train_per_batch,
         optimizer = Flux.Adam(variant.learning_rate),
         integer_strategy = variant.training_integer_strategy,
-        penalty_schedule = penalty_schedule_for(variant),
+        penalty_schedule = variant.penalty_schedule_fn(variant),
         score_function = variant.score_function,
         record = (sample_log, iteration, current_policy) -> begin
             # Prefer operational cost, because target slack is a training aid.
@@ -618,8 +677,8 @@ function train_and_evaluate(variant::InventoryTrainingVariant)
     eval_subproblems, eval_state_in, eval_state_out, eval_sampler, _ =
         build_evaluation_problem(variant)
 
-    # Start every variant from the same policy initialization.
-    policy = build_exante_policy(; seed = 2024)
+    # Start from the variant's chosen policy architecture.
+    policy = variant.policy_builder()
 
     # Train the policy and save the best checkpoint.
     train_seconds = train_variant!(
@@ -738,6 +797,113 @@ function score_function_variant()
 end
 
 """
+    three_phase_schedule(variant::InventoryTrainingVariant)
+
+Return a three-phase target-penalty multiplier schedule.
+
+The ramp starts gentle (0.2) so the optimizer sees smooth cost landscapes
+before the high penalty dominates:
+
+```math
+m_k =
+\\begin{cases}
+0.2, & 1 \\le k \\le K/6, \\\\
+0.6, & K/6 < k \\le K/2, \\\\
+1.0, & K/2 < k \\le K.
+\\end{cases}
+```
+
+# Arguments
+- `variant::InventoryTrainingVariant`: training configuration (uses
+  `num_batches` to compute phase boundaries).
+
+# Examples
+```julia
+schedule = three_phase_schedule(variant)
+```
+"""
+function three_phase_schedule(variant::InventoryTrainingVariant)
+    # Total number of SGD batches for this variant.
+    n = variant.num_batches
+
+    # Phase 1 (batches 1..n/6):   multiplier 0.2 — gentle start.
+    # Phase 2 (batches n/6..n/2): multiplier 0.6 — ramp up.
+    # Phase 3 (batches n/2..n):   multiplier 1.0 — full penalty.
+    return [
+        (1, div(n, 6), 0.2),
+        (div(n, 6) + 1, div(n, 2), 0.6),
+        (div(n, 2) + 1, n, 1.0),
+    ]
+end
+
+"""
+    lstm_score_function_variant() -> InventoryTrainingVariant
+
+Build the LSTM mixed-gradient variant with tuned score function.
+
+Compared to `score_function_variant()`, this variant:
+- uses `LSTMExAntePolicy` instead of `ExAnteInventoryPolicy`;
+- raises the target penalty to 250 (vs 75);
+- widens perturbation std to 15.0 (vs 1.0) so score-function rollouts are
+  large enough to flip the binary setup variable;
+- increases rollout count to 12 for lower REINFORCE variance.
+
+# Examples
+```julia
+variant = lstm_score_function_variant()
+```
+"""
+function lstm_score_function_variant()
+    # Higher penalty (250 vs 75) gives stronger dual signal to the optimizer.
+    penalty = 250.0
+
+    # Build separate stage-wise MIP models for score-function rollouts.
+    # These models are solved with full integrality — not relaxed.
+    rollout_subproblems, rollout_state_in, rollout_state_out, _sampler, _ =
+        build_inventory_subproblems(;
+            num_scenarios = N_TRAIN_SCENARIOS,
+            penalty = penalty,
+            seed = 77,
+            integer = true,
+        )
+
+    # Score-function config: α=0.7 dual weight, σ=15 perturbation, M=12 rollouts.
+    # σ=15 is ≈10% of typical target values (~150), enough to flip z decisions.
+    score_config = ScoreFunctionConfig(
+        rollout_subproblems,
+        rollout_state_in,
+        rollout_state_out;
+        dual_weight = 0.7,
+        perturbation_std = 15.0,
+        num_rollouts = 12,
+    )
+
+    # Schedule: no score function for first 400 batches (dual-only warmup),
+    # then linear ramp over 400 batches to full score-function parameters.
+    score_schedule = ScoreFunctionSchedule(
+        score_config;
+        sf_start = 400,
+        ramp_batches = 400,
+        perturbation_std_initial = 3.0,
+        num_rollouts_initial = 4,
+    )
+
+    return InventoryTrainingVariant(
+        "integer_lstm_sf",
+        true,
+        1200,
+        16,
+        5.0e-4,
+        200,
+        FixedDiscreteIntegerStrategy(),
+        score_schedule,
+        penalty,
+        () -> build_lstm_exante_policy(; seed = 2024),
+        three_phase_schedule,
+    )
+end
+
+"""
     inventory_training_variants() -> Vector{InventoryTrainingVariant}
 
 Return all TS-DDR variants used in the benchmark.
@@ -782,7 +948,113 @@ function inventory_training_variants()
             nothing,
         ),
         score_function_variant(),
+        # --- Tuned variants (relaxed) ---
+        # LSTM on the relaxed problem: isolates temporal encoding benefit
+        # without integer complexity.
+        InventoryTrainingVariant(
+            "relaxed_lstm",
+            false,
+            800,
+            10,
+            1.0e-3,
+            120,
+            NoIntegerStrategy(),
+            nothing,
+            INVENTORY_PENALTY,
+            () -> build_lstm_exante_policy(; seed = 2024),
+            penalty_schedule_for,
+        ),
+        # Higher penalty feedforward on the relaxed problem.
+        InventoryTrainingVariant(
+            "relaxed_hp",
+            false,
+            800,
+            10,
+            1.0e-3,
+            120,
+            NoIntegerStrategy(),
+            nothing,
+            250.0,
+            () -> build_exante_policy(; seed = 2024),
+            penalty_schedule_for,
+        ),
+        # LSTM + high penalty on the relaxed problem.
+        InventoryTrainingVariant(
+            "relaxed_lstm_hp",
+            false,
+            800,
+            10,
+            1.0e-3,
+            120,
+            NoIntegerStrategy(),
+            nothing,
+            250.0,
+            () -> build_lstm_exante_policy(; seed = 2024),
+            penalty_schedule_for,
+        ),
+        # --- Tuned variants (integer) ---
+        # Improved feedforward with higher penalty.
+        InventoryTrainingVariant(
+            "integer_hp",
+            true,
+            1200,
+            16,
+            5.0e-4,
+            200,
+            FixedDiscreteIntegerStrategy(),
+            nothing,
+            250.0,
+            () -> build_exante_policy(; seed = 2024),
+            three_phase_schedule,
+        ),
+        # Variant A: LSTM with high penalty
+        InventoryTrainingVariant(
+            "integer_lstm",
+            true,
+            1200,
+            16,
+            5.0e-4,
+            200,
+            FixedDiscreteIntegerStrategy(),
+            nothing,
+            250.0,
+            () -> build_lstm_exante_policy(; seed = 2024),
+            three_phase_schedule,
+        ),
+        # Variant B: LSTM with tuned score function
+        lstm_score_function_variant(),
     ]
+end
+
+"""
+    run_variant(tag::AbstractString) -> Nothing
+
+Train and evaluate a single variant by tag name.
+
+This is the entry point used by SLURM jobs to run one variant at a time:
+
+```bash
+julia --project=. train_dr_inventory.jl integer_lstm
+```
+
+# Arguments
+- `tag::AbstractString`: one of the tags returned by
+  `inventory_training_variants()`.
+
+# Examples
+```julia
+run_variant("integer_lstm")
+```
+"""
+function run_variant(tag::AbstractString)
+    all_variants = inventory_training_variants()
+    idx = findfirst(v -> v.tag == tag, all_variants)
+    isnothing(idx) && error(
+        "Unknown variant tag \"$tag\". " *
+        "Available: $(join([v.tag for v in all_variants], ", "))"
+    )
+    train_and_evaluate(all_variants[idx])
+    return nothing
 end
 
 """
@@ -796,7 +1068,6 @@ main()
 ```
 """
 function main()
-    # Train variants sequentially so output files are deterministic.
     for variant in inventory_training_variants()
         train_and_evaluate(variant)
         println()
@@ -809,5 +1080,9 @@ end
 
 # Run the script only when invoked directly, not when included by tests.
 if abspath(PROGRAM_FILE) == @__FILE__
-    main()
+    if isempty(ARGS)
+        main()
+    else
+        run_variant(ARGS[1])
+    end
 end

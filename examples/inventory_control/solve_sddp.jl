@@ -10,8 +10,16 @@ Two cases:
 2. Integer: AlternativeForwardPass — forward pass solves true MIP (z ∈ {0,1}),
    backward pass uses LP relaxation (z ∈ [0,1]) to compute cuts with valid duals.
    Both models share the same PAR(1) demand structure.
+
+Pass a run ID as the first CLI argument, or omit to generate one from the
+current timestamp:
+
+```bash
+julia --project=. solve_sddp.jl 20260619_231417
+```
 """
 
+using Dates
 using SDDP
 using JuMP
 using HiGHS
@@ -20,6 +28,9 @@ using Statistics
 using Random
 
 include(joinpath(@__DIR__, "build_inventory_problem.jl"))
+
+const RUN_ID = isempty(ARGS) ?
+    Dates.format(Dates.now(), "yyyymmdd_HHMMss") : ARGS[1]
 
 const N_SIM = 300
 const ITERATION_LIMIT = 500
@@ -178,7 +189,7 @@ function rollout_sddp(model, n_sim; integer_round::Bool=false, mu=par_mu)
     return costs, traj_inv
 end
 
-result_dir = joinpath(@__DIR__, "results")
+result_dir = joinpath(@__DIR__, "results", RUN_ID)
 mkpath(result_dir)
 
 # ═══════════════════════════════════════════════════════════════════════════════
