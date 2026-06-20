@@ -487,9 +487,16 @@ end
 
 """
     train_variant!(policy, variant, det_eq, state_params_in, state_params_out,
-                   uncertainty_sampler, initial_state, model_path, curve_path)
+                   uncertainty_sampler, initial_state, model_path, curve_path;
+                   eval_subproblems, eval_state_in, eval_state_out, eval_sampler,
+                   eval_every, eval_scenarios)
 
 Train one policy and write its training curve.
+
+The training curve records the true out-of-sample stage-wise rollout cost
+(not the deterministic-equivalent training objective) every `eval_every`
+batches. This is the deployment-relevant metric and allows fair comparison
+across integer strategies and with SDDP.
 
 # Arguments
 - `policy`: mutable Flux policy updated in place.
@@ -502,9 +509,20 @@ Train one policy and write its training curve.
 - `model_path::String`: path for the best model checkpoint.
 - `curve_path::String`: path for the training-curve CSV.
 
+# Keywords
+- `eval_subproblems`: stage-wise models for out-of-sample rollout evaluation.
+- `eval_state_in`: input-state parameters for evaluation models.
+- `eval_state_out`: output-state parameters for evaluation models.
+- `eval_sampler`: uncertainty sampler for evaluation scenarios.
+- `eval_every::Int = 25`: evaluate rollout cost every this many batches.
+- `eval_scenarios::Int = 30`: number of scenarios per periodic evaluation.
+
 # Examples
 ```julia
-train_variant!(policy, variant, det_eq, spi, spo, sampler, x0, model_path, curve_path)
+train_variant!(policy, variant, det_eq, spi, spo, sampler, x0,
+               model_path, curve_path;
+               eval_subproblems = esub, eval_state_in = esi,
+               eval_state_out = eso, eval_sampler = esamp)
 ```
 """
 function train_variant!(
@@ -516,7 +534,13 @@ function train_variant!(
     uncertainty_sampler,
     initial_state,
     model_path::String,
-    curve_path::String,
+    curve_path::String;
+    eval_subproblems,
+    eval_state_in,
+    eval_state_out,
+    eval_sampler,
+    eval_every::Int = 25,
+    eval_scenarios::Int = 30,
 )
     # Estimate a baseline loss before any optimizer step.
     initial_loss = estimate_initial_loss(
@@ -533,7 +557,9 @@ function train_variant!(
     save_best = SaveBest(initial_loss, model_path)
 
     # Keep a small CSV trace for plots and sanity checks.
-    training_log = DataFrame(batch = Int[], loss = Float64[])
+    training_log = DataFrame(
+        batch = Int[], loss = Float64[], rollout_cost = Float64[],
+    )
 
     println("=" ^ 60)
     println("Training TS-DDR [$(variant.tag)]  integer=$(variant.integer)")
@@ -545,6 +571,7 @@ function train_variant!(
     !isnothing(variant.score_function) &&
         println("  score function: $(typeof(variant.score_function))")
     println("  pre-training cost: $(round(initial_loss, digits = 1))")
+    println("  rollout eval every $(eval_every) batches on $(eval_scenarios) scenarios")
     println("=" ^ 60)
 
     # Fix optimizer randomness for repeatability.
@@ -564,24 +591,52 @@ function train_variant!(
         penalty_schedule = variant.penalty_schedule_fn(variant),
         score_function = variant.score_function,
         record = (sample_log, iteration, current_policy) -> begin
-            # Prefer operational cost, because target slack is a training aid.
             loss = isempty(sample_log.objectives_no_deficit) ?
                 NaN :
                 mean(sample_log.objectives_no_deficit)
 
-            # Store one row per SGD batch.
-            push!(training_log, (batch = iteration, loss = loss))
+            # Periodically evaluate the true out-of-sample stage-wise
+            # rollout cost — the metric that matters at deployment.
+            rollout_cost = NaN
+            if iteration == 1 || mod(iteration, eval_every) == 0
+                saved_state = hasproperty(current_policy, :state) ?
+                    deepcopy(current_policy.state) : nothing
 
-            # Print sparse progress so long runs are inspectable.
+                eval_costs, _, _, _ = rollout_policy(
+                    current_policy,
+                    eval_subproblems,
+                    eval_state_in,
+                    eval_state_out,
+                    eval_sampler,
+                    initial_state;
+                    num_scenarios = eval_scenarios,
+                    seed = 777,
+                    integer = variant.integer,
+                )
+                rollout_cost = mean(eval_costs)
+
+                if !isnothing(saved_state)
+                    current_policy.state = saved_state
+                end
+            end
+
+            push!(training_log, (
+                batch = iteration, loss = loss, rollout_cost = rollout_cost,
+            ))
+
             if iteration == 1 || mod(iteration, 50) == 0
+                cost_str = isnan(rollout_cost) ? "" :
+                    "  rollout=$(round(rollout_cost, digits = 1))"
                 println(
                     "  batch $(lpad(iteration, 4))/$(variant.num_batches)  " *
-                    "loss=$(round(loss, digits = 1))",
+                    "loss=$(round(loss, digits = 1))$(cost_str)",
                 )
             end
 
-            # Save the best policy seen so far.
-            save_best(iteration, current_policy, loss)
+            # Save best policy based on rollout cost when available,
+            # falling back to DE loss otherwise.
+            save_metric = isnan(rollout_cost) ? loss : rollout_cost
+            save_best(iteration, current_policy, save_metric)
 
             return false
         end,
@@ -680,7 +735,9 @@ function train_and_evaluate(variant::InventoryTrainingVariant)
     # Start from the variant's chosen policy architecture.
     policy = variant.policy_builder()
 
-    # Train the policy and save the best checkpoint.
+    # Train the policy and save the best checkpoint. The eval subproblems
+    # are shared with the post-training evaluation — rollout_policy resets
+    # parameters each call, so reuse is safe.
     train_seconds = train_variant!(
         policy,
         variant,
@@ -690,7 +747,11 @@ function train_and_evaluate(variant::InventoryTrainingVariant)
         train_sampler,
         initial_state,
         model_path,
-        curve_path,
+        curve_path;
+        eval_subproblems = eval_subproblems,
+        eval_state_in = eval_state_in,
+        eval_state_out = eval_state_out,
+        eval_sampler = eval_sampler,
     )
 
     # Reload the best checkpoint before evaluation.

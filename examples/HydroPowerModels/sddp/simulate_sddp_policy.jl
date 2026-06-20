@@ -54,9 +54,14 @@ using CSV
 using DataFrames
 volume_to_mw(volume, stage_hours; k=0.0036) = volume / (k * stage_hours)
 
-labels = ["TS-DDR"; "TS-LDR"; "SDDP-DCLL"]
-colors = [:black :purple :red]
-markers = [:hline :+ :pixel]
+const SDDP_COL = "SDDP-SOC"
+labels = ["TS-DDR"; "TS-LDR"; "SDDP-DCLL"; SDDP_COL]
+colors = [:black :purple :red :orange]
+markers = [:hline :+ :pixel :diamond]
+
+const DOCS_ASSETS = joinpath(dirname(@__DIR__), "..", "..", "docs", "src", "assets")
+mkpath(DOCS_ASSETS)
+out_dir = joinpath(case_dir, string(formulation))
 
 # Volume trajectory
 hydro_gen = [
@@ -76,30 +81,24 @@ savefig(
         ylabel="Volume (Hm3)",
         title="$(case)-$(formulation_b)-$(formulation)",
     ),
-    joinpath(
-        case_dir,
-        string(formulation),
-        "SDDP-$(case)-$(formulation_b)-$(formulation)-Volume.png",
-    ),
+    joinpath(out_dir, "SDDP-$(case)-$(formulation_b)-$(formulation)-Volume.png"),
 )
 
-df = CSV.read(
-    joinpath(case_dir, string(formulation), "MeanVolume.csv"), DataFrame; header=true
-)
-df[!, "$(string(formulation_b))"] = hydro_gen
-
-CSV.write(joinpath(case_dir, string(formulation), "MeanVolume.csv"), df)
+df = CSV.read(joinpath(out_dir, "MeanVolume.csv"), DataFrame; header=true)
+df[!, SDDP_COL] = hydro_gen
+CSV.write(joinpath(out_dir, "MeanVolume.csv"), df)
 
 savefig(
     plot(
         Matrix(df[!, labels]);
-        labels=permutedims(names(df[!, labels])),
+        labels=permutedims(labels),
         xlabel="Stage",
         ylabel="Expected Volume (MWh)",
         color=colors,
         shape=markers,
+        title="Reservoir Volume Comparison",
     ),
-    joinpath(case_dir, string(formulation), "DCLL-Comparison-$(case)-Volume.png"),
+    joinpath(DOCS_ASSETS, "hydro_volume_comparison.png"),
 )
 
 # Thermal generation
@@ -123,28 +122,24 @@ savefig(
         ylabel="Mwh",
         title="Thermal-Generation $(case)-$(formulation_b)-$(formulation)",
     ),
-    joinpath(
-        case_dir,
-        string(formulation),
-        "SDDP-$(case)-$(formulation_b)-$(formulation)-thermal.png",
-    ),
+    joinpath(out_dir, "SDDP-$(case)-$(formulation_b)-$(formulation)-thermal.png"),
 )
 
-df = CSV.read(joinpath(case_dir, string(formulation), "MeanGeneration.csv"), DataFrame)
-df[!, "SOC"] = thermal_gen
-
-CSV.write(joinpath(case_dir, string(formulation), "MeanGeneration.csv"), df)
+df = CSV.read(joinpath(out_dir, "MeanGeneration.csv"), DataFrame)
+df[!, SDDP_COL] = thermal_gen
+CSV.write(joinpath(out_dir, "MeanGeneration.csv"), df)
 
 savefig(
     plot(
         Matrix(df[!, labels]);
-        labels=permutedims(names(df[!, labels])),
+        labels=permutedims(labels),
         xlabel="Stage",
         ylabel="Expected Thermal Generation (MWh)",
         color=colors,
         shape=markers,
+        title="Thermal Generation Comparison",
     ),
-    joinpath(case_dir, string(formulation), "DCLL-Comparison-$(case)-thermal.png"),
+    joinpath(DOCS_ASSETS, "hydro_generation_comparison.png"),
 )
 
 # Objective costs
@@ -153,9 +148,14 @@ objective_values = [
     for i in 1:length(results[:simulations])
 ]
 
-df = CSV.read(joinpath(case_dir, string(formulation), "costs.csv"), DataFrame)
-df[!, "SDDP_SOC"] = objective_values
-
-CSV.write(joinpath(case_dir, string(formulation), "costs.csv"), df)
+costs_file = joinpath(out_dir, "costs.csv")
+if isfile(costs_file)
+    df = CSV.read(costs_file, DataFrame)
+    df[!, SDDP_COL] = objective_values
+else
+    df = DataFrame(Symbol(SDDP_COL) => objective_values)
+end
+CSV.write(costs_file, df)
 
 println("Mean Sim: ", mean(objective_values))
+println("Std  Sim: ", std(objective_values))

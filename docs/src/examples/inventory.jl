@@ -376,11 +376,35 @@ rollout_cost = simulate_multistage(
 #
 # ![Integer results](../assets/inventory_integer_results.png)
 
-# | Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR (FD) | Fit (s) | Eval (s) |
-# |:-------------------------|----:|----------:|------:|-------:|---------------:|--------:|---------:|
-# | TS-DDR (FixedDiscrete)   | 300 |    8015.8 | 719.5 |   81.4 |          +0.0% |   339.2 |   0.0112 |
-# | TS-DDR (ContRelax)       | 300 |    8318.1 | 720.0 |   81.5 |          +3.8% |   111.0 |   0.0117 |
-# | SDDP (MIP fwd)           | 300 |    5871.6 | 1087.4 |  123.1 |         -26.7% |     0.0 | 159.9310 |
-# | SDDP (LP relax)          | 300 |    8274.2 | 912.5 |  103.3 |          +3.2% |     0.0 |  18.5475 |
-# | Base-stock (S\*=160)    | 300 |    9035.6 | 506.8 |   57.3 |         +12.7% |     0.0 |   0.0000 |
-# | Random (untrained)      | 300 |    9594.6 | 361.1 |   40.9 |         +19.7% |     0.0 |   0.0120 |
+# ### Relaxed (continuous) results
+#
+# SDDP uses a PAR(1) approximation of the true latent demand process, which
+# is not exact for this problem. Despite this advantage for TS-DDR, the gap
+# between the best TS-DDR variant and SDDP is ~7%.
+#
+# The LSTM encoder closes ~25% of the gap versus the feedforward baseline by
+# learning temporal demand patterns from lagged observations.
+#
+# | Method                          |   N | Mean cost |   Std | vs SDDP |
+# |:--------------------------------|----:|----------:|------:|--------:|
+# | SDDP (PAR)                      | 300 |    2434.0 |     — |   0.0%  |
+# | TS-DDR (LSTM)                   | 300 |    2610.6 | 540.3 |  +7.3%  |
+# | TS-DDR (feedforward)            | 300 |    2667.3 | 593.5 |  +9.6%  |
+# | TS-DDR (HighPenalty)            | 300 |    2677.5 | 547.0 | +10.0%  |
+# | TS-DDR (LSTM+HP)                | 300 |    2712.0 | 554.6 | +11.4%  |
+#
+# ### Integer (MIP) results
+#
+# SDDP uses an `AlternativeForwardPass`: MIP in the forward pass, LP
+# relaxation in the backward pass for valid cuts. The TS-DDR gap is ~36%.
+#
+# | Method                          |   N | Mean cost |   Std | vs SDDP |
+# |:--------------------------------|----:|----------:|------:|--------:|
+# | SDDP (MIP fwd)                  | 300 |    5871.6 |1087.4 |   0.0%  |
+# | TS-DDR (FixedDiscrete)          | 300 |    8015.8 | 718.3 | +36.5%  |
+# | TS-DDR (MixedGrad)              | 300 |    8268.0 | 715.3 | +40.8%  |
+# | TS-DDR (ContRelax)              | 300 |    8318.1 | 718.8 | +41.7%  |
+# | TS-DDR (HighPenalty)            | 300 |    8388.4 | 615.9 | +42.8%  |
+# | SDDP (LP relax)                 | 300 |    8274.2 | 912.5 | +40.9%  |
+# | Base-stock (S\*=160)            | 300 |    9035.6 | 506.8 | +53.9%  |
+# | Random (untrained)              | 300 |    9594.6 | 361.1 | +63.4%  |

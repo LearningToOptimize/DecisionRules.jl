@@ -63,7 +63,58 @@ function resolve_result_dir(args)
 end
 
 const RESULT_DIR = resolve_result_dir(ARGS)
+const RESULT_BASE = joinpath(@__DIR__, "results")
 println("Loading results from: $RESULT_DIR")
+
+"""
+    resolve_file(filename::AbstractString) -> String
+
+Find a result file in `RESULT_DIR`, falling back to the base `results/`
+directory. This lets run-specific TS-DDR results coexist with shared
+baselines (SDDP, base-stock, random) that were generated once and live
+in the parent directory.
+
+# Arguments
+- `filename::AbstractString`: file name (not a full path).
+
+# Examples
+```julia
+path = resolve_file("relaxed_sddp_costs.csv")
+```
+"""
+function resolve_file(filename::AbstractString)
+    primary = joinpath(RESULT_DIR, filename)
+    isfile(primary) && return primary
+
+    fallback = joinpath(RESULT_BASE, filename)
+    isfile(fallback) && return fallback
+
+    error("Result file \"$filename\" not found in $RESULT_DIR or $RESULT_BASE")
+end
+
+"""
+    resolve_file_optional(filename::AbstractString) -> Union{String, Nothing}
+
+Like `resolve_file`, but returns `nothing` when the file does not exist in
+either directory.
+
+# Arguments
+- `filename::AbstractString`: file name (not a full path).
+
+# Examples
+```julia
+path = resolve_file_optional("integer_sf_training_curve.csv")
+```
+"""
+function resolve_file_optional(filename::AbstractString)
+    primary = joinpath(RESULT_DIR, filename)
+    isfile(primary) && return primary
+
+    fallback = joinpath(RESULT_BASE, filename)
+    isfile(fallback) && return fallback
+
+    return nothing
+end
 
 # Documentation figures are checked into the docs asset directory.
 const DOCS_ASSET_DIR = normpath(joinpath(@__DIR__, "..", "..", "docs", "src", "assets"))
@@ -176,7 +227,7 @@ costs = load_costs("integer", "dr")
 """
 function load_costs(tag::AbstractString, method::AbstractString)
     # Every cost file uses the shared `operational_cost` column.
-    table = CSV.read(joinpath(RESULT_DIR, "$(tag)_$(method)_costs.csv"), DataFrame)
+    table = CSV.read(resolve_file("$(tag)_$(method)_costs.csv"), DataFrame)
 
     return Float64.(table.operational_cost)
 end
@@ -196,10 +247,14 @@ costs = optional_costs("integer_sf", "dr")
 ```
 """
 function optional_costs(tag::AbstractString, method::AbstractString)
-    # Optional variants should not make the comparison script fail.
-    path = joinpath(RESULT_DIR, "$(tag)_$(method)_costs.csv")
+    filename = "$(tag)_$(method)_costs.csv"
+    primary = joinpath(RESULT_DIR, filename)
+    fallback = joinpath(RESULT_BASE, filename)
 
-    return isfile(path) ? Float64.(CSV.read(path, DataFrame).operational_cost) : nothing
+    path = isfile(primary) ? primary : isfile(fallback) ? fallback : nothing
+
+    return isnothing(path) ? nothing :
+        Float64.(CSV.read(path, DataFrame).operational_cost)
 end
 
 """
@@ -212,7 +267,7 @@ Read a scalar floating-point value from a text file.
 
 # Examples
 ```julia
-bound = read_scalar(joinpath(RESULT_DIR, "integer_sddp_bound.txt"))
+bound = read_scalar(resolve_file("integer_sddp_bound.txt"))
 ```
 """
 function read_scalar(path::AbstractString)
@@ -261,8 +316,8 @@ function load_timing(tags)
     rows = DataFrame[]
     for tag in tags
         for suffix in timing_suffixes
-            path = joinpath(RESULT_DIR, "$(tag)_$(suffix).csv")
-            isfile(path) && push!(rows, CSV.read(path, DataFrame))
+            path = resolve_file_optional("$(tag)_$(suffix).csv")
+            !isnothing(path) && push!(rows, CSV.read(path, DataFrame))
         end
     end
 
@@ -416,9 +471,9 @@ Create the SDDP training-bound subplot.
 plot_sddp_learning_curve("integer")
 ```
 """
-function plot_sddp_learning_curve(tag::AbstractString)
+function plot_sddp_learning_curve(tag::AbstractString; start_fraction::Float64 = 0.5)
     # SDDP logs may include failed or missing simulation rows.
-    log = CSV.read(joinpath(RESULT_DIR, "$(tag)_sddp_training_log.csv"), DataFrame)
+    log = CSV.read(resolve_file("$(tag)_sddp_training_log.csv"), DataFrame)
 
     # Log-scale plots require strictly positive finite values.
     valid_bound_rows = filter(
@@ -426,12 +481,16 @@ function plot_sddp_learning_curve(tag::AbstractString)
         log,
     )
 
+    # Show only the converged portion of training.
+    start_iter = round(Int, start_fraction * maximum(valid_bound_rows.iteration))
+    converged = filter(row -> row.iteration >= start_iter, valid_bound_rows)
+
     plot_handle = plot(
-        valid_bound_rows.iteration,
-        valid_bound_rows.bound;
+        converged.iteration,
+        converged.bound;
         xlabel = "Iteration",
         ylabel = "Cost (log scale)",
-        title = "SDDP learning curve",
+        title = "SDDP learning curve (converged)",
         label = "LP bound",
         linewidth = 2,
         color = :darkgreen,
@@ -439,13 +498,12 @@ function plot_sddp_learning_curve(tag::AbstractString)
         yscale = :log10,
     )
 
-    if "simulation_value" in names(valid_bound_rows)
-        # Simulation values are optional and may be recorded sparsely.
+    if "simulation_value" in names(converged)
         valid_sim_rows = filter(
             row -> !ismissing(row.simulation_value) &&
                 isfinite(row.simulation_value) &&
                 row.simulation_value > 0,
-            valid_bound_rows,
+            converged,
         )
 
         if nrow(valid_sim_rows) > 0
@@ -480,27 +538,30 @@ function plot_training_curves(curve_specs)
     # Start with an empty plot so optional curves can be skipped cleanly.
     plot_handle = plot(;
         xlabel = "Batch",
-        ylabel = "Mean operational cost",
+        ylabel = "Out-of-sample rollout cost",
         title = "TS-DDR training curves",
         legend = :topright,
     )
 
     for (tag, label, color) in curve_specs
         # Optional variants should not break the plot.
-        path = joinpath(RESULT_DIR, "$(tag)_training_curve.csv")
-        isfile(path) || continue
+        path = resolve_file_optional("$(tag)_training_curve.csv")
+        isnothing(path) && continue
 
-        # Training curves store one loss per SGD batch.
         curve = CSV.read(path, DataFrame)
 
-        plot!(
-            plot_handle,
-            curve.batch,
-            curve.loss;
-            label = label,
-            linewidth = 2,
-            color = color,
-        )
+        # Prefer the true out-of-sample rollout cost; fall back to the
+        # DE training objective for data generated before the rollout
+        # evaluation was added.
+        if "rollout_cost" in names(curve)
+            valid = dropmissing(curve, :rollout_cost)
+            valid = filter(row -> isfinite(row.rollout_cost), valid)
+            plot!(plot_handle, valid.batch, valid.rollout_cost;
+                  label = label, linewidth = 2, color = color)
+        else
+            plot!(plot_handle, curve.batch, curve.loss;
+                  label = label, linewidth = 2, color = color)
+        end
     end
 
     return plot_handle
@@ -525,9 +586,9 @@ function plot_inventory_trajectories(dr_tag, baseline_tag)
     time_columns = [Symbol("t$(period)") for period in 0:INVENTORY_T]
 
     # Load TS-DDR and base-stock trajectories.
-    dr_paths = CSV.read(joinpath(RESULT_DIR, "$(dr_tag)_dr_trajectories.csv"), DataFrame)
+    dr_paths = CSV.read(resolve_file("$(dr_tag)_dr_trajectories.csv"), DataFrame)
     base_stock_paths = CSV.read(
-        joinpath(RESULT_DIR, "$(baseline_tag)_basestock_trajectories.csv"),
+        resolve_file("$(baseline_tag)_basestock_trajectories.csv"),
         DataFrame,
     )
 
@@ -595,6 +656,9 @@ function plot_cost_distribution(results::Vector{MethodResult}, base_stock_level:
         ylabel = "Operational cost",
         title = "Cost comparison",
         legend = false,
+        xrotation = 30,
+        bottom_margin = 8Plots.mm,
+        xtickfontsize = 7,
     )
 
     for index in eachindex(results)
@@ -659,10 +723,10 @@ function make_summary_plot(
         trajectory_panel,
         distribution_panel;
         layout = layout,
-        size = (1100, 800),
+        size = (1200, 900),
         plot_title = problem,
         plot_titlefontsize = 12,
-        margin = 5Plots.mm,
+        margin = 6Plots.mm,
     )
 end
 
@@ -741,8 +805,8 @@ function relaxed_results()
     lstm_hp_costs = optional_costs("relaxed_lstm_hp", "dr")
 
     # Load scalar baseline metadata.
-    base_stock_level = read_scalar(joinpath(RESULT_DIR, "relaxed_basestock_S_star.txt"))
-    sddp_bound = read_scalar(joinpath(RESULT_DIR, "relaxed_sddp_bound.txt"))
+    base_stock_level = read_scalar(resolve_file("relaxed_basestock_S_star.txt"))
+    sddp_bound = read_scalar(resolve_file("relaxed_sddp_bound.txt"))
 
     # Build display records in table order.
     results = [
@@ -764,11 +828,11 @@ function relaxed_results()
 
     # Collect timing tags for all present variants.
     timing_tags = ["relaxed"]
-    isfile(joinpath(RESULT_DIR, "relaxed_lstm_dr_timing.csv")) &&
+    !isnothing(resolve_file_optional("relaxed_lstm_dr_timing.csv")) &&
         push!(timing_tags, "relaxed_lstm")
-    isfile(joinpath(RESULT_DIR, "relaxed_hp_dr_timing.csv")) &&
+    !isnothing(resolve_file_optional("relaxed_hp_dr_timing.csv")) &&
         push!(timing_tags, "relaxed_hp")
-    isfile(joinpath(RESULT_DIR, "relaxed_lstm_hp_dr_timing.csv")) &&
+    !isnothing(resolve_file_optional("relaxed_lstm_hp_dr_timing.csv")) &&
         push!(timing_tags, "relaxed_lstm_hp")
 
     return results, load_timing(timing_tags), base_stock_level, sddp_bound
@@ -800,8 +864,8 @@ function integer_results()
     lstm_sf_costs = optional_costs("integer_lstm_sf", "dr")
 
     # Load scalar baseline metadata.
-    base_stock_level = read_scalar(joinpath(RESULT_DIR, "integer_basestock_S_star.txt"))
-    sddp_bound = read_scalar(joinpath(RESULT_DIR, "integer_sddp_bound.txt"))
+    base_stock_level = read_scalar(resolve_file("integer_basestock_S_star.txt"))
+    sddp_bound = read_scalar(resolve_file("integer_sddp_bound.txt"))
 
     # Build the method list: original TS-DDR variants first.
     results = [
@@ -828,7 +892,7 @@ function integer_results()
     # Collect timing tags for all present variants.
     timing_tags = ["integer", "integer_cr"]
     for tag in ["integer_sf", "integer_hp", "integer_lstm", "integer_lstm_sf"]
-        isfile(joinpath(RESULT_DIR, "$(tag)_dr_timing.csv")) &&
+        !isnothing(resolve_file_optional("$(tag)_dr_timing.csv")) &&
             push!(timing_tags, tag)
     end
 
@@ -861,7 +925,7 @@ function integer_curve_specs()
     ]
 
     for spec in optional
-        isfile(joinpath(RESULT_DIR, "$(spec[1])_training_curve.csv")) &&
+        !isnothing(resolve_file_optional("$(spec[1])_training_curve.csv")) &&
             push!(specs, spec)
     end
 
@@ -890,7 +954,7 @@ function relaxed_curve_specs()
     ]
 
     for spec in optional
-        isfile(joinpath(RESULT_DIR, "$(spec[1])_training_curve.csv")) &&
+        !isnothing(resolve_file_optional("$(spec[1])_training_curve.csv")) &&
             push!(specs, spec)
     end
 
