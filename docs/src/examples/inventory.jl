@@ -287,3 +287,12 @@ rollout_cost = simulate_multistage(
 # ![Relaxed results](../assets/inventory_relaxed_results.png)
 #
 # ![Integer results](../assets/inventory_integer_results.png)
+
+# | Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR (FD) | Fit (s) | Eval (s) |
+# |:-------------------------|----:|----------:|------:|-------:|---------------:|--------:|---------:|
+# | TS-DDR (FixedDiscrete)   | 300 |    8015.8 | 719.5 |   81.4 |          +0.0% |   339.2 |   0.0112 |
+# | TS-DDR (ContRelax)       | 300 |    8318.1 | 720.0 |   81.5 |          +3.8% |   111.0 |   0.0117 |
+# | SDDP (MIP fwd)           | 300 |    5871.6 | 1087.4 |  123.1 |         -26.7% |     0.0 | 159.9310 |
+# | SDDP (LP relax)          | 300 |    8274.2 | 912.5 |  103.3 |          +3.2% |     0.0 |  18.5475 |
+# | Base-stock (S\*=160)    | 300 |    9035.6 | 506.8 |   57.3 |         +12.7% |     0.0 |   0.0000 |
+# | Random (untrained)      | 300 |    9594.6 | 361.1 |   40.9 |         +19.7% |     0.0 |   0.0120 |
