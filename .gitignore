@@ -52,4 +52,5 @@ examples/**/.CondaPkg/*
 *.tsv
 *.pdf
 plan.md
+memory.md
 *_cuts.json

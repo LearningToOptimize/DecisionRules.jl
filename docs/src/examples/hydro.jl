@@ -147,7 +147,7 @@ using Statistics, Random
 #
 # ![Out-of-sample cost comparison](../assets/hydro_cost_comparison.png)
 #
-# ![Reservoir trajectories](../assets/hydro_trajectories.png)
+# ![Violation share](../assets/hydro_violation_share.png)
 #
 # | Method | Mean Cost | Std | Violation % | Train Time |
 # |:---|---:|---:|---:|---:|

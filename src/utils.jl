@@ -323,6 +323,30 @@ function _apply_deficit_penalty_multiplier!(
     return models
 end
 
+"""
+    SaveBest(best_loss::Float64, model_path::String)
+
+Callback that saves the best policy state seen during training.
+
+`SaveBest` is a small callable object used as a training callback. When called
+as `callback(iter, model, loss)`, it compares `loss` with the best loss stored
+so far. If the new loss is smaller, it copies `model` to CPU, normalizes any
+recurrent layer state, and writes the Flux state to `model_path` with JLD2.
+It returns `false`, so it records checkpoints without stopping training.
+
+# Arguments
+- `best_loss::Float64`: incumbent loss. Use `Inf` to save the first observed
+  model.
+- `model_path::String`: path of the JLD2 file that receives the best model
+  state.
+
+# Examples
+```julia
+callback = SaveBest(Inf, "best_policy.jld2")
+train_multistage(policy, x0, subproblems, state_in, state_out, sampler;
+    record = (log, iter, model) -> callback(iter, model, mean(log.losses)))
+```
+"""
 mutable struct SaveBest <: Function
     best_loss::Float64
     model_path::String
@@ -428,6 +452,9 @@ _reset_sample_log!(sample_log::SampleLog) = empty!(sample_log)
 _reset_sample_log!(sample_log) = sample_log
 
 function _total_objective_value(model::JuMP.Model)
+    if model.is_model_dirty
+        return get(model.ext, :_last_obj, 0.0)
+    end
     try
         return objective_value(model)
     catch

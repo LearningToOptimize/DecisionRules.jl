@@ -9,6 +9,7 @@ using ChainRulesCore
 import ChainRulesCore.rrule
 using DiffOpt
 using Logging
+using Statistics: mean
 
 export simulate_multistage,
     sample,
@@ -35,6 +36,10 @@ export simulate_multistage,
     StateConditionedPolicy,
     state_conditioned_policy,
     materialize_tangent,
+    # Score-function gradient mixing
+    ScoreFunctionConfig,
+    ScoreFunctionSchedule,
+    sf_params,
     # Multiple shooting exports
     train_multiple_shooting,
     setup_shooting_windows,
@@ -64,6 +69,7 @@ const _SUCCESSFUL_TERM_STATUSES = (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL, MOI.LOCALLY_
 
 include("integer_strategies.jl")
 include("parameter_duals.jl")
+include("score_function.jl")
 include("simulate_multistage.jl")
 include("dense_multilayer_nn.jl")
 include("utils.jl")

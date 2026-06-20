@@ -44,6 +44,8 @@ function build_subproblem(
     return subproblem, state_in, state_out, state_out_var, uncertainty
 end
 
+include("test_score_function.jl")
+
 @testset "DecisionRules.jl" begin
     @testset "pdual at infeasibility" begin
         subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(

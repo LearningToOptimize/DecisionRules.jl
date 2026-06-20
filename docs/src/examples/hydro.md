@@ -153,10 +153,11 @@ are generated from full training runs (20 epochs × 100 batches each).
 
 ![Out-of-sample cost comparison](../assets/hydro_cost_comparison.png)
 
-![Reservoir trajectories](../assets/hydro_trajectories.png)
+![Violation share](../assets/hydro_violation_share.png)
 
 | Method | Mean Cost | Std | Violation % | Train Time |
 |:---|---:|---:|---:|---:|
 | Deterministic Equivalent | 321189.0 | — | 48.66% | 158 steps |
 | Stage-wise Subproblems | 364110.0 | — | 0.59% | 159 steps |
 | Multiple Shooting | 319462.0 | — | 36.18% | 236 steps |
+
