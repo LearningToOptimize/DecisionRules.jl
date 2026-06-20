@@ -38,7 +38,7 @@ ensure_feasibility = non_ensurance
 optimizers = [Flux.Adam()]
 pre_trained_model = nothing
 penalty_l2 = :auto
-penalty_l1 = nothing
+penalty_l1 = :auto
 # Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
 # to train with the constant penalties the models were built with.
 penalty_schedule = :default_annealed
