@@ -47,7 +47,7 @@ function build_hydropowermodels(
     subproblems = Vector{JuMP.Model}(undef, num_stages)
     state_params_in = Vector{Vector{Any}}(undef, num_stages)
     state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
-    uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+    uncertainty_samples = Vector{Vector{Vector{Tuple{VariableRef,Float64}}}}(
         undef, num_stages
     )
 

@@ -25,7 +25,6 @@ num_stages = 96                          # 96, 48
 window_size = 12                       # 12, 6
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
-save_file = "$(case_name)-$(formulation)-h$(num_stages)-shooting-w$(window_size)-$(now())"
 formulation_file = formulation * ".mof.json"
 
 # Training parameters
@@ -35,14 +34,19 @@ _num_train_per_batch = 1
 activation = sigmoid                     # tanh, identity, relu, sigmoid
 layers = Int64[128, 128]
 ensure_feasibility = non_ensurance
-grad_clip = 10.0f0
-optimizers = [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
+grad_clip = parse(Float32, get(ENV, "DR_GRAD_CLIP", "0"))
+optimizers = if grad_clip > 0
+    [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
+else
+    [Flux.Adam()]
+end
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
-# Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
-# to train with the constant penalties the models were built with.
-penalty_schedule = :default_annealed
+penalty_schedule = get(ENV, "DR_PENALTY_SCHEDULE", "annealed") == "annealed" ? :default_annealed : nothing
+clip_tag = grad_clip > 0 ? "-clip$(Int(grad_clip))" : ""
+sched_tag = isnothing(penalty_schedule) ? "-const" : "-anneal"
+save_file = "$(case_name)-$(formulation)-h$(num_stages)-shooting-w$(window_size)$(clip_tag)$(sched_tag)-$(now())"
 num_eval_scenarios = 4
 eval_every = 25
 
@@ -172,7 +176,7 @@ train_multiple_shooting(
     models,
     initial_state,
     windows,
-    () -> uncertainty_samples;
+    uncertainty_samples;
     num_batches=num_epochs * num_batches,
     num_train_per_batch=_num_train_per_batch,
     optimizer=first(optimizers),
