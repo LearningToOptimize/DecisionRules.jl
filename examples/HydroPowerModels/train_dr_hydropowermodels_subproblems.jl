@@ -32,13 +32,14 @@ _num_train_per_batch = 1
 activation = sigmoid
 layers = Int64[128, 128]
 ensure_feasibility = non_ensurance
-optimizers = [Flux.Adam()]
+grad_clip = 10.0f0
+optimizers = [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
 # Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
 # to train with the constant penalties the models were built with.
-penalty_schedule = :default_annealed
+penalty_schedule = nothing
 num_eval_scenarios = 4                   # fixed held-out scenarios for the rollout evaluation
 eval_every = 25                          # rollout-evaluate every eval_every batches
 
@@ -76,6 +77,7 @@ lg = WandbLogger(;
         "activation" => string(activation),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
+        "grad_clip" => grad_clip,
         "training_method" => "subproblems",
         "penalty_l1" => string(penalty_l1),
         "penalty_l2" => string(penalty_l2),
@@ -88,7 +90,7 @@ lg = WandbLogger(;
 
 # Define Model
 # Policy architecture: LSTM processes uncertainty, Dense combines with previous state
-num_uncertainties = length(uncertainty_samples[1])
+num_uncertainties = length(uncertainty_samples[1][1])
 models = state_conditioned_policy(
     num_uncertainties,
     num_hydro,
@@ -120,7 +122,7 @@ best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
-convergence_criterium = StallingCriterium(100, best_obj, 0)
+convergence_criterium = StallingCriterium(num_epochs * num_batches, best_obj, 0)
 
 # Fixed held-out scenarios, materialized once so every evaluation uses the same set.
 # The rollout evaluation executes the policy stage by stage (deployment semantics) and

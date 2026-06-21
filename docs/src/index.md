@@ -30,7 +30,7 @@ Three training formulations are supported:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/LearningToOptimize/DecisionRules.jl.git")
+Pkg.add("DecisionRules")
 ```
 
 ## Quick start
@@ -55,7 +55,8 @@ train_multistage(
 )
 ```
 
-See the [Algorithm](@ref) page for the mathematical formulation and the
+See the [Algorithm](@ref) page for the mathematical formulation, the
+[Uncertainty Sampling](@ref) guide for how to prepare your scenario data, and the
 examples for complete worked problems.
 
 ## Citation

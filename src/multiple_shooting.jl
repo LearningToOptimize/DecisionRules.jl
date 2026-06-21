@@ -60,13 +60,16 @@ end
 =============================================================================#
 
 """
-    extract_uncertainty_params(window_uncertainties_new)
+    extract_uncertainty_params(window_uncertainties) -> Vector{Vector{VariableRef}}
 
-Normalize uncertainty data to a per-stage vector of parameter VariableRefs.
+Extract the JuMP parameter `VariableRef`s from each stage of an uncertainty pool.
 
-Accepts either:
-- Vector{Vector{Tuple{VariableRef, Any}}} (common in this package), or
-- Vector{Vector{VariableRef}}.
+Handles three possible input shapes (automatically detected):
+- Already-extracted `Vector{Vector{VariableRef}}` — returned as-is.
+- Per-unit pool `Vector{Vector{Tuple{VariableRef, Vector}}}` — extracts the first
+  element of each tuple.
+- Joint-scenario pool `Vector{Vector{Vector{Tuple{VariableRef, T}}}}` — extracts
+  params from the first scenario of each stage (all scenarios share the same params).
 """
 function extract_uncertainty_params(window_uncertainties)
     if isempty(window_uncertainties)
@@ -76,10 +79,15 @@ function extract_uncertainty_params(window_uncertainties)
     if isempty(first_stage)
         return [VariableRef[] for _ in 1:length(window_uncertainties)]
     end
-    if first(first_stage) isa VariableRef
+    elem = first(first_stage)
+    if elem isa VariableRef
         return window_uncertainties
+    elseif elem isa AbstractVector
+        # Joint-scenario format: each stage is [scenario₁, scenario₂, ...],
+        # each scenario is [(param, val), ...]. Extract params from the first scenario.
+        return [[pair[1] for pair in first(stage)] for stage in window_uncertainties]
     else
-        # assume tuples (param, something)
+        # Per-unit format: (param, support_vector)
         return [[u[1] for u in stage_u] for stage_u in window_uncertainties]
     end
 end
@@ -115,10 +123,20 @@ function _create_like_variable(
 end
 
 """
-    windows_equivalent!(model, subproblems, state_params_in, state_params_out, initial_state, uncertainties)
+    windows_equivalent!(model, subproblems, state_params_in, state_params_out,
+                         initial_state, uncertainties)
 
-Create a window equivalent without mutating the original subproblems and without
-adding extra variables/constraints beyond those already present in the subproblems.
+Build a coupled JuMP model for a contiguous window of stages by copying all variables,
+constraints, and objectives from `subproblems` into `model`. Stage coupling is enforced
+by identifying each stage's realized state variable with the next stage's incoming state
+parameter (same approach as [`deterministic_equivalent!`](@ref), but scoped to a
+window).
+
+`uncertainties` accepts both per-unit and joint-scenario pool formats
+(see [`sample`](@ref)). The returned `uncertainties_new` preserves the input format
+with variable refs remapped to the window model.
+
+Returns `(model, state_params_in_new, state_params_out_new, uncertainties_new)`.
 """
 function windows_equivalent!(
     model::JuMP.Model,
@@ -134,7 +152,10 @@ function windows_equivalent!(
     var_src_to_dest = Dict{VariableRef,VariableRef}()
     state_in_new = Vector{Vector{Any}}(undef, num_stages)
     state_out_new = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
-    uncertainties_new = Vector{Vector{Tuple{Any,Vector{Float64}}}}(undef, num_stages)
+    # Detect format: joint-scenario (Vector{Vector{Tuple}}) vs per-unit (Vector{Tuple{...,Vector}})
+    _is_joint = !isempty(uncertainties) && !isempty(uncertainties[1]) &&
+        first(uncertainties[1]) isa AbstractVector
+    uncertainties_new = Any[nothing for _ in 1:num_stages]
 
     for t in 1:num_stages
         subproblem = subproblems[t]
@@ -200,21 +221,42 @@ function windows_equivalent!(
             end
         end
 
-        # uncertainties
-        uncertainties_new[t] = Vector{Tuple{Any,Vector{Float64}}}(
-            undef, length(uncertainties[t])
-        )
-        for (i, tup) in enumerate(uncertainties[t])
-            u_src, u_vals = tup
-            if u_src isa VariableRef
-                dest = get(var_src_to_dest, u_src, nothing)
-                if dest === nothing
-                    dest = _create_like_variable(model, u_src, t; force_parameter=true)
-                    var_src_to_dest[u_src] = dest
+        # uncertainties — remap VariableRefs through var_src_to_dest
+        if _is_joint
+            # Joint-scenario format: each element is a scenario (Vector of Tuples)
+            uncertainties_new[t] = [
+                [begin
+                    u_src, u_val = pair
+                    if u_src isa VariableRef
+                        dest = get(var_src_to_dest, u_src, nothing)
+                        if dest === nothing
+                            dest = _create_like_variable(model, u_src, t; force_parameter=true)
+                            var_src_to_dest[u_src] = dest
+                        end
+                        (dest, Float64(u_val))
+                    else
+                        (u_src, Float64(u_val))
+                    end
+                end for pair in scenario]
+                for scenario in uncertainties[t]
+            ]
+        else
+            # Per-unit format: each element is (param, support_vector)
+            uncertainties_new[t] = Vector{Tuple{Any,Vector{Float64}}}(
+                undef, length(uncertainties[t])
+            )
+            for (i, tup) in enumerate(uncertainties[t])
+                u_src, u_vals = tup
+                if u_src isa VariableRef
+                    dest = get(var_src_to_dest, u_src, nothing)
+                    if dest === nothing
+                        dest = _create_like_variable(model, u_src, t; force_parameter=true)
+                        var_src_to_dest[u_src] = dest
+                    end
+                    uncertainties_new[t][i] = (dest, _as_float64_vec(u_vals))
+                else
+                    uncertainties_new[t][i] = (u_src, _as_float64_vec(u_vals))
                 end
-                uncertainties_new[t][i] = (dest, _as_float64_vec(u_vals))
-            else
-                uncertainties_new[t][i] = (u_src, _as_float64_vec(u_vals))
             end
         end
 
@@ -266,10 +308,11 @@ end
 """
     set_window_uncertainties!(window, uncertainty_sample)
 
-Set sampled uncertainty values into the window model parameters.
+Set sampled (realized) uncertainty values into the window model's JuMP parameters.
 
-- `window.uncertainty_params[t][i]` is the parameter VariableRef in the window model
-- `uncertainty_sample[global_t][i][2]` is the sampled numeric value (original structure)
+`uncertainty_sample` is a **realized** trajectory (output of [`sample`](@ref)), so
+each stage is `Vector{Tuple{VariableRef, Float64}}` regardless of whether the
+original pool used independent or joint-scenario format.
 """
 function set_window_uncertainties!(
     window,
@@ -880,10 +923,19 @@ end
 """
     train_multiple_shooting(model, initial_state, windows, uncertainty_sampler; ...)
 
-This mirrors your other training loops:
-- Reuse pre-built window models.
-- For each SGD step, sample uncertainties, build uncertainties_vec for the policy,
-  evaluate simulate_multiple_shooting, and update parameters.
+Train a target-state policy with multiple-shooting decomposition (windowed).
+
+`uncertainty_sampler` controls how trajectories are drawn at each SGD step.
+Three formats are accepted (same API as [`train_multistage`](@ref)):
+1. **Per-unit pool** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+   independent sampling per parameter per stage.
+2. **Joint-scenario pool** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+   one scenario drawn per stage, preserving spatial correlation.
+3. **Callable** (`() -> Vector{Vector{Tuple{VariableRef, T}}}`): a zero-arg
+   function returning a realized trajectory. Use this for temporal correlation;
+   see [`sample`](@ref).
+
+See the [Uncertainty Sampling](@ref) documentation for details.
 """
 function train_multiple_shooting(
     model,
@@ -913,18 +965,7 @@ function train_multiple_shooting(
     end
     current_multiplier = NaN
 
-    # We only need the uncertainty *structure* here.
-    base_uncertainty = uncertainty_sampler()
-    # If uncertainty values are vectors (sample sets), draw realized values per iteration.
-    has_sample_sets =
-        !isempty(base_uncertainty) &&
-        !isempty(base_uncertainty[1]) &&
-        (base_uncertainty[1][1][2] isa AbstractVector)
-    draw_uncertainty = if has_sample_sets
-        (() -> DecisionRules.sample(base_uncertainty))
-    else
-        uncertainty_sampler
-    end
+    draw_uncertainty = () -> DecisionRules.sample(uncertainty_sampler)
 
     initial_state_f32 = Float32.(initial_state)
 

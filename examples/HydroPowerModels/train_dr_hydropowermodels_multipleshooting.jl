@@ -35,7 +35,8 @@ _num_train_per_batch = 1
 activation = sigmoid                     # tanh, identity, relu, sigmoid
 layers = Int64[128, 128]
 ensure_feasibility = non_ensurance
-optimizers = [Flux.Adam()]
+grad_clip = 10.0f0
+optimizers = [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
@@ -87,6 +88,7 @@ lg = WandbLogger(;
         "activation" => string(activation),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
+        "grad_clip" => grad_clip,
         "training_method" => "multiple_shooting",
         "window_size" => string(window_size),
         "penalty_l1" => string(penalty_l1),
@@ -100,7 +102,7 @@ lg = WandbLogger(;
 
 # Define Model
 # Policy architecture: LSTM processes uncertainty, Dense combines with previous state
-num_uncertainties = length(uncertainty_samples[1])
+num_uncertainties = length(uncertainty_samples[1][1])
 models = state_conditioned_policy(
     num_uncertainties,
     num_hydro,
@@ -145,7 +147,7 @@ best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
-convergence_criterium = StallingCriterium(200, best_obj, 0)
+convergence_criterium = StallingCriterium(num_epochs * num_batches, best_obj, 0)
 
 Random.seed!(8789)
 eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:num_eval_scenarios]

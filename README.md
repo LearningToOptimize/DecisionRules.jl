@@ -27,7 +27,7 @@ DecisionRules.jl implements this workflow in three flavors:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/LearningToOptimize/DecisionRules.jl.git")
+Pkg.add("DecisionRules")
 ```
 
 ## What you need to provide

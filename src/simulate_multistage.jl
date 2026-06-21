@@ -905,30 +905,98 @@ function ChainRulesCore.rrule(
     return y, public_pullback
 end
 
-"""
-    sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where {T<:Real}
-    sample(uncertainty_samples::Vector{Vector{Tuple{VariableRef,Vector{T}}}}) where {T<:Real}
+@doc raw"""
+    sample(uncertainty_pool) -> Vector{Vector{Tuple{VariableRef, T}}}
 
-Draw one uncertainty realization from a DecisionRules uncertainty sampler.
+Draw one full uncertainty trajectory from a DecisionRules uncertainty pool.
 
-The first method receives one stage's uncertainty support as
-`(parameter, support_values)` pairs and returns `(parameter, sampled_value)`
-pairs. The second method maps that operation over a vector of stages, producing
-one sampled trajectory for a multistage rollout.
+The returned trajectory is a length-``T`` vector where each element is
+`Vector{Tuple{VariableRef, Float64}}` — one realized value per uncertain
+parameter for that stage. This is the format consumed by `simulate_multistage`,
+`train_multistage`, and all other training/evaluation functions.
 
-# Arguments
-- `uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}`: one stage's
-  uncertain JuMP parameters and their finite supports.
-- `uncertainty_samples::Vector{Vector{Tuple{VariableRef,Vector{T}}}}`: one
-  finite-support uncertainty description per stage.
+Three pool formats are supported, offering increasing levels of correlation:
+
+## 1. Independent sampling (per-unit pools)
+
+Each uncertain parameter has its own finite support; sampling draws
+independently from each support at each stage.
+
+    sample(multistage_pool::Vector{Vector{Tuple{VariableRef, Vector{T}}}})
+
+`multistage_pool[t]` is `[(param₁, [v₁₁, v₁₂, …]), (param₂, [v₂₁, v₂₂, …]), …]`.
+Each parameter picks one value uniformly at random from its own support.
+**No spatial or temporal correlation is preserved.**
+
+## 2. Joint-scenario sampling (spatial correlation)
+
+Scenarios are pre-defined joint realizations across all parameters at each
+stage. Sampling picks one complete scenario per stage uniformly, preserving
+cross-parameter correlations (e.g., spatially correlated inflows across
+hydro reservoirs). Stages are still drawn independently.
+
+    sample(multistage_joint::Vector{Vector{Vector{Tuple{VariableRef, T}}}})
+
+`multistage_joint[t]` is `[scenario₁, scenario₂, …]` where each scenario
+is `[(param₁, val₁), (param₂, val₂), …]`.
+
+## 3. Trajectory sampler (spatial + temporal correlation)
+
+A callable `sampler(t, past) -> Vector{Tuple{VariableRef, T}}` that generates
+stage `t`'s realization given the realized values from stages `1:t-1`. This
+enables autoregressive, Markovian, or any custom temporal dependence.
+
+    sample(sampler::Function, T::Int)
+
+The callable receives:
+- `t::Int` — the current stage (1-indexed)
+- `past::Vector{Vector{Tuple{VariableRef, T}}}` — realized samples from
+  stages `1:t-1` (empty vector for `t=1`)
+
+and must return `Vector{Tuple{VariableRef, T}}` — the realized sample for
+stage `t`.
+
+## Output format
+
+All three methods return `Vector{Vector{Tuple{VariableRef, T}}}` — a length-``T``
+vector of per-stage realized samples. This is the universal input to
+`simulate_multistage`, `train_multistage`, `simulate_multiple_shooting`, and all
+evaluation functions.
 
 # Examples
 ```julia
-demand_path = sample([
-    [(demand_1, [10.0, 15.0])],
-    [(demand_2, [8.0, 12.0])],
-])
+# 1. Independent sampling (each unit draws independently):
+independent_pool = [
+    [(inflow_1, [10.0, 15.0, 12.0]), (inflow_2, [8.0, 12.0, 9.0])],
+    [(inflow_1, [11.0, 14.0, 13.0]), (inflow_2, [7.0, 11.0, 10.0])],
+]
+path = sample(independent_pool)
+
+# 2. Joint-scenario sampling (preserves spatial correlation):
+joint_pool = [
+    [[(inflow_1, 10.0), (inflow_2, 8.0)],   # scenario 1
+     [(inflow_1, 15.0), (inflow_2, 12.0)]],  # scenario 2 — stage 1
+    [[(inflow_1, 11.0), (inflow_2, 7.0)],
+     [(inflow_1, 14.0), (inflow_2, 11.0)]],  # stage 2
+]
+path = sample(joint_pool)
+
+# 3. Trajectory sampler (preserves temporal + spatial correlation):
+function my_sampler(t, past)
+    if t == 1
+        ω = rand(1:nScenarios)
+        return [(inflow_params[t][r], data[r][t, ω]) for r in 1:nHyd]
+    else
+        # AR(1): next inflow depends on previous realized inflow
+        prev_values = [pair[2] for pair in past[end]]
+        noise = randn(nHyd) .* σ
+        return [(inflow_params[t][r], ρ * prev_values[r] + noise[r]) for r in 1:nHyd]
+    end
+end
+path = sample(my_sampler, T)
 ```
+
+See the [Uncertainty Sampling](@ref) documentation page for a complete guide.
 """
 function sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where {T<:Real}
     uncertainty_sample = Vector{Tuple{VariableRef,T}}(undef, length(uncertainty_samples))
@@ -938,10 +1006,59 @@ function sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where
     return uncertainty_sample
 end
 
+function sample(joint_scenarios::Vector{Vector{Tuple{VariableRef,T}}}) where {T<:Real}
+    return rand(joint_scenarios)
+end
+
 function sample(
     uncertainty_samples::Vector{Vector{Tuple{VariableRef,Vector{T}}}}
 ) where {T<:Real}
     return [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
+end
+
+function sample(
+    uncertainty_samples::Vector{Vector{Vector{Tuple{VariableRef,T}}}}
+) where {T<:Real}
+    return [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
+end
+
+"""
+    sample(sampler::Function, T::Int)
+
+Draw a full trajectory using a callable trajectory sampler with temporal dependence.
+
+`sampler(t, past)` receives the current stage `t` and a vector of all previously
+realized samples `past[1:t-1]`, and returns the realized sample for stage `t`.
+
+This enables autoregressive, Markovian, or any custom temporal correlation between
+stages — something the data-based pool formats cannot express.
+
+See [`sample`](@ref) for the full API and examples.
+"""
+function sample(sampler::Function, T::Int)
+    trajectory = Vector{Vector{Tuple{VariableRef,Float64}}}(undef, T)
+    past = Vector{Vector{Tuple{VariableRef,Float64}}}()
+    for t in 1:T
+        trajectory[t] = sampler(t, past)
+        push!(past, trajectory[t])
+    end
+    return trajectory
+end
+
+"""
+    sample(sampler::Function)
+
+Call a zero-argument trajectory sampler that returns a complete trajectory.
+
+This is the dispatch used by `train_multistage` and `train_multiple_shooting`
+when `uncertainty_sampler` is a callable. Wrap a trajectory sampler as:
+
+```julia
+uncertainty_sampler = () -> sample(my_stage_sampler, T)
+```
+"""
+function sample(sampler::Function)
+    return sampler()
 end
 
 @doc raw"""
@@ -1008,7 +1125,17 @@ sensitivities are computed through DiffOpt in the rrules for
 - `state_params_in`: stage input-state parameters.
 - `state_params_out`: `(target_parameter, realized_state_variable)` pairs for
   each stage output state.
-- `uncertainty_sampler`: object or vector sampled by [`sample`](@ref).
+- `uncertainty_sampler`: source of uncertainty trajectories, passed to
+  [`sample`](@ref). Three formats are accepted:
+  1. **Per-unit pool** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+     independent sampling per parameter per stage.
+  2. **Joint-scenario pool** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+     one scenario drawn per stage, preserving spatial correlation.
+  3. **Callable** (`() -> Vector{Vector{Tuple{VariableRef, T}}}`): a zero-arg
+     function returning a full trajectory. Use this for temporal correlation
+     by wrapping a trajectory sampler:
+     `() -> sample(my_stage_sampler, T)` where `my_stage_sampler(t, past)`
+     generates stage `t` conditioned on past realizations.
 
 # Keywords
 - `num_batches::Integer`: number of SGD batches.
@@ -1025,17 +1152,20 @@ sensitivities are computed through DiffOpt in the rrules for
 
 # Examples
 ```julia
+# With data pool (independent or joint):
 train_multistage(
-    policy,
-    initial_state,
-    subproblems,
-    state_params_in,
-    state_params_out,
-    uncertainty_sampler;
-    num_batches = 200,
-    num_train_per_batch = 16,
-    optimizer = Flux.Adam(1.0e-3),
-    integer_strategy = NoIntegerStrategy(),
+    policy, initial_state, subproblems,
+    state_params_in, state_params_out, uncertainty_pool;
+    num_batches=200, optimizer=Flux.Adam(1e-3),
+)
+
+# With trajectory sampler (temporal correlation):
+ar_sampler(t, past) = my_ar1_model(t, past, inflow_params)
+train_multistage(
+    policy, initial_state, subproblems,
+    state_params_in, state_params_out,
+    () -> sample(ar_sampler, T);
+    num_batches=200, optimizer=Flux.Adam(1e-3),
 )
 ```
 """
@@ -1203,7 +1333,15 @@ path.
 - `state_params_in`: input-state parameters in the deterministic equivalent.
 - `state_params_out`: `(target_parameter, realized_state_variable)` pairs for
   each target state.
-- `uncertainty_sampler`: object or vector sampled by [`sample`](@ref).
+- `uncertainty_sampler`: source of uncertainty trajectories, passed to
+  [`sample`](@ref). Three formats are accepted:
+  1. **Per-unit pool** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+     independent sampling per parameter per stage.
+  2. **Joint-scenario pool** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+     one scenario drawn per stage, preserving spatial correlation.
+  3. **Callable** (`() -> Vector{Vector{Tuple{VariableRef, T}}}`): a zero-arg
+     function returning a full trajectory. Use this for temporal correlation;
+     see [`sample`](@ref).
 
 # Keywords
 - `num_batches::Integer`: number of SGD batches.

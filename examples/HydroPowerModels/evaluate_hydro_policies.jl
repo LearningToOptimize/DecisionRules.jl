@@ -72,7 +72,7 @@ subproblems, state_params_in, state_params_out, uncertainty_samples, initial_sta
     )
 
 num_hydro = length(initial_state)
-num_uncertainties = length(uncertainty_samples[1])
+num_uncertainties = length(uncertainty_samples[1][1])
 num_inputs = DecisionRules.policy_input_dim(num_uncertainties, num_hydro)
 
 # ── Generate fixed scenario set ──────────────────────────────────────────────

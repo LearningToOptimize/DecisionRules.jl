@@ -936,8 +936,15 @@ stage subproblems into `model`.  Variables are renamed with a `#t` suffix to avo
 conflicts.  Stage coupling is enforced by identifying the realized state variable of
 stage `t` with the incoming state parameter of stage `t+1`.
 
-Returns `(model, uncertainties_new)` where `uncertainties_new` maps the original
-uncertainty parameter refs to the new refs in the combined model.
+`uncertainties` accepts both sampling formats (see [`sample`](@ref)):
+
+- **Per-unit pools**: `Vector{Vector{Tuple{VariableRef, Vector{T}}}}` — one pool per
+  parameter, drawing independently per parameter.
+- **Joint-scenario pools**: `Vector{Vector{Vector{Tuple{VariableRef, T}}}}` — pre-built
+  joint scenarios preserving cross-parameter correlations.
+
+Returns `(model, uncertainties_new)` where `uncertainties_new` has the same format as
+the input but with variable refs remapped to the deterministic-equivalent model.
 """
 function deterministic_equivalent!(
     model::JuMP.Model,
@@ -945,12 +952,9 @@ function deterministic_equivalent!(
     state_params_in::Vector{Vector{Any}},
     state_params_out::Vector{Vector{Tuple{Any,VariableRef}}},
     initial_state::Vector{Float64},
-    uncertainties::Vector{Vector{Tuple{VariableRef,Vector{Float64}}}},
+    uncertainties,
 )
     set_objective_sense(model, objective_sense(subproblems[1]))
-    uncertainties_new = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
-        undef, length(uncertainties)
-    )
     var_src_to_dest = Dict{VariableRef,VariableRef}()
     for t in 1:length(subproblems)
         DecisionRules.add_child_model_vars!(
@@ -971,31 +975,52 @@ function deterministic_equivalent!(
         )
     end
 
-    if uncertainties[1][1][1] isa VariableRef
-        # use var_src_to_dest
-        for t in 1:length(subproblems)
-            uncertainties_new[t] = Vector{Tuple{VariableRef,Vector{Float64}}}(
-                undef, length(uncertainties[t])
-            )
-            for (i, tup) in enumerate(uncertainties[t])
-                ky, val = tup
-                uncertainties_new[t][i] = (var_src_to_dest[ky], val)
-            end
-        end
-    else
-        # use cons_to_cons
-        for t in 1:length(subproblems)
-            uncertainties_new[t] = Vector{Tuple{VariableRef,Vector{Float64}}}(
-                undef, length(uncertainties[t])
-            )
-            for (i, tup) in enumerate(uncertainties[t])
-                ky, val = tup
-                uncertainties_new[t] = (cons_to_cons[t][ky], val)
-            end
-        end
-    end
-
+    uncertainties_new = _remap_uncertainties(uncertainties, var_src_to_dest, cons_to_cons)
     return model, uncertainties_new
+end
+
+"""
+    _remap_uncertainties(uncertainties, var_src_to_dest, cons_to_cons)
+
+Replace source-model `VariableRef` keys in an uncertainty pool with their
+destination-model counterparts (using the variable or constraint mapping built
+by [`deterministic_equivalent!`](@ref)).
+
+Two methods dispatch on the pool format:
+
+- **Per-unit pools** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+  each stage maps `[(param₁, [v₁, …]), …]` independently.
+- **Joint-scenario pools** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+  each stage maps `[[scenario₁…], [scenario₂…], …]` preserving the grouped
+  structure.
+
+This is an internal helper; users interact with it indirectly through
+[`deterministic_equivalent!`](@ref).
+"""
+function _remap_uncertainties(
+    uncertainties::Vector{Vector{Tuple{VariableRef,Vector{T}}}},
+    var_src_to_dest, cons_to_cons,
+) where {T<:Real}
+    remap = if uncertainties[1][1][1] isa VariableRef
+        ky -> var_src_to_dest[ky]
+    else
+        ky -> cons_to_cons[1][ky]
+    end
+    return [
+        [(remap(ky), val) for (ky, val) in uncertainties[t]]
+        for t in eachindex(uncertainties)
+    ]
+end
+
+function _remap_uncertainties(
+    uncertainties::Vector{Vector{Vector{Tuple{VariableRef,T}}}},
+    var_src_to_dest, cons_to_cons,
+) where {T<:Real}
+    remap = ky -> haskey(var_src_to_dest, ky) ? var_src_to_dest[ky] : cons_to_cons[1][ky]
+    return [
+        [[(remap(ky), val) for (ky, val) in scenario] for scenario in uncertainties[t]]
+        for t in eachindex(uncertainties)
+    ]
 end
 
 function find_variables(model::JuMP.Model, variable_name_parts::Vector{S}) where {S}

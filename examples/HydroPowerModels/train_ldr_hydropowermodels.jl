@@ -154,7 +154,7 @@ lg = WandbLogger(;
 
 # ── Define linear policy ─────────────────────────────────────────────────────
 
-num_uncertainties = length(uncertainty_samples[1])
+num_uncertainties = length(uncertainty_samples[1][1])
 num_inputs = DecisionRules.policy_input_dim(num_uncertainties, num_hydro)
 models = dense_multilayer_nn(
     num_inputs, num_hydro, layers;

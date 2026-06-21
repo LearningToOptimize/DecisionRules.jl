@@ -758,7 +758,7 @@ include("test_score_function.jl")
                 model,
                 [5.0],
                 windows,
-                () -> usamples;
+                usamples;
                 num_batches=4,
                 num_train_per_batch=1,
                 optimizer=Flux.Descent(0.0),
@@ -1734,7 +1734,7 @@ include("test_score_function.jl")
                 model,
                 [1.0],
                 windows,
-                () -> uncertainty_samples;
+                uncertainty_samples;
                 num_batches=1,
                 num_train_per_batch=1,
                 optimizer=Flux.Descent(0.0),
@@ -1933,6 +1933,186 @@ include("test_score_function.jl")
             #     @test decisions_stage[t] ≈ decisions_shoot[t]
             # end
         end
+    end
+
+    @testset "sample (independent vs joint-scenario)" begin
+        # Build a two-stage problem with 2 uncertain parameters per stage
+        sp1 = quiet_conic_ipopt_model()
+        @variable(sp1, u1_1 in MOI.Parameter(0.0))
+        @variable(sp1, u2_1 in MOI.Parameter(0.0))
+        sp2 = quiet_conic_ipopt_model()
+        @variable(sp2, u1_2 in MOI.Parameter(0.0))
+        @variable(sp2, u2_2 in MOI.Parameter(0.0))
+
+        # -- Independent (per-unit) format --
+        indep_pool = [
+            [(u1_1, [10.0, 20.0, 30.0]), (u2_1, [100.0, 200.0])],
+            [(u1_2, [40.0, 50.0]),        (u2_2, [300.0, 400.0, 500.0])],
+        ]
+        Random.seed!(42)
+        indep_sample = sample(indep_pool)
+        @test length(indep_sample) == 2
+        @test length(indep_sample[1]) == 2
+        @test length(indep_sample[2]) == 2
+        @test indep_sample[1][1][1] === u1_1
+        @test indep_sample[1][1][2] in [10.0, 20.0, 30.0]
+        @test indep_sample[1][2][2] in [100.0, 200.0]
+
+        # -- Joint-scenario format --
+        # 3 scenarios per stage, 2 parameters each
+        joint_pool = [
+            [
+                [(u1_1, 10.0), (u2_1, 100.0)],
+                [(u1_1, 20.0), (u2_1, 200.0)],
+                [(u1_1, 30.0), (u2_1, 300.0)],
+            ],
+            [
+                [(u1_2, 40.0), (u2_2, 400.0)],
+                [(u1_2, 50.0), (u2_2, 500.0)],
+                [(u1_2, 60.0), (u2_2, 600.0)],
+            ],
+        ]
+        Random.seed!(42)
+        joint_sample = sample(joint_pool)
+        @test length(joint_sample) == 2
+        @test length(joint_sample[1]) == 2  # 2 params per stage
+        @test joint_sample[1][1][1] === u1_1
+        # Verify the sample is one of the pre-defined scenarios (not mixed)
+        @test joint_sample[1] in joint_pool[1]
+        @test joint_sample[2] in joint_pool[2]
+
+        # Key property: joint sampling preserves correlation within each stage
+        Random.seed!(999)
+        n_draws = 50
+        for _ in 1:n_draws
+            s = sample(joint_pool)
+            @test s[1] in joint_pool[1]
+            @test s[2] in joint_pool[2]
+        end
+    end
+
+    @testset "deterministic_equivalent with joint-scenario format" begin
+        sp1, si1, so1, sov1, u1 = build_subproblem(10)
+        sp2, si2, so2, sov2, u2 = build_subproblem(
+            10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+        )
+
+        sps = [sp1, sp2]
+        spi = Vector{Vector{Any}}(undef, 2)
+        spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
+        spi .= [[si1], [si2]]
+        spo .= [[(so1, sov1)], [(so2, sov2)]]
+
+        # Build joint-scenario format: 1 scenario per stage (deterministic)
+        joint_pool = [
+            [[(u1, 2.0)]],  # stage 1: one scenario with inflow=2.0
+            [[(u2, 1.0)]],  # stage 2: one scenario with inflow=1.0
+        ]
+
+        det_equivalent, joint_new = DecisionRules.deterministic_equivalent!(
+            quiet_nonlinear_ipopt_model(), sps, spi, spo, [5.0], joint_pool
+        )
+        # Remapped pool should have the same structure
+        @test length(joint_new) == 2
+        @test length(joint_new[1]) == 1  # 1 scenario
+        @test length(joint_new[1][1]) == 1  # 1 param
+
+        # Sample and simulate
+        s = sample(joint_new)
+        obj = DecisionRules.simulate_multistage(
+            det_equivalent, spi, spo, s, [[9.0], [7.0], [4.0]]
+        )
+        @test obj ≈ 359 rtol=1.0e-1
+    end
+
+    @testset "simulate_multistage with joint-scenario sampling" begin
+        sp1, si1, so1, sov1, u1 = build_subproblem(
+            10; subproblem=quiet_conic_ipopt_model()
+        )
+        sp2, si2, so2, sov2, u2 = build_subproblem(
+            10;
+            state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0,
+            subproblem=quiet_conic_ipopt_model(),
+        )
+
+        sps = [sp1, sp2]
+        spi = Vector{Vector{Any}}(undef, 2)
+        spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
+        spi .= [[si1], [si2]]
+        spo .= [[(so1, sov1)], [(so2, sov2)]]
+
+        joint_pool = [
+            [[(u1, 2.0)]],  # stage 1
+            [[(u2, 1.0)]],  # stage 2
+        ]
+
+        Random.seed!(222)
+        m = Chain(Dense(2, 10), Dense(10, 1))
+        obj_before = simulate_multistage(
+            sps, spi, spo, [5.0], sample(joint_pool), m
+        )
+
+        train_multistage(
+            m, [5.0], sps, spi, spo, joint_pool;
+            num_batches=100, num_train_per_batch=1,
+        )
+
+        obj_after = simulate_multistage(
+            sps, spi, spo, [5.0], sample(joint_pool), m
+        )
+        @test obj_after < obj_before
+    end
+
+    @testset "multiple_shooting with joint-scenario sampling" begin
+        num_stages = 2
+        subproblems = Vector{JuMP.Model}(undef, num_stages)
+        state_params_in = Vector{Vector{Any}}(undef, num_stages)
+        state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+
+        for t in 1:num_stages
+            subproblems[t] = quiet_diffopt_ipopt_model()
+            @variable(subproblems[t], x[1:4] >= 0)
+            @variable(subproblems[t], state_in in MOI.Parameter(1.0))
+            @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
+            @variable(subproblems[t], state_out in MOI.Parameter(1.0))
+            @variable(subproblems[t], state_out_var)
+            @constraint(subproblems[t], sum(x) >= state_in + uncertainty)
+            @constraint(subproblems[t], state_out_var == sum(x[1:2]))
+            @constraint(subproblems[t], state_out_var >= state_out - 5.0)
+            @constraint(subproblems[t], state_out_var <= state_out + 5.0)
+            @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
+
+            state_params_in[t] = [state_in]
+            state_params_out[t] = [(state_out, state_out_var)]
+        end
+
+        # Joint-scenario pool: 3 scenarios per stage
+        joint_pool = [
+            [[(subproblems[t][:uncertainty], v)] for v in [0.3, 0.5, 0.7]]
+            for t in 1:num_stages
+        ]
+
+        windows = DecisionRules.setup_shooting_windows(
+            subproblems,
+            state_params_in,
+            state_params_out,
+            [1.5],
+            joint_pool;
+            window_size=2,
+            model_factory=() -> quiet_nonlinear_ipopt_model(),
+        )
+        @test length(windows) == 1
+
+        decision_rule(x) = x[2:2] .+ 0.1f0
+        uncertainty_sample = sample(joint_pool)
+        uncertainties_vec = [
+            [Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample
+        ]
+
+        obj = DecisionRules.simulate_multiple_shooting(
+            windows, decision_rule, Float32[1.5], uncertainty_sample, uncertainties_vec
+        )
+        @test obj > 0
     end
 
     @testset "dense_multilayer_nn" begin

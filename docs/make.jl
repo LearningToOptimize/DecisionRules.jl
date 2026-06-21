@@ -24,6 +24,7 @@ makedocs(;
     pages=[
         "Home" => "index.md",
         "Algorithm" => "algorithm.md",
+        "Uncertainty Sampling" => "sampling.md",
         "Examples" => [
             "Hydropower Scheduling" => "examples/hydro.md",
             "Rocket Control" => "examples/rocket.md",
