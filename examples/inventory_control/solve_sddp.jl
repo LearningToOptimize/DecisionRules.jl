@@ -7,9 +7,19 @@ where μ_t, α, and Ω are fitted from simulated demand paths.
 
 Two cases:
 1. Relaxed: no binary z, SDDP is near-optimal for convex problems
-2. Integer: z ∈ [0,1] relaxation + integer rounding at rollout
+2. Integer: AlternativeForwardPass — forward pass solves true MIP (z ∈ {0,1}),
+   backward pass uses LP relaxation (z ∈ [0,1]) to compute cuts with valid duals.
+   Both models share the same PAR(1) demand structure.
+
+Pass a run ID as the first CLI argument, or omit to generate one from the
+current timestamp:
+
+```bash
+julia --project=. solve_sddp.jl 20260619_231417
+```
 """
 
+using Dates
 using SDDP
 using JuMP
 using HiGHS
@@ -18,6 +28,9 @@ using Statistics
 using Random
 
 include(joinpath(@__DIR__, "build_inventory_problem.jl"))
+
+const RUN_ID = isempty(ARGS) ?
+    Dates.format(Dates.now(), "yyyymmdd_HHMMss") : ARGS[1]
 
 const N_SIM = 300
 const ITERATION_LIMIT = 500
@@ -66,7 +79,8 @@ println("  Ω (innovations, $(length(par_omega)) points): $(round.(par_omega, di
 # ═══════════════════════════════════════════════════════════════════════════════
 # Build SDDP model with PAR(1) demand approximation
 # ═══════════════════════════════════════════════════════════════════════════════
-function build_sddp_model(; integer::Bool=false, mu=par_mu, alpha=par_alpha, omega=par_omega)
+function build_sddp_model(; integer::Bool=false, binary::Bool=false,
+                            mu=par_mu, alpha=par_alpha, omega=par_omega)
     d_lag_init = mu[1]
     SDDP.LinearPolicyGraph(
         stages=2 * INVENTORY_T,
@@ -81,7 +95,11 @@ function build_sddp_model(; integer::Bool=false, mu=par_mu, alpha=par_alpha, ome
         if isodd(stage)
             @variable(sp, 0 <= q <= INVENTORY_Q_MAX)
             if integer
-                @variable(sp, 0 <= z <= 1)
+                if binary
+                    @variable(sp, z, Bin)
+                else
+                    @variable(sp, 0 <= z <= 1)
+                end
                 @constraint(sp, q <= INVENTORY_Q_MAX * z)
                 @stageobjective(sp, INVENTORY_K * z + INVENTORY_C * q)
             else
@@ -171,7 +189,7 @@ function rollout_sddp(model, n_sim; integer_round::Bool=false, mu=par_mu)
     return costs, traj_inv
 end
 
-result_dir = joinpath(@__DIR__, "results")
+result_dir = joinpath(@__DIR__, "results", RUN_ID)
 mkpath(result_dir)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -219,44 +237,97 @@ open(joinpath(result_dir, "relaxed_sddp_bound.txt"), "w") do io
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Section 2: Integer SDDP (LP relaxation + integer rounding rollout)
+# Section 2: Integer SDDP (MIP forward pass + LP cuts via AlternativeForwardPass)
+#
+# Two-phase training:
+#   Phase 1 — LP forward + LP backward until convergence (warm-start cuts)
+#   Phase 2 — MIP forward + LP backward (refine at MIP-realistic trial points)
+# Rollout on true MIP model (z ∈ {0,1}) with all accumulated cuts.
 # ═══════════════════════════════════════════════════════════════════════════════
 println("\n" * "=" ^ 60)
-println("SECTION 2: SDDP — Integer (LP relax + integer rollout)")
+println("SECTION 2: SDDP — Integer (MIP forward + LP cuts)")
 println("=" ^ 60)
 
-model_integer = build_sddp_model(; integer=true)
-println("Training integer-relaxed SDDP ($(2*INVENTORY_T) stages)...")
+model_lp = build_sddp_model(; integer=true, binary=false)
+model_mip = build_sddp_model(; integer=true, binary=true)
+
+# --- Phase 1: LP warm-start ---
+println("Phase 1: LP warm-start ($(2*INVENTORY_T) stages)...")
 sddp_int_start = time()
 SDDP.train(
-    model_integer;
+    model_lp;
     duality_handler=SDDP.ContinuousConicDuality(),
     iteration_limit=ITERATION_LIMIT,
     stopping_rules=[SDDP.BoundStalling(100, 1e-3)],
     print_level=1,
 )
+lp_bound = SDDP.calculate_bound(model_lp)
+println("  LP warm-start bound: $(round(lp_bound, digits=1))")
+
+phase1_log = training_log_dataframe(model_lp)
+sddp_lp_seconds = time() - sddp_int_start
+
+# --- LP rollout (default SDDP baseline: LP decisions + integer rounding) ---
+println("LP rollout (default SDDP) on $N_SIM fresh scenarios...")
+Random.seed!(555)
+lp_eval_start = time()
+lp_costs, lp_traj = rollout_sddp(model_lp, N_SIM; integer_round=true)
+lp_eval_seconds = time() - lp_eval_start
+μ_lp = mean(lp_costs)
+println("  Default SDDP (LP rollout) — mean: $(round(μ_lp, digits=1)) ± $(round(std(lp_costs), digits=1))")
+
+CSV.write(joinpath(result_dir, "integer_sddp_lp_costs.csv"), DataFrame(operational_cost=lp_costs))
+CSV.write(joinpath(result_dir, "integer_sddp_lp_trajectories.csv"),
+    DataFrame(lp_traj, [Symbol("t$i") for i in 0:INVENTORY_T]))
+CSV.write(joinpath(result_dir, "integer_sddp_lp_training_log.csv"), phase1_log)
+CSV.write(joinpath(result_dir, "integer_sddp_lp_timing.csv"),
+    DataFrame(method=["SDDP (LP relax)"], fit_seconds=[0.0],
+              eval_seconds=[sddp_lp_seconds], n_eval=[N_SIM]))
+
+cuts_file = joinpath(result_dir, "integer_lp_cuts.json")
+SDDP.write_cuts_to_file(model_lp, cuts_file)
+SDDP.read_cuts_from_file(model_mip, cuts_file)
+println("  Exported LP cuts to MIP model")
+
+# --- Phase 2: MIP forward + LP backward ---
+println("\nPhase 2: AlternativeForwardPass — MIP forward + LP cuts...")
+println("  Forward pass: true MIP (z ∈ {0,1})")
+println("  Backward pass: LP relaxation (z ∈ [0,1]) for cuts")
+SDDP.train(
+    model_lp;
+    forward_pass=SDDP.AlternativeForwardPass(model_mip),
+    post_iteration_callback=SDDP.AlternativePostIterationCallback(model_mip),
+    duality_handler=SDDP.ContinuousConicDuality(),
+    iteration_limit=ITERATION_LIMIT,
+    add_to_existing_cuts=true,
+    print_level=1,
+)
 sddp_int_seconds = time() - sddp_int_start
 
-int_bound = SDDP.calculate_bound(model_integer)
-println("\nInteger-relaxed SDDP bound: $(round(int_bound, digits=1))")
+phase2_log = training_log_dataframe(model_lp)
+phase2_log.iteration .+= maximum(phase1_log.iteration)
+combined_log = vcat(phase1_log, phase2_log)
 
-println("Integer rollout on $N_SIM fresh scenarios (TRUE demand)...")
+int_bound = SDDP.calculate_bound(model_lp)
+println("\nLP relaxation bound (after both phases): $(round(int_bound, digits=1))")
+
+println("MIP rollout on $N_SIM fresh scenarios (TRUE demand)...")
 Random.seed!(555)
 int_eval_start = time()
-int_costs, int_traj = rollout_sddp(model_integer, N_SIM; integer_round=true)
+int_costs, int_traj = rollout_sddp(model_mip, N_SIM; integer_round=true)
 int_eval_seconds = time() - int_eval_start
 
 μ_i = mean(int_costs)
 σ_i = std(int_costs)
-println("Integer SDDP — mean: $(round(μ_i, digits=1)) ± $(round(σ_i, digits=1))")
+println("Integer SDDP (MIP fwd) — mean: $(round(μ_i, digits=1)) ± $(round(σ_i, digits=1))")
 println("Gap to LP bound: $(round(100 * (μ_i - int_bound) / μ_i, digits=1))%")
 
 CSV.write(joinpath(result_dir, "integer_sddp_costs.csv"), DataFrame(operational_cost=int_costs))
 CSV.write(joinpath(result_dir, "integer_sddp_trajectories.csv"),
     DataFrame(int_traj, [Symbol("t$i") for i in 0:INVENTORY_T]))
-CSV.write(joinpath(result_dir, "integer_sddp_training_log.csv"), training_log_dataframe(model_integer))
+CSV.write(joinpath(result_dir, "integer_sddp_training_log.csv"), combined_log)
 CSV.write(joinpath(result_dir, "integer_sddp_timing.csv"),
-    DataFrame(method=["SDDP.jl integer rollout"], fit_seconds=[0.0],
+    DataFrame(method=["SDDP (MIP fwd)"], fit_seconds=[0.0],
               eval_seconds=[sddp_int_seconds], n_eval=[N_SIM]))
 open(joinpath(result_dir, "integer_sddp_bound.txt"), "w") do io
     println(io, int_bound)

@@ -27,7 +27,7 @@ DecisionRules.jl implements this workflow in three flavors:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/LearningToOptimize/DecisionRules.jl.git")
+Pkg.add("DecisionRules")
 ```
 
 ## What you need to provide
@@ -201,6 +201,18 @@ history. Log `:realized` separately as the harder deployment diagnostic.
 Each evaluation reports (a) the rollout objective **excluding** the target-slack penalty term (the operational cost) and (b) the **target-violation share** — the realized slack penalty divided by the full objective. Policy comparisons are only trustworthy when the violation share is small (≤ ~0.05): a larger share means the policy's targets are not followable stage by stage and the reported cost is not what deployment would realize. When training drives the violation share to ~0, the deterministic-equivalent and rollout views are expected to coincide; the rollout metric is the guard that detects when they don't.
 
 Per-sample debugging hooks can be attached with `SampleLog(on_sample=(s, models, log) -> ...)`; the training loop calls the hook after each sample's solve with the live JuMP model(s). The previous `record_loss=(iter, model, loss, tag) -> ...` keyword keeps working as a deprecated adapter.
+
+## GPU acceleration with DecisionRulesExa.jl
+
+For large-scale problems where the inner NLP solve is the bottleneck (e.g., AC-OPF with hundreds of buses), [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) provides a GPU-accelerated backend that replaces JuMP with [ExaModels.jl](https://github.com/exanauts/ExaModels.jl) and solves with [MadNLP.jl](https://github.com/MadNLP/MadNLP.jl) + CUDSS on GPU.
+
+DecisionRulesExa.jl implements the same TS-DDR algorithm (deterministic-equivalent mode) with the same envelope-theorem gradient computation but formulates the NLP in ExaModels' SIMD-compatible modeling layer. This enables:
+
+- **GPU-native interior-point solves** via MadNLP + CUDSS
+- **Parallel GPU solves** for multiple training samples per gradient step
+- **Runtime parameter updates** via `ExaModels.set_parameter!` (no model reconstruction)
+
+See the [GPU Acceleration](https://LearningToOptimize.github.io/DecisionRules.jl/dev/gpu_acceleration/) page in the documentation for a tutorial on getting started with DecisionRulesExa.jl.
 
 ## Examples and tests
 

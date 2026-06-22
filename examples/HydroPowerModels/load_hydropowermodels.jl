@@ -47,7 +47,7 @@ function build_hydropowermodels(
     subproblems = Vector{JuMP.Model}(undef, num_stages)
     state_params_in = Vector{Vector{Any}}(undef, num_stages)
     state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
-    uncertainty_samples = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
+    uncertainty_samples = Vector{Vector{Vector{Tuple{VariableRef,Float64}}}}(
         undef, num_stages
     )
 
@@ -78,13 +78,14 @@ function build_hydropowermodels(
             variable_to_parameter(subproblems[t], state_param_out[i]; deficit=_deficit[i])
             for i in 1:nHyd
         ]
-        inflow = [
-            (
-                variable_to_parameter(subproblems[t], inflow[i]),
-                vector_inflows[i][t, :] .+ 0.0,
-            ) for i in 1:nHyd
+        # Joint scenarios: all hydro units share the same scenario index ω,
+        # preserving the spatial correlation in the historical inflow data.
+        inflow_params = [variable_to_parameter(subproblems[t], inflow[i]) for i in 1:nHyd]
+        joint_scenarios = [
+            [(inflow_params[i], vector_inflows[i][t, ω] + 0.0) for i in 1:nHyd]
+            for ω in 1:nCen
         ]
-        uncertainty_samples[t] = inflow
+        uncertainty_samples[t] = joint_scenarios
     end
 
     return subproblems,

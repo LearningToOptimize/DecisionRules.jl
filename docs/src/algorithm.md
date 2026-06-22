@@ -108,6 +108,86 @@ for k = 1, ..., ⌈T/W⌉:
 **Pros**: balances coupling (within windows) with tractability; parallelizable windows.
 **Cons**: continuity gaps between windows require penalty tuning.
 
+## Mixed gradient: score-function (REINFORCE) correction
+
+For problems with integer variables or non-smooth subproblems, the dual
+gradient can be biased — it is local to a fixed integer assignment and cannot
+see the effect of discrete switches (e.g., opening a setup variable).
+
+DecisionRules provides a **score-function (REINFORCE)** correction that mixes
+the dual gradient with a model-free policy gradient estimated from stage-wise
+rollouts under perturbed targets.
+
+### How the score-function estimator works
+
+1. **Perturb**: add Gaussian noise to the policy targets:
+   ``\tilde{x}_t = \hat{x}_t(\theta) + \delta_t``, where
+   ``\delta_t \sim \mathcal{N}(0, \sigma^2 I)``.
+
+2. **Rollout**: solve the stage-wise subproblems with the perturbed targets to
+   obtain realized costs ``R_m`` for ``m = 1, \ldots, M`` rollouts. These
+   rollouts solve the models exactly as built (MIPs stay MIPs), so the costs
+   reflect true integer-feasible decisions.
+
+3. **Advantage**: center the costs ``A_m = R_m - \bar{R}`` (mean baseline
+   reduces variance without changing the expected gradient).
+
+4. **Surrogate loss**: the differentiable scalar whose gradient recovers the
+   REINFORCE estimate:
+
+```math
+L_{\text{sf}}(\theta)
+\;=\;
+\frac{1}{M} \sum_{m=1}^{M}
+  A_m
+  \sum_{t=1}^{T}
+  \left\langle
+    \frac{\delta_{m,t}}{\sigma^2},\;
+    \hat{x}_{t+1}(\theta)
+  \right\rangle.
+```
+
+This is the standard score-function estimator for Gaussian perturbations.
+The key identity is
+``\nabla_\theta \log p(\delta_t \mid \theta) = \delta_t / \sigma^2``
+for a Gaussian centered at ``\hat{x}_t(\theta)``.
+
+### Mixed gradient
+
+The final training gradient combines both signals:
+
+```math
+\nabla L
+\;=\;
+\alpha\, \nabla L_{\text{dual}}
++ (1 - \alpha)\, \nabla L_{\text{sf}},
+```
+
+where ``\alpha \in [0, 1]`` is the `dual_weight`.
+
+There are two separate solve paths in the mixed-gradient training loop:
+
+- **Dual path**: controlled by `integer_strategy`, which determines how local
+  dual information is read from the deterministic equivalent
+  (e.g., [`FixedDiscreteIntegerStrategy`](@ref) solves the MIP, fixes integers,
+  re-solves the LP, and reads LP duals).
+- **Score-function path**: controlled by [`ScoreFunctionConfig`](@ref), which
+  owns separate rollout subproblems. These are solved exactly as built, and
+  their realized costs define the Monte Carlo score-function term.
+
+### Scheduled ramp-in
+
+A [`ScoreFunctionSchedule`](@ref) can ramp ``\alpha`` from 1 (pure dual) to
+its final value over a warmup period.  Let ``k`` be the current iteration and
+``\rho_k = \operatorname{clip}((k - k_0) / r,\, 0,\, 1)``.  The effective
+score-function weight is ``\rho_k (1 - \alpha)``.
+
+This lets the DE dual gradient establish a good initial policy before
+introducing the higher-variance REINFORCE signal.
+
+See the [Stochastic Lot-Sizing with Fixed Ordering Costs](@ref) example for a
+complete worked example with integer variables and mixed gradients.
+
 ## Penalty annealing
 
 The target penalty ``\lambda`` is critical: too small and the optimizer ignores

@@ -44,6 +44,8 @@ function build_subproblem(
     return subproblem, state_in, state_out, state_out_var, uncertainty
 end
 
+include("test_score_function.jl")
+
 @testset "DecisionRules.jl" begin
     @testset "pdual at infeasibility" begin
         subproblem1, state_in_1, state_out_1, state_out_var_1, uncertainty_1 = build_subproblem(
@@ -756,7 +758,7 @@ end
                 model,
                 [5.0],
                 windows,
-                () -> usamples;
+                usamples;
                 num_batches=4,
                 num_train_per_batch=1,
                 optimizer=Flux.Descent(0.0),
@@ -1732,7 +1734,7 @@ end
                 model,
                 [1.0],
                 windows,
-                () -> uncertainty_samples;
+                uncertainty_samples;
                 num_batches=1,
                 num_train_per_batch=1,
                 optimizer=Flux.Descent(0.0),
@@ -1931,6 +1933,186 @@ end
             #     @test decisions_stage[t] ≈ decisions_shoot[t]
             # end
         end
+    end
+
+    @testset "sample (independent vs joint-scenario)" begin
+        # Build a two-stage problem with 2 uncertain parameters per stage
+        sp1 = quiet_conic_ipopt_model()
+        @variable(sp1, u1_1 in MOI.Parameter(0.0))
+        @variable(sp1, u2_1 in MOI.Parameter(0.0))
+        sp2 = quiet_conic_ipopt_model()
+        @variable(sp2, u1_2 in MOI.Parameter(0.0))
+        @variable(sp2, u2_2 in MOI.Parameter(0.0))
+
+        # -- Independent (per-unit) format --
+        indep_pool = [
+            [(u1_1, [10.0, 20.0, 30.0]), (u2_1, [100.0, 200.0])],
+            [(u1_2, [40.0, 50.0]),        (u2_2, [300.0, 400.0, 500.0])],
+        ]
+        Random.seed!(42)
+        indep_sample = sample(indep_pool)
+        @test length(indep_sample) == 2
+        @test length(indep_sample[1]) == 2
+        @test length(indep_sample[2]) == 2
+        @test indep_sample[1][1][1] === u1_1
+        @test indep_sample[1][1][2] in [10.0, 20.0, 30.0]
+        @test indep_sample[1][2][2] in [100.0, 200.0]
+
+        # -- Joint-scenario format --
+        # 3 scenarios per stage, 2 parameters each
+        joint_pool = [
+            [
+                [(u1_1, 10.0), (u2_1, 100.0)],
+                [(u1_1, 20.0), (u2_1, 200.0)],
+                [(u1_1, 30.0), (u2_1, 300.0)],
+            ],
+            [
+                [(u1_2, 40.0), (u2_2, 400.0)],
+                [(u1_2, 50.0), (u2_2, 500.0)],
+                [(u1_2, 60.0), (u2_2, 600.0)],
+            ],
+        ]
+        Random.seed!(42)
+        joint_sample = sample(joint_pool)
+        @test length(joint_sample) == 2
+        @test length(joint_sample[1]) == 2  # 2 params per stage
+        @test joint_sample[1][1][1] === u1_1
+        # Verify the sample is one of the pre-defined scenarios (not mixed)
+        @test joint_sample[1] in joint_pool[1]
+        @test joint_sample[2] in joint_pool[2]
+
+        # Key property: joint sampling preserves correlation within each stage
+        Random.seed!(999)
+        n_draws = 50
+        for _ in 1:n_draws
+            s = sample(joint_pool)
+            @test s[1] in joint_pool[1]
+            @test s[2] in joint_pool[2]
+        end
+    end
+
+    @testset "deterministic_equivalent with joint-scenario format" begin
+        sp1, si1, so1, sov1, u1 = build_subproblem(10)
+        sp2, si2, so2, sov2, u2 = build_subproblem(
+            10; state_i_val=4.0, state_out_val=3.0, uncertainty_val=1.0
+        )
+
+        sps = [sp1, sp2]
+        spi = Vector{Vector{Any}}(undef, 2)
+        spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
+        spi .= [[si1], [si2]]
+        spo .= [[(so1, sov1)], [(so2, sov2)]]
+
+        # Build joint-scenario format: 1 scenario per stage (deterministic)
+        joint_pool = [
+            [[(u1, 2.0)]],  # stage 1: one scenario with inflow=2.0
+            [[(u2, 1.0)]],  # stage 2: one scenario with inflow=1.0
+        ]
+
+        det_equivalent, joint_new = DecisionRules.deterministic_equivalent!(
+            quiet_nonlinear_ipopt_model(), sps, spi, spo, [5.0], joint_pool
+        )
+        # Remapped pool should have the same structure
+        @test length(joint_new) == 2
+        @test length(joint_new[1]) == 1  # 1 scenario
+        @test length(joint_new[1][1]) == 1  # 1 param
+
+        # Sample and simulate
+        s = sample(joint_new)
+        obj = DecisionRules.simulate_multistage(
+            det_equivalent, spi, spo, s, [[9.0], [7.0], [4.0]]
+        )
+        @test obj ≈ 359 rtol=1.0e-1
+    end
+
+    @testset "simulate_multistage with joint-scenario sampling" begin
+        sp1, si1, so1, sov1, u1 = build_subproblem(
+            10; subproblem=quiet_conic_ipopt_model()
+        )
+        sp2, si2, so2, sov2, u2 = build_subproblem(
+            10;
+            state_i_val=1.0, state_out_val=9.0, uncertainty_val=2.0,
+            subproblem=quiet_conic_ipopt_model(),
+        )
+
+        sps = [sp1, sp2]
+        spi = Vector{Vector{Any}}(undef, 2)
+        spo = Vector{Vector{Tuple{Any,VariableRef}}}(undef, 2)
+        spi .= [[si1], [si2]]
+        spo .= [[(so1, sov1)], [(so2, sov2)]]
+
+        joint_pool = [
+            [[(u1, 2.0)]],  # stage 1
+            [[(u2, 1.0)]],  # stage 2
+        ]
+
+        Random.seed!(222)
+        m = Chain(Dense(2, 10), Dense(10, 1))
+        obj_before = simulate_multistage(
+            sps, spi, spo, [5.0], sample(joint_pool), m
+        )
+
+        train_multistage(
+            m, [5.0], sps, spi, spo, joint_pool;
+            num_batches=100, num_train_per_batch=1,
+        )
+
+        obj_after = simulate_multistage(
+            sps, spi, spo, [5.0], sample(joint_pool), m
+        )
+        @test obj_after < obj_before
+    end
+
+    @testset "multiple_shooting with joint-scenario sampling" begin
+        num_stages = 2
+        subproblems = Vector{JuMP.Model}(undef, num_stages)
+        state_params_in = Vector{Vector{Any}}(undef, num_stages)
+        state_params_out = Vector{Vector{Tuple{Any,VariableRef}}}(undef, num_stages)
+
+        for t in 1:num_stages
+            subproblems[t] = quiet_diffopt_ipopt_model()
+            @variable(subproblems[t], x[1:4] >= 0)
+            @variable(subproblems[t], state_in in MOI.Parameter(1.0))
+            @variable(subproblems[t], uncertainty in MOI.Parameter(0.5))
+            @variable(subproblems[t], state_out in MOI.Parameter(1.0))
+            @variable(subproblems[t], state_out_var)
+            @constraint(subproblems[t], sum(x) >= state_in + uncertainty)
+            @constraint(subproblems[t], state_out_var == sum(x[1:2]))
+            @constraint(subproblems[t], state_out_var >= state_out - 5.0)
+            @constraint(subproblems[t], state_out_var <= state_out + 5.0)
+            @objective(subproblems[t], Min, sum(x) + 10 * (state_out - state_out_var)^2)
+
+            state_params_in[t] = [state_in]
+            state_params_out[t] = [(state_out, state_out_var)]
+        end
+
+        # Joint-scenario pool: 3 scenarios per stage
+        joint_pool = [
+            [[(subproblems[t][:uncertainty], v)] for v in [0.3, 0.5, 0.7]]
+            for t in 1:num_stages
+        ]
+
+        windows = DecisionRules.setup_shooting_windows(
+            subproblems,
+            state_params_in,
+            state_params_out,
+            [1.5],
+            joint_pool;
+            window_size=2,
+            model_factory=() -> quiet_nonlinear_ipopt_model(),
+        )
+        @test length(windows) == 1
+
+        decision_rule(x) = x[2:2] .+ 0.1f0
+        uncertainty_sample = sample(joint_pool)
+        uncertainties_vec = [
+            [Float32(u[2]) for u in stage_u] for stage_u in uncertainty_sample
+        ]
+
+        obj = DecisionRules.simulate_multiple_shooting(
+            windows, decision_rule, Float32[1.5], uncertainty_sample, uncertainties_vec
+        )
+        @test obj > 0
     end
 
     @testset "dense_multilayer_nn" begin
@@ -2666,6 +2848,229 @@ end
         else
             @info "Skipping GPU (CUDA) tests: CUDA not available or not functional"
             @test_skip false
+        end
+    end
+
+    @testset "GradientFallback" begin
+        @testset "type hierarchy and exports" begin
+            @test ZeroGradientFallback() isa AbstractGradientFallback
+            @test ErrorGradientFallback() isa AbstractGradientFallback
+        end
+
+        @testset "ZeroGradientFallback returns zero cotangents" begin
+            fb = ZeroGradientFallback()
+            result = @test_logs (:warn,) DecisionRules.handle_gradient_error(
+                fb, ErrorException("test"), 3, 2
+            )
+            @test result[5] == zeros(3)
+            @test result[6] == zeros(2)
+            @test result[1] == ChainRulesCore.NoTangent()
+        end
+
+        @testset "ErrorGradientFallback rethrows" begin
+            fb = ErrorGradientFallback()
+            @test_throws ErrorException DecisionRules.handle_gradient_error(
+                fb, ErrorException("test"), 3, 2
+            )
+        end
+
+        @testset "handle_training_error" begin
+            @test_logs (:warn,) DecisionRules.handle_training_error(
+                ZeroGradientFallback(), ErrorException("test"), 1
+            ) == true
+            @test_throws ErrorException DecisionRules.handle_training_error(
+                ErrorGradientFallback(), ErrorException("test"), 1
+            )
+        end
+
+        @testset "handle_rollout_error" begin
+            @test_logs (:warn,) DecisionRules.handle_rollout_error(
+                ZeroGradientFallback(), ErrorException("test"), 1
+            ) == true
+            @test_throws ErrorException DecisionRules.handle_rollout_error(
+                ErrorGradientFallback(), ErrorException("test"), 1
+            )
+        end
+
+        @testset "custom fallback subtype" begin
+            struct CountingFallback <: AbstractGradientFallback
+                count::Ref{Int}
+            end
+            function DecisionRules.handle_gradient_error(fb::CountingFallback, e, n_in, n_out)
+                fb.count[] += 1
+                return DecisionRules._zero_cotangents(n_in, n_out)
+            end
+            function DecisionRules.handle_training_error(fb::CountingFallback, e, iter)
+                fb.count[] += 1
+                return true
+            end
+            function DecisionRules.handle_rollout_error(fb::CountingFallback, e, iter)
+                fb.count[] += 1
+                return true
+            end
+
+            fb = CountingFallback(Ref(0))
+            DecisionRules.handle_gradient_error(fb, ErrorException("x"), 2, 2)
+            @test fb.count[] == 1
+            DecisionRules.handle_training_error(fb, ErrorException("x"), 1)
+            @test fb.count[] == 2
+            DecisionRules.handle_rollout_error(fb, ErrorException("x"), 1)
+            @test fb.count[] == 3
+        end
+
+        @testset "train_multistage accepts gradient_fallback kwarg" begin
+            subproblems, spi, spo, usamples, _ = let
+                subs = JuMP.Model[]
+                spi_vec = Vector{Any}[]
+                spo_vec = Vector{Tuple{Any,VariableRef}}[]
+                us_vec = Vector{Tuple{VariableRef,Vector{Float64}}}[]
+                for d in [4.0, 5.0]
+                    s, si, so, sov, u = build_subproblem(d; subproblem=quiet_conic_ipopt_model())
+                    push!(subs, s)
+                    push!(spi_vec, [si])
+                    push!(spo_vec, [(so, sov)])
+                    push!(us_vec, [(u, [1.0, 2.0, 3.0])])
+                end
+                subs, spi_vec, spo_vec, us_vec, [5.0]
+            end
+            policy = dense_multilayer_nn(2, 1, [8]; activation=Flux.relu)
+
+            model_out = train_multistage(
+                policy, [5.0], subproblems, spi, spo, usamples;
+                num_batches=2,
+                num_train_per_batch=1,
+                optimizer=Flux.Adam(0.01),
+                gradient_fallback=ErrorGradientFallback(),
+            )
+            @test model_out isa Any
+
+            model_out2 = train_multistage(
+                policy, [5.0], subproblems, spi, spo, usamples;
+                num_batches=2,
+                num_train_per_batch=1,
+                optimizer=Flux.Adam(0.01),
+                gradient_fallback=ZeroGradientFallback(),
+            )
+            @test model_out2 isa Any
+        end
+
+        @testset "RolloutEvaluation accepts gradient_fallback kwarg" begin
+            subproblems, spi, spo, usamples, _ = let
+                subs = JuMP.Model[]
+                spi_vec = Vector{Any}[]
+                spo_vec = Vector{Tuple{Any,VariableRef}}[]
+                us_vec = Vector{Tuple{VariableRef,Vector{Float64}}}[]
+                for d in [4.0, 5.0]
+                    s, si, so, sov, u = build_subproblem(d; subproblem=quiet_conic_ipopt_model())
+                    push!(subs, s)
+                    push!(spi_vec, [si])
+                    push!(spo_vec, [(so, sov)])
+                    push!(us_vec, [(u, [1.0, 2.0, 3.0])])
+                end
+                subs, spi_vec, spo_vec, us_vec, [5.0]
+            end
+            policy = dense_multilayer_nn(2, 1, [8]; activation=Flux.relu)
+
+            eval_scenarios = [sample(usamples) for _ in 1:2]
+            re = RolloutEvaluation(
+                subproblems, spi, spo, [5.0], eval_scenarios;
+                stride=1, policy_state=:realized,
+                gradient_fallback=ErrorGradientFallback(),
+            )
+            re(1, policy)
+            @test isfinite(re.last_objective_no_deficit)
+
+            re2 = RolloutEvaluation(
+                subproblems, spi, spo, [5.0], eval_scenarios;
+                stride=1, policy_state=:realized,
+                gradient_fallback=ZeroGradientFallback(),
+            )
+            re2(1, policy)
+            @test isfinite(re2.last_objective_no_deficit)
+        end
+    end
+
+    @testset "Uncertainty sampling" begin
+        m = quiet_highs_model()
+        @variable(m, p1 in MOI.Parameter(0.0))
+        @variable(m, p2 in MOI.Parameter(0.0))
+        T = 3
+
+        @testset "independent pool: each param drawn independently" begin
+            indep_pool = [
+                [(p1, [1.0, 2.0, 3.0]), (p2, [10.0, 20.0, 30.0])]
+                for _ in 1:T
+            ]
+            Random.seed!(42)
+            N = 3000
+            trajectories = [sample(indep_pool) for _ in 1:N]
+
+            @test length(trajectories[1]) == T
+            @test length(trajectories[1][1]) == 2
+
+            # Values always come from the declared support
+            for traj in trajectories, stage in traj
+                @test stage[1][2] in [1.0, 2.0, 3.0]
+                @test stage[2][2] in [10.0, 20.0, 30.0]
+            end
+
+            # k^n = 9 combinations possible; independent draws break correlation
+            combos = Set((s[1][2], s[2][2]) for traj in trajectories for s in traj)
+            @test length(combos) == 9
+        end
+
+        @testset "joint pool: all params from same scenario" begin
+            joint_pool = [
+                [[(p1, 1.0), (p2, 10.0)],
+                 [(p1, 2.0), (p2, 20.0)],
+                 [(p1, 3.0), (p2, 30.0)]]
+                for _ in 1:T
+            ]
+            Random.seed!(42)
+            N = 3000
+            trajectories = [sample(joint_pool) for _ in 1:N]
+
+            @test length(trajectories[1]) == T
+            @test length(trajectories[1][1]) == 2
+
+            # Only k=3 combinations possible (never cross-scenario combos)
+            combos = Set((s[1][2], s[2][2]) for traj in trajectories for s in traj)
+            @test combos == Set([(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)])
+        end
+
+        @testset "trajectory sampler: temporal conditioning" begin
+            calls = Tuple{Int, Vector}[]
+            function my_sampler(t, past)
+                push!(calls, (t, copy(past)))
+                prev = isempty(past) ? 0.0 : past[end][1][2]
+                return [(p1, prev + 1.0)]
+            end
+
+            Random.seed!(42)
+            traj = sample(my_sampler, 3)
+
+            @test length(traj) == 3
+            @test traj[1][1][2] == 1.0   # 0 + 1
+            @test traj[2][1][2] == 2.0   # 1 + 1
+            @test traj[3][1][2] == 3.0   # 2 + 1
+
+            # Sampler received correct past at each stage
+            @test calls[1] == (1, [])
+            @test length(calls[2][2]) == 1
+            @test length(calls[3][2]) == 2
+        end
+
+        @testset "all formats produce same trajectory type" begin
+            indep_pool = [[(p1, [1.0]), (p2, [10.0])] for _ in 1:T]
+            joint_pool = [[[(p1, 1.0), (p2, 10.0)]] for _ in 1:T]
+            sampler_fn = (t, past) -> [(p1, 1.0), (p2, 10.0)]
+
+            t1 = sample(indep_pool)
+            t2 = sample(joint_pool)
+            t3 = sample(sampler_fn, T)
+
+            @test typeof(t1) == typeof(t2) == typeof(t3)
+            @test t1[1][1][2] == t2[1][1][2] == t3[1][1][2] == 1.0
         end
     end
 end

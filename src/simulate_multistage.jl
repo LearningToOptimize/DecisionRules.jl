@@ -301,16 +301,8 @@ function ChainRulesCore.rrule(
                 )
             end
         catch e
-            msg = sprint(showerror, e)
-            throw(
-                ArgumentError(
-                    "Differentiating get_next_state requires a DiffOpt-enabled model " *
-                    "because the closed-loop rollout needs solution sensitivities of the " *
-                    "realized state variables. Use an appropriate DiffOpt wrapper for the " *
-                    "stage subproblems (for target-slack conic models, " *
-                    "`DiffOpt.conic_diff_model(...)`), or use the deterministic-equivalent " *
-                    "training path when only target duals are needed. Original error: $msg",
-                ),
+            return handle_gradient_error(
+                _DEFAULT_GRADIENT_FALLBACK, e, length(state_in), length(state_out_target)
             )
         end
     end
@@ -347,6 +339,9 @@ end
 function get_objective_no_target_deficit(
     subproblem::JuMP.Model; norm_deficit::AbstractString="norm_deficit"
 )
+    if subproblem.is_model_dirty
+        return get(subproblem.ext, :_last_obj_no_deficit, 0.0)
+    end
     try
         obj = JuMP.objective_function(subproblem)
         objective_val = objective_value(subproblem)
@@ -902,6 +897,99 @@ function ChainRulesCore.rrule(
     return y, public_pullback
 end
 
+@doc raw"""
+    sample(uncertainty_pool) -> Vector{Vector{Tuple{VariableRef, T}}}
+
+Draw one full uncertainty trajectory from a DecisionRules uncertainty pool.
+
+The returned trajectory is a length-``T`` vector where each element is
+`Vector{Tuple{VariableRef, Float64}}` — one realized value per uncertain
+parameter for that stage. This is the format consumed by `simulate_multistage`,
+`train_multistage`, and all other training/evaluation functions.
+
+Three pool formats are supported, offering increasing levels of correlation:
+
+## 1. Independent sampling (per-unit pools)
+
+Each uncertain parameter has its own finite support; sampling draws
+independently from each support at each stage.
+
+    sample(multistage_pool::Vector{Vector{Tuple{VariableRef, Vector{T}}}})
+
+`multistage_pool[t]` is `[(param₁, [v₁₁, v₁₂, …]), (param₂, [v₂₁, v₂₂, …]), …]`.
+Each parameter picks one value uniformly at random from its own support.
+**No spatial or temporal correlation is preserved.**
+
+## 2. Joint-scenario sampling (spatial correlation)
+
+Scenarios are pre-defined joint realizations across all parameters at each
+stage. Sampling picks one complete scenario per stage uniformly, preserving
+cross-parameter correlations (e.g., spatially correlated inflows across
+hydro reservoirs). Stages are still drawn independently.
+
+    sample(multistage_joint::Vector{Vector{Vector{Tuple{VariableRef, T}}}})
+
+`multistage_joint[t]` is `[scenario₁, scenario₂, …]` where each scenario
+is `[(param₁, val₁), (param₂, val₂), …]`.
+
+## 3. Trajectory sampler (spatial + temporal correlation)
+
+A callable `sampler(t, past) -> Vector{Tuple{VariableRef, T}}` that generates
+stage `t`'s realization given the realized values from stages `1:t-1`. This
+enables autoregressive, Markovian, or any custom temporal dependence.
+
+    sample(sampler::Function, T::Int)
+
+The callable receives:
+- `t::Int` — the current stage (1-indexed)
+- `past::Vector{Vector{Tuple{VariableRef, T}}}` — realized samples from
+  stages `1:t-1` (empty vector for `t=1`)
+
+and must return `Vector{Tuple{VariableRef, T}}` — the realized sample for
+stage `t`.
+
+## Output format
+
+All three methods return `Vector{Vector{Tuple{VariableRef, T}}}` — a length-``T``
+vector of per-stage realized samples. This is the universal input to
+`simulate_multistage`, `train_multistage`, `simulate_multiple_shooting`, and all
+evaluation functions.
+
+# Examples
+```julia
+# 1. Independent sampling (each unit draws independently):
+independent_pool = [
+    [(inflow_1, [10.0, 15.0, 12.0]), (inflow_2, [8.0, 12.0, 9.0])],
+    [(inflow_1, [11.0, 14.0, 13.0]), (inflow_2, [7.0, 11.0, 10.0])],
+]
+path = sample(independent_pool)
+
+# 2. Joint-scenario sampling (preserves spatial correlation):
+joint_pool = [
+    [[(inflow_1, 10.0), (inflow_2, 8.0)],   # scenario 1
+     [(inflow_1, 15.0), (inflow_2, 12.0)]],  # scenario 2 — stage 1
+    [[(inflow_1, 11.0), (inflow_2, 7.0)],
+     [(inflow_1, 14.0), (inflow_2, 11.0)]],  # stage 2
+]
+path = sample(joint_pool)
+
+# 3. Trajectory sampler (preserves temporal + spatial correlation):
+function my_sampler(t, past)
+    if t == 1
+        ω = rand(1:nScenarios)
+        return [(inflow_params[t][r], data[r][t, ω]) for r in 1:nHyd]
+    else
+        # AR(1): next inflow depends on previous realized inflow
+        prev_values = [pair[2] for pair in past[end]]
+        noise = randn(nHyd) .* σ
+        return [(inflow_params[t][r], ρ * prev_values[r] + noise[r]) for r in 1:nHyd]
+    end
+end
+path = sample(my_sampler, T)
+```
+
+See the [Uncertainty Sampling](@ref) documentation page for a complete guide.
+"""
 function sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where {T<:Real}
     uncertainty_sample = Vector{Tuple{VariableRef,T}}(undef, length(uncertainty_samples))
     for i in 1:length(uncertainty_samples)
@@ -910,20 +998,168 @@ function sample(uncertainty_samples::Vector{Tuple{VariableRef,Vector{T}}}) where
     return uncertainty_sample
 end
 
+function sample(joint_scenarios::Vector{Vector{Tuple{VariableRef,T}}}) where {T<:Real}
+    return rand(joint_scenarios)
+end
+
 function sample(
     uncertainty_samples::Vector{Vector{Tuple{VariableRef,Vector{T}}}}
 ) where {T<:Real}
     return [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
 end
 
-"""
-    train_multistage(model, initial_state, subproblems, state_params_in,
-                     state_params_out, uncertainty_sampler; kwargs...)
+function sample(
+    uncertainty_samples::Vector{Vector{Vector{Tuple{VariableRef,T}}}}
+) where {T<:Real}
+    return [sample(uncertainty_samples[t]) for t in 1:length(uncertainty_samples)]
+end
 
-Train a policy with **stage-wise decomposition** (single shooting, Extension §2).
-Each SGD step samples `num_train_per_batch` uncertainty trajectories, rolls out the
-policy through `simulate_multistage` (stage-wise overload), and updates `model` via
-the Flux optimizer.
+"""
+    sample(sampler::Function, T::Int)
+
+Draw a full trajectory using a callable trajectory sampler with temporal dependence.
+
+`sampler(t, past)` receives the current stage `t` and a vector of all previously
+realized samples `past[1:t-1]`, and returns the realized sample for stage `t`.
+
+This enables autoregressive, Markovian, or any custom temporal correlation between
+stages — something the data-based pool formats cannot express.
+
+See [`sample`](@ref) for the full API and examples.
+"""
+function sample(sampler::Function, T::Int)
+    trajectory = Vector{Vector{Tuple{VariableRef,Float64}}}(undef, T)
+    past = Vector{Vector{Tuple{VariableRef,Float64}}}()
+    for t in 1:T
+        trajectory[t] = sampler(t, past)
+        push!(past, trajectory[t])
+    end
+    return trajectory
+end
+
+"""
+    sample(sampler::Function)
+
+Call a zero-argument trajectory sampler that returns a complete trajectory.
+
+This is the dispatch used by `train_multistage` and `train_multiple_shooting`
+when `uncertainty_sampler` is a callable. Wrap a trajectory sampler as:
+
+```julia
+uncertainty_sampler = () -> sample(my_stage_sampler, T)
+```
+"""
+function sample(sampler::Function)
+    return sampler()
+end
+
+@doc raw"""
+    train_multistage(model, initial_state, subproblems::Vector{JuMP.Model},
+                     state_params_in, state_params_out, uncertainty_sampler;
+                     kwargs...)
+
+Train a target-state policy with stage-wise decomposition (single shooting).
+
+For one sampled uncertainty trajectory ``w_{1:T}``, this overload solves one
+optimization problem per stage. At stage ``t``, given the realized incoming
+state ``x_{t-1}``, the policy predicts a target
+``\hat{x}_t = \pi_\theta(w_t, x_{t-1})`` and the stage problem is
+
+```math
+\begin{aligned}
+q_t(x_{t-1}, w_t; \hat{x}_t)
+    = \min_{x_t, y_t, \delta_t}
+    \quad & f_t(x_t, y_t) + C_\delta \|\delta_t\| \\
+\text{s.t.}\quad
+    & x_t = T_t(w_t, y_t, x_{t-1})                 && : \mu_t, \\
+    & x_t + \delta_t = \hat{x}_t                   && : \lambda_t, \\
+    & h_t(x_t, y_t) \ge 0 .
+\end{aligned}
+```
+
+The rollout objective is the sum of stage values,
+
+```math
+Q(\theta; w) =
+    \sum_{t=1}^{T} q_t(x_{t-1}, w_t; \hat{x}_t),
+```
+
+where each realized ``x_t`` is read from the previous stage solve. The gradient
+therefore contains both the target duals ``\lambda_t`` and the sensitivity of
+later realized states with respect to earlier targets. In the notation of the
+extension note,
+
+```math
+\nabla_\theta Q(\theta; w)
+=
+\sum_{t=1}^{T}
+\left[
+    \frac{\partial q_t}{\partial \hat{x}_t}
+    +
+    \sum_{k=t+1}^{T}
+    \frac{\partial q_k}{\partial x_{k-1}}
+    \prod_{j=t+1}^{k-1}
+    \frac{\partial x_j}{\partial x_{j-1}}
+    \frac{\partial x_t}{\partial \hat{x}_t}
+\right]
+\nabla_\theta \pi_\theta(w_t, x_{t-1}).
+```
+
+The dual terms come from target and transition constraints; the state
+sensitivities are computed through DiffOpt in the rrules for
+[`simulate_stage`](@ref) and [`get_next_state`](@ref).
+
+# Arguments
+- `model`: differentiable Flux-compatible policy. It receives
+  `vcat(stage_uncertainty, realized_state)` and returns the next target state.
+- `initial_state::AbstractVector{<:Real}`: state ``x_0`` entering stage 1.
+- `subproblems::Vector{JuMP.Model}`: one JuMP model per stage.
+- `state_params_in`: stage input-state parameters.
+- `state_params_out`: `(target_parameter, realized_state_variable)` pairs for
+  each stage output state.
+- `uncertainty_sampler`: source of uncertainty trajectories, passed to
+  [`sample`](@ref). Three formats are accepted:
+  1. **Per-unit pool** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+     independent sampling per parameter per stage.
+  2. **Joint-scenario pool** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+     one scenario drawn per stage, preserving spatial correlation.
+  3. **Callable** (`() -> Vector{Vector{Tuple{VariableRef, T}}}`): a zero-arg
+     function returning a full trajectory. Use this for temporal correlation
+     by wrapping a trajectory sampler:
+     `() -> sample(my_stage_sampler, T)` where `my_stage_sampler(t, past)`
+     generates stage `t` conditioned on past realizations.
+
+# Keywords
+- `num_batches::Integer`: number of SGD batches.
+- `num_train_per_batch::Integer`: sampled trajectories per batch.
+- `optimizer`: Flux optimizer used to update `model`.
+- `adjust_hyperparameters::Function`: optional hook returning the batch size for
+  the current iteration.
+- `record_loss`: legacy logging callback.
+- `sample_log::SampleLog`: per-batch objective cache.
+- `record::Function`: callback called as `record(sample_log, iter, model)`.
+- `penalty_schedule`: optional multiplier schedule for target-penalty terms.
+- `integer_strategy::AbstractIntegerStrategy`: strategy used when a stage model
+  has discrete variables and derivative information must be read.
+
+# Examples
+```julia
+# With data pool (independent or joint):
+train_multistage(
+    policy, initial_state, subproblems,
+    state_params_in, state_params_out, uncertainty_pool;
+    num_batches=200, optimizer=Flux.Adam(1e-3),
+)
+
+# With trajectory sampler (temporal correlation):
+ar_sampler(t, past) = my_ar1_model(t, past, inflow_params)
+train_multistage(
+    policy, initial_state, subproblems,
+    state_params_in, state_params_out,
+    () -> sample(ar_sampler, T);
+    num_batches=200, optimizer=Flux.Adam(1e-3),
+)
+```
 """
 function train_multistage(
     model,
@@ -942,9 +1178,16 @@ function train_multistage(
     record=default_record,
     penalty_schedule=nothing,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
+    if gradient_fallback isa ZeroGradientFallback
+        @info "Training with ZeroGradientFallback: solver/differentiation errors will be " *
+              "caught and the iteration skipped (zero gradient). Pass " *
+              "`gradient_fallback=ErrorGradientFallback()` to throw instead, or implement " *
+              "a custom `AbstractGradientFallback` subtype."
+    end
+
     record = _resolve_record(record, record_loss)
-    # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
 
     schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
@@ -964,32 +1207,40 @@ function train_multistage(
             end
         end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
-        # Sample uncertainties
+
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
+
         objective = 0.0
         _reset_sample_log!(sample_log)
-        grads = Flux.gradient(model) do m
-            for s in 1:num_train_per_batch
-                Flux.reset!(m)
-                objective += simulate_multistage(
-                    subproblems,
-                    state_params_in,
-                    state_params_out,
-                    initial_state,
-                    uncertainty_samples[s],
-                    m;
-                    integer_strategy=integer_strategy,
-                )
-                @ignore_derivatives sample_log(s, subproblems)
+        grads = try
+            Flux.gradient(model) do m
+                for s in 1:num_train_per_batch
+                    Flux.reset!(m)
+                    objective += simulate_multistage(
+                        subproblems,
+                        state_params_in,
+                        state_params_out,
+                        initial_state,
+                        uncertainty_samples[s],
+                        m;
+                        integer_strategy=integer_strategy,
+                    )
+                    @ignore_derivatives sample_log(s, subproblems)
+                end
+                objective /= num_train_per_batch
+                return objective
             end
-            objective /= num_train_per_batch
-            return objective
+        catch e
+            if handle_training_error(gradient_fallback, e, iter)
+                nothing
+            end
         end
         record(sample_log, iter, model) && break
 
-        # Update the parameters so as to reduce the objective,
-        # according the chosen optimisation rule:
-        # Convert gradients from MutableTangent to plain NamedTuples for Flux.update!
+        if isnothing(grads)
+            continue
+        end
+
         grad = materialize_tangent(grads[1])
         Flux.update!(opt_state, model, grad)
     end
@@ -1010,14 +1261,121 @@ function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
     end
 end
 
-"""
+@doc raw"""
     train_multistage(model, initial_state, det_equivalent::JuMP.Model,
-                     state_params_in, state_params_out, uncertainty_sampler; kwargs...)
+                     state_params_in, state_params_out, uncertainty_sampler;
+                     score_function=nothing, kwargs...)
 
-Train a policy with the **deterministic equivalent** (direct transcription,
-Extension §1).  Each SGD step samples uncertainty trajectories, rolls out target
-states with `Base.accumulate`, solves the coupled `det_equivalent`, and updates
-`model`.  Gradient: Eq. 1.2, ``λ^s ⊙ ∇_θ π``.
+Train a target-state policy with a deterministic equivalent (direct transcription).
+
+For one sampled trajectory ``w_{1:T}``, the policy first produces the full target
+trajectory
+
+```math
+\hat{x}_{1:T}(\theta) = \pi_\theta(w_{1:T}, x_0).
+```
+
+The coupled implementation problem is
+
+```math
+\begin{aligned}
+Q(w; \theta)
+    =
+    \min_{\{x_t, y_t, \delta_t\}_{t=1}^{T}}
+    \quad &
+    \sum_{t=1}^{T} f_t(x_t, y_t)
+    + C_\delta \sum_{t=1}^{T} \|\delta_t\| \\
+\text{s.t.}\quad
+    & x_t = T_t(w_t, y_t, x_{t-1})        && t=1,\ldots,T, \\
+    & x_t + \delta_t = \hat{x}_t(\theta)  && : \lambda_t,\quad t=1,\ldots,T, \\
+    & h_t(x_t, y_t) \ge 0                 && t=1,\ldots,T .
+\end{aligned}
+```
+
+The target trajectory appears as right-hand-side parameters. If
+``\lambda_t`` is the dual multiplier of the target constraint, the envelope
+gradient used by this overload is
+
+```math
+\nabla_\theta \mathbb{E}[Q(w; \theta)]
+\approx
+\frac{1}{S}
+\sum_{s=1}^{S}
+\sum_{t=1}^{T}
+\lambda_t^s \odot
+\nabla_\theta \hat{x}_t^s(\theta),
+```
+
+where ``S`` is `num_train_per_batch` and ``\odot`` denotes componentwise
+multiplication.
+
+Pass a [`ScoreFunctionConfig`](@ref) or [`ScoreFunctionSchedule`](@ref) via
+`score_function` to mix the dual gradient with a REINFORCE correction
+estimated from rollouts under perturbed targets.
+
+When `score_function` is used, there are two separate solve paths:
+
+1. `integer_strategy` applies to `det_equivalent` and controls how local dual
+   information is read for the differentiable dual-gradient term.
+2. `score_function` owns separate rollout subproblems. Those models are solved
+   exactly as they are built, and their realized costs define the Monte Carlo
+   score-function term.
+
+For a mixed-integer model, this usually means
+`integer_strategy = FixedDiscreteIntegerStrategy()` for the dual path and
+MIP rollout subproblems inside `ScoreFunctionConfig` for the score-function
+path.
+
+# Arguments
+- `model`: differentiable Flux-compatible policy. It is rolled forward over
+  uncertainty values to produce ``\hat{x}_{1:T}``.
+- `initial_state::AbstractVector{<:Real}`: state ``x_0``.
+- `det_equivalent::JuMP.Model`: full-horizon JuMP model for one sampled
+  trajectory.
+- `state_params_in`: input-state parameters in the deterministic equivalent.
+- `state_params_out`: `(target_parameter, realized_state_variable)` pairs for
+  each target state.
+- `uncertainty_sampler`: source of uncertainty trajectories, passed to
+  [`sample`](@ref). Three formats are accepted:
+  1. **Per-unit pool** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+     independent sampling per parameter per stage.
+  2. **Joint-scenario pool** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+     one scenario drawn per stage, preserving spatial correlation.
+  3. **Callable** (`() -> Vector{Vector{Tuple{VariableRef, T}}}`): a zero-arg
+     function returning a full trajectory. Use this for temporal correlation;
+     see [`sample`](@ref).
+
+# Keywords
+- `num_batches::Integer`: number of SGD batches.
+- `num_train_per_batch::Integer`: sampled trajectories per batch ``S``.
+- `optimizer`: Flux optimizer used to update `model`.
+- `adjust_hyperparameters::Function`: optional hook returning the batch size for
+  the current iteration.
+- `record_loss`: legacy logging callback.
+- `sample_log::SampleLog`: per-batch objective cache.
+- `record::Function`: callback called as `record(sample_log, iter, model)`.
+- `penalty_schedule`: optional multiplier schedule for target-penalty terms.
+- `integer_strategy::AbstractIntegerStrategy`: strategy used to read local dual
+  information from `det_equivalent` when it has discrete variables.
+- `score_function`: optional [`ScoreFunctionConfig`](@ref) or
+  [`ScoreFunctionSchedule`](@ref) for mixed dual/score-function gradients.
+
+# Examples
+```julia
+train_multistage(
+    policy,
+    initial_state,
+    det_equivalent,
+    state_params_in,
+    state_params_out,
+    uncertainty_sampler;
+    num_batches = 200,
+    num_train_per_batch = 16,
+    optimizer = Flux.Adam(1.0e-3),
+    integer_strategy = FixedDiscreteIntegerStrategy(),
+    score_function = nothing,
+)
+```
 """
 function train_multistage(
     model,
@@ -1036,75 +1394,110 @@ function train_multistage(
     record=default_record,
     penalty_schedule=nothing,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+    score_function::Union{Nothing,ScoreFunctionConfig,ScoreFunctionSchedule}=nothing,
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
     record = _resolve_record(record, record_loss)
-    # Initialise the optimiser for this model:
     opt_state = Flux.setup(optimizer, model)
     num_stages = length(state_params_in)
 
     schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
-    penalty_bases = if isnothing(schedule)
-        nothing
-    else
+    penalty_bases = isnothing(schedule) ? nothing :
         _check_deficit_penalty_bases(_deficit_penalty_bases(det_equivalent))
-    end
     current_multiplier = NaN
+
+    sf_cfg = _sf_config(score_function)
+    use_sf = !isnothing(sf_cfg)
 
     for iter in 1:num_batches
         if !isnothing(schedule)
             multiplier = _penalty_multiplier_for(schedule, iter)
             if multiplier != current_multiplier
                 _apply_deficit_penalty_multiplier!(
-                    det_equivalent, penalty_bases, multiplier
-                )
+                    det_equivalent, penalty_bases, multiplier)
                 current_multiplier = multiplier
             end
         end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
-        # Sample uncertainties
+
+        score_params = use_sf ? sf_params(score_function, iter) :
+            (
+                alpha = 1.0,
+                score_weight = 0.0,
+                perturbation_std = 0.0,
+                num_rollouts = 0,
+                active = false,
+            )
+
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
         num_uncertainties = length(uncertainty_samples[1][1])
         uncertainty_samples_vec = [
             [
-                [uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties] for
-                stage in 1:length(uncertainty_samples[1])
+                [uncertainty_samples[s][stage][i][2] for i in 1:num_uncertainties]
+                for stage in 1:num_stages
             ] for s in 1:num_train_per_batch
         ]
 
-        # Calculate the gradient of the objective
-        # with respect to the parameters within the model:
         objective = 0.0
         _reset_sample_log!(sample_log)
-        grads = Flux.gradient(model) do m
-            for s in 1:num_train_per_batch
-                Flux.reset!(m)
-                init_state = Float32.(initial_state)
-                predicted_states = accumulate(
-                    uncertainty_samples_vec[s]; init=init_state
-                ) do prev_state, uncertainties_t
-                    return m(vcat(uncertainties_t, prev_state))
+        grads = try
+            Flux.gradient(model) do m
+                for s in 1:num_train_per_batch
+                    Flux.reset!(m)
+                    x0 = Float32.(initial_state)
+                    states = vcat([x0], accumulate(
+                        uncertainty_samples_vec[s]; init=x0
+                    ) do prev, ξ
+                        m(vcat(ξ, prev))
+                    end)
+
+                    dual_obj = simulate_multistage(
+                        det_equivalent, state_params_in, state_params_out,
+                        uncertainty_samples[s], states;
+                        integer_strategy=integer_strategy)
+                    @ignore_derivatives sample_log(s, det_equivalent)
+                    objective += score_params.alpha * dual_obj
+
+                    if score_params.active
+                        advantages, perturbations = @ignore_derivatives(
+                            _score_function_rollouts(
+                                sf_cfg,
+                                initial_state,
+                                uncertainty_samples[s],
+                                states;
+                                perturbation_std = score_params.perturbation_std,
+                                num_rollouts = score_params.num_rollouts,
+                            )
+                        )
+                        for rollout in 1:score_params.num_rollouts
+                            advantage = @ignore_derivatives advantages[rollout]
+                            perturbation = @ignore_derivatives perturbations[rollout]
+                            surrogate = _score_function_surrogate(
+                                advantage,
+                                perturbation,
+                                states,
+                                score_params.perturbation_std,
+                            )
+                            objective += score_params.score_weight *
+                                surrogate / Float32(score_params.num_rollouts)
+                        end
+                    end
                 end
-                states = vcat([init_state], predicted_states)
-                objective += simulate_multistage(
-                    det_equivalent,
-                    state_params_in,
-                    state_params_out,
-                    uncertainty_samples[s],
-                    states;
-                    integer_strategy=integer_strategy,
-                )
-                @ignore_derivatives sample_log(s, det_equivalent)
+                objective /= num_train_per_batch
+                return objective
             end
-            objective /= num_train_per_batch
-            return objective
+        catch e
+            if handle_training_error(gradient_fallback, e, iter)
+                nothing
+            end
         end
         record(sample_log, iter, model) && break
 
-        # Update the parameters so as to reduce the objective,
-        # according the chosen optimisation rule:
-        # Convert gradients from MutableTangent to plain NamedTuples for Flux.update!
-        grad = materialize_tangent(grads[1])
-        Flux.update!(opt_state, model, grad)
+        if isnothing(grads)
+            continue
+        end
+
+        Flux.update!(opt_state, model, materialize_tangent(grads[1]))
     end
 
     return model

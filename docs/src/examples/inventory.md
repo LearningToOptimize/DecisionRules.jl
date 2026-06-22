@@ -2,194 +2,440 @@
 EditURL = "inventory.jl"
 ```
 
-# Inventory Control with Ordering Costs
+# Stochastic Lot-Sizing with Fixed Ordering Costs
 
-This example studies a 12-period stochastic lot-sizing problem with two
-formulations — a **relaxed** (continuous) case and an **integer** (MIP) case
-with fixed ordering costs.  The comparison shows:
+This example shows how to train target-state decision rules for a stochastic
+inventory problem with ex-ante ordering decisions.
 
-1. **Relaxed problem**: SDDP with a PAR(1) demand approximation is
-   near-optimal and outperforms TS-DDR.
-2. **Integer problem**: TS-DDR with `FixedDiscreteIntegerStrategy` outperforms
-   both SDDP and TS-DDR with `ContinuousRelaxationIntegerStrategy`, because
-   SDDP and continuous relaxation both underestimate the fixed ordering cost.
+The example has two purposes:
+
+1. show the complete optimization model before discussing implementation
+   details; and
+2. show the code in the same order a reader would run it.
+
+````@example inventory
+using DecisionRules
+using Flux
+using HiGHS
+using JuMP
+using Random
+using Statistics
+````
+
+The runnable experiment lives outside the documentation tree. The file defines
+the demand process, JuMP builders, and policy architecture used below.
+
+````@example inventory
+include(joinpath(@__DIR__, "..", "..", "..", "examples", "inventory_control",
+    "build_inventory_problem.jl"))
+````
 
 ## Information Pattern
 
-At the beginning of a period, the controller observes current inventory and
-recent realized demand.  It does **not** observe current demand before ordering.
-The order is therefore ex-ante.  After ordering, demand is realized and becomes
-part of the state for the next period.
-
-The state carried between periods is:
-
-```julia
-[net_inventory, last_demand, previous_demand]
-```
-
-This lets a time-invariant policy infer the latent demand regime from recent
-observations without receiving a period counter or synthetic seasonal features.
-
-## Inventory Model
-
-### Relaxed formulation
-
-The order quantity is continuous with no setup cost:
+At the beginning of period `t`, the controller knows
 
 ```math
-0 \le q_t \le Q_{\max}, \qquad
-\text{cost}_t = c\,q_t + h\max(s_t,0) + p\max(-s_t,0).
+x_t = (s_{t-1}, d_{t-1}, d_{t-2}),
 ```
 
-### Integer formulation
+where `s` is net inventory and `d` is realized demand. The controller chooses
+the order quantity before seeing current demand `d_t`. This is an ex-ante
+decision.
 
-A binary variable ``z_t \in \{0,1\}`` controls whether an order is placed.
-If ``z_t = 0``, then ``q_t`` must be zero; if ``z_t = 1``, the model pays a
-fixed setup cost ``K``:
+The neural policy receives `[d_t, x_t...]` during training because
+DecisionRules policies output target states after the stage uncertainty is
+sampled. The implementation below uses that target only to guide the
+optimization model; the actual order still respects the model's information
+pattern.
+
+## Complete Stage Model
+
+For each period `t = 1, ..., T`, the stage model is
 
 ```math
-0 \le q_t \le Q_{\max}\,z_t, \qquad
-\text{cost}_t = K\,z_t + c\,q_t + h\max(s_t,0) + p\max(-s_t,0).
+\begin{aligned}
+\min_{q_t,z_t,s_t^{mid},s_t,h_t,b_t}
+    \quad & K z_t + c q_t + h h_t + p b_t
+            + \lambda |s_t^{mid} - \hat{s}_t| \\
+\text{s.t.}\quad
+    & 0 \le q_t \le Q_{\max} z_t, && \text{(1) order capacity} \\
+    & z_t \in \{0,1\},             && \text{(2) setup decision} \\
+    & s_t^{mid} = s_{t-1} + q_t,   && \text{(3) order arrives} \\
+    & s_t = s_t^{mid} - d_t,       && \text{(4) demand realizes} \\
+    & h_t - b_t = s_t,             && \text{(5) inventory split} \\
+    & h_t \ge 0,\; b_t \ge 0.      && \text{(6) split bounds}
+\end{aligned}
 ```
 
-In both cases, ordered units arrive before demand:
+The relaxed model removes (2) and replaces (1) by
+``0 \le q_t \le Q_{\max}``; it also removes the fixed cost `K z_t` from the
+objective.
 
-```math
-s^{mid}_t = s_{t-1} + q_t, \qquad s_t = s^{mid}_t - d_t.
-```
+The target `\hat{s}_t` is not an operational requirement. It is the state
+target produced by the neural decision rule, and the penalty term gives the
+policy a gradient signal.
 
-| Parameter | Value | Meaning |
-|:--|--:|:--|
-| ``T`` | 12 | periods |
-| ``K`` | 500 | fixed order/setup cost (integer case) |
-| ``c`` | 2 | unit ordering cost |
-| ``h`` | 1 | holding cost |
-| ``p`` | 25 | backlog penalty |
-| ``Q_{\max}`` | 350 | order capacity |
-| ``s_0`` | 30 | initial inventory |
+## Parameters
+
+````@example inventory
+inventory_parameters = (
+    T = INVENTORY_T,
+    setup_cost = INVENTORY_K,
+    unit_order_cost = INVENTORY_C,
+    holding_cost = INVENTORY_H,
+    backlog_cost = INVENTORY_P,
+    order_capacity = INVENTORY_Q_MAX,
+    initial_inventory = INVENTORY_I0,
+    target_penalty = INVENTORY_PENALTY,
+)
+````
 
 ## Demand Process
 
-Each trajectory has a path-level phase shift ``\phi \sim \mathrm{Unif}\{0,\ldots,T-1\}``,
-a persistent latent regime ``r_t \in \{-1,0,1\}`` (switch probability 0.04),
-and an autoregressive shock ``\epsilon_t``:
+Demand has a hidden seasonal phase, a persistent hidden regime, and an AR(1)
+shock:
 
 ```math
-\epsilon_t = 0.92\,\epsilon_{t-1} + 0.35\,\eta_t, \qquad
-d_t = \operatorname{clip}\!\bigl(
-  m_{\kappa_t} + w_{\kappa_t}(0.85\,r_t + 0.42\,\epsilon_t + 0.12\,\eta'_t)
-\bigr),
+\epsilon_t = 0.92 \epsilon_{t-1} + 0.35 \eta_t,
 ```
 
-where ``\kappa_t = 1 + ((t + \phi - 1) \bmod T)`` is the shifted seasonal
-index, and ``m_{\kappa_t}`` and ``w_{\kappa_t}`` are the midpoint and
-half-width of the seasonal demand band.  None of the latent variables are
-observed; the policy sees only inventory and realized demand history.
+```math
+d_t =
+\operatorname{clip}\!\left(
+    m_{\kappa_t}
+    + w_{\kappa_t}(0.85 r_t + 0.42 \epsilon_t + 0.12 \eta'_t)
+\right),
+```
 
-The plot below shows 24 sampled demand paths.  Because each trajectory has a
-different phase and persistent regime, the same calendar period can correspond
-to high, medium, or low demand across scenarios.
+where `r_t` is the hidden regime and
+``\kappa_t = 1 + ((t + \phi - 1) \bmod T)`` is the hidden seasonal index.
+
+````@example inventory
+Random.seed!(11)
+demand_paths = [sample_inventory_demand_path() for _ in 1:3]
+````
+
+## Build the Continuous and Integer Models
+
+The builders return the JuMP model(s), input-state parameters, output-target
+parameters, an uncertainty sampler, and the initial state.
+
+````@example inventory
+relaxed_subproblems,
+relaxed_state_in,
+relaxed_state_out,
+relaxed_sampler,
+initial_state = build_inventory_subproblems(;
+    num_scenarios = 100,
+    integer = false,
+)
+
+integer_subproblems,
+integer_state_in,
+integer_state_out,
+integer_sampler,
+_ = build_inventory_subproblems(;
+    num_scenarios = 100,
+    integer = true,
+)
+````
+
+The deterministic equivalent is the full-horizon model used by direct
+transcription training.
+
+````@example inventory
+integer_det_equivalent,
+integer_det_state_in,
+integer_det_state_out,
+integer_det_sampler,
+_ = build_inventory_det_equivalent(;
+    num_scenarios = 50,
+    integer = true,
+)
+````
+
+## Integer Sensitivity Strategies
+
+Mixed-integer models do not have ordinary LP duals. DecisionRules therefore
+makes the chosen postprocessing strategy explicit.
+
+````@example inventory
+fixed_discrete = FixedDiscreteIntegerStrategy()
+continuous_relaxation = ContinuousRelaxationIntegerStrategy()
+````
+
+`FixedDiscreteIntegerStrategy` solves the MIP, fixes the incumbent integer
+variables, re-solves the fixed LP, and reads local dual information.
+
+`ContinuousRelaxationIntegerStrategy` relaxes integer variables first and reads
+duals from the relaxed LP. This is smoother and faster, but the gradient is for
+the relaxation, not for an integer-feasible decision.
+
+## Score-Function Correction
+
+Local LP duals do not see a discrete switch such as "open the setup variable".
+A score-function correction estimates the effect of target changes by solving
+perturbed integer rollouts:
+
+```math
+\nabla L
+=
+\alpha \nabla L_{\mathrm{dual}}
++ (1-\alpha)
+  \frac{1}{M}
+  \sum_{m=1}^{M}
+  (R_m - b)
+  \nabla_\theta
+  \sum_{t=1}^{T}
+  \left\langle
+      \delta_{m,t}/\sigma^2,
+      \hat{x}_{t+1}(\theta)
+  \right\rangle .
+```
+
+There are two different solves in the mixed-gradient training loop:
+
+- `train_multistage(...; integer_strategy = fixed_discrete)` controls the
+  deterministic-equivalent solve used for the dual-gradient term
+  ``\nabla L_{\mathrm{dual}}``. This solve needs a postprocessing strategy
+  because duals are not directly defined for a MIP.
+- `ScoreFunctionConfig(integer_subproblems, ...)` controls the Monte Carlo
+  rollout term. These rollout models are solved exactly as they are built.
+  Because `integer_subproblems` contain binary setup variables, the rollout
+  costs `R_m` are true MIP rollout costs.
+
+In short: `integer_strategy` is for reading local duals; score-function
+rollouts are for measuring realized costs.
+
+````@example inventory
+score_function = ScoreFunctionConfig(
+    integer_subproblems,
+    integer_state_in,
+    integer_state_out;
+    dual_weight = 0.5,
+    perturbation_std = 1.0,
+    num_rollouts = 8,
+)
+
+score_schedule = ScoreFunctionSchedule(
+    score_function;
+    sf_start = 200,
+    ramp_batches = 300,
+    perturbation_std_initial = 0.1,
+    num_rollouts_initial = 2,
+)
+````
+
+## Policy
+
+A DecisionRules policy is any callable `π(x) -> target` where `x` is the
+concatenation `[uncertainty..., state...]` and `target` is the desired
+next state. The only requirement is that it is differentiable via
+`Zygote.gradient` and registered with `Functors.@functor` so that
+`Flux.loadmodel!` can checkpoint its parameters.
+
+### Feedforward policy
+
+The simplest architecture is a feedforward MLP. This policy is ex-ante:
+it ignores the current demand `d_t` (index 1) and uses only the state
+entries `[inventory, d_{t-1}, d_{t-2}]`.
+
+````@example inventory
+using Functors: @functor
+
+struct ExAntePolicy{N}
+    net::N
+end
+
+@functor ExAntePolicy (net,)
+````
+
+The callable normalizes features to ≈[0,1] and maps through the network.
+The sigmoid output bounds the target to `[0, 500]`.
+
+````@example inventory
+function (p::ExAntePolicy)(x)
+    inventory = Float32(x[2])
+    d_prev    = Float32(x[3])
+    d_prev2   = Float32(x[4])
+    features  = Float32[inventory / 100, d_prev / 100, d_prev2 / 100]
+    target    = 500f0 .* Flux.sigmoid.(p.net(features))
+    return Float32[target[1], x[1], d_prev]
+end
+
+Random.seed!(2024)
+policy = ExAntePolicy(Chain(Dense(3, 32, relu), Dense(32, 24, relu), Dense(24, 1)))
+````
+
+### Recurrent (LSTM) policy
+
+When the uncertainty process has temporal structure (regimes, trends,
+seasonality), a recurrent encoder can learn patterns that a feedforward
+MLP cannot detect from a fixed-length window.
+
+The design below uses `Flux.LSTMCell` to process one *lagged* demand
+value per stage. The LSTM hidden state accumulates across stages within
+a scenario, then resets between scenarios via `Flux.reset!`.
+
+The affine output `raw × 200 + 150` avoids sigmoid saturation and
+centers the target on typical inventory levels.
+
+````@example inventory
+mutable struct RecurrentExAntePolicy{E,C,S}
+    encoder::E
+    combiner::C
+    state::S
+end
+
+@functor RecurrentExAntePolicy (encoder, combiner)
+
+function (p::RecurrentExAntePolicy)(x)
+    d_prev    = Float32(x[3])
+    inventory = Float32(x[2])
+    d_prev2   = Float32(x[4])
+    T = eltype(first(p.state))
+    encoded, new_state = p.encoder(T[d_prev / 100], p.state)
+    p.state = new_state
+    raw = p.combiner(vcat(encoded, T[inventory / 100, d_prev2 / 100]))
+    target = raw[1] * 200f0 + 150f0
+    return Float32[target, x[1], d_prev]
+end
+
+function Flux.reset!(p::RecurrentExAntePolicy)
+    p.state = Flux.initialstates(p.encoder)
+    return nothing
+end
+
+Random.seed!(2024)
+lstm_encoder = Flux.LSTMCell(1 => 16)
+lstm_policy = RecurrentExAntePolicy(
+    lstm_encoder,
+    Dense(16 + 2, 1),
+    Flux.initialstates(lstm_encoder),
+)
+````
+
+## Training Calls
+
+The continuous problem uses ordinary dual information.
+
+```julia
+train_multistage(
+    policy,
+    initial_state,
+    relaxed_subproblems,
+    relaxed_state_in,
+    relaxed_state_out,
+    relaxed_sampler;
+    num_batches = 400,
+    num_train_per_batch = 5,
+    optimizer = Flux.Adam(0.0015),
+    integer_strategy = NoIntegerStrategy(),
+    penalty_schedule = [(1, 80, 0.4), (81, 400, 1.0)],
+)
+```
+
+The integer deterministic-equivalent run uses the fixed-discrete local dual
+path plus the scheduled score-function correction.
+
+```julia
+train_multistage(
+    policy,
+    initial_state,
+    integer_det_equivalent,
+    integer_det_state_in,
+    integer_det_state_out,
+    integer_det_sampler;
+    num_batches = 800,
+    num_train_per_batch = 10,
+    optimizer = Flux.Adam(0.0008),
+    integer_strategy = fixed_discrete,
+    penalty_schedule = [(1, 120, 0.4), (121, 800, 1.0)],
+    score_function = score_schedule,
+)
+```
+
+## Evaluation
+
+A trained policy should be evaluated by stage-wise rollout, because that is
+the deployment semantics: solve one period, observe the realized next state,
+then solve the next period.
+
+````@example inventory
+uncertainty_sample = sample(integer_sampler)
+rollout_cost = simulate_multistage(
+    integer_subproblems,
+    integer_state_in,
+    integer_state_out,
+    initial_state,
+    uncertainty_sample,
+    policy;
+    integer_strategy = fixed_discrete,
+)
+````
+
+## Experiment Scripts
+
+Each variant can be trained independently via SLURM or directly:
+
+```bash
+# Single variant
+julia --project=. train_dr_inventory.jl integer_lstm
+
+# All variants in parallel via SLURM
+cd examples/inventory_control && bash launch_all.sh
+```
+
+Available variant tags: `relaxed`, `relaxed_lstm`, `relaxed_hp`,
+`relaxed_lstm_hp`, `integer`, `integer_cr`, `integer_sf`, `integer_hp`,
+`integer_lstm`, `integer_lstm_sf`.
+
+After training, run the comparison script to regenerate tables and figures:
+
+```bash
+julia --project=. evaluate_inventory.jl
+julia --project=. solve_sddp.jl
+julia --project=. compare_results.jl
+```
+
+The figures used by this page are generated by `compare_results.jl`.
 
 ![Demand process](../assets/inventory_demand_process.png)
 
-## Integer Postprocessing Strategies
-
-DecisionRules.jl provides two strategies for extracting gradient information
-from subproblems with discrete variables:
-
-**`FixedDiscreteIntegerStrategy`**: (1) solve the MIP for incumbent binary
-values ``z^*_t``; (2) fix ``z_t = z^*_t`` and relax integrality; (3) re-solve
-the resulting LP; (4) read LP duals as gradient signal.  This is the same
-principle as SDDP.jl's `FixedDiscreteDuality`.
-
-**`ContinuousRelaxationIntegerStrategy`**: relax all binary/integer
-constraints to continuous bounds (binary → [0,1]), solve the resulting LP,
-and read duals directly.  This is faster (one LP instead of MIP + LP) and
-gives smoother gradients, but the solution may have fractional integer
-variables — the gradient does not correspond to any feasible integer
-assignment.
-
-For the relaxed formulation (no integer variables), `NoIntegerStrategy` is
-used and subproblems are solved as-is.
-
-## Relaxed (Continuous) Problem
-
-When there are no integer variables, SDDP can model the demand process
-exactly via a PAR(1) approximation that carries ``d_{t-1}`` as a state
-variable.  This makes SDDP near-optimal for the relaxed problem.
-
-SDDP uses a PAR(1) fit: ``d_t \approx \mu_t + \alpha(d_{t-1} - \mu_{t-1}) + \omega_t``
-with per-stage means ``\mu_t``, autocorrelation ``\alpha \approx 0.86``, and
-9 equiprobable innovation points fitted from 10,000 simulated demand paths.
-
-All costs below are out-of-sample operational costs evaluated on the same 300
-demand scenarios (seed 555).  **Fit** is the one-time offline cost (training
-or tuning).  **Eval** is the online deployment cost per decision point.
-
 ![Relaxed results](../assets/inventory_relaxed_results.png)
-
-SDDP LP bound: **2162.0**
-
-| Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR | Fit (s) | Eval (s) |
-|:-------------------------|----:|----------:|------:|-------:|----------:|--------:|---------:|
-| TS-DDR (trained)         | 300 |    2667.3 | 594.5 |   67.3 |     +0.0% |    54.6 |   0.0018 |
-| SDDP (PAR)              | 300 |    2434.2 | 774.8 |   87.7 |     -8.7% |     0.0 |  20.6455 |
-| Base-stock (S\*=160)    | 300 |    3035.6 | 506.8 |   57.3 |    +13.8% |     0.0 |   0.0002 |
-| Random (untrained)      | 300 |    3751.7 | 221.7 |   25.1 |    +40.7% |     0.0 |   0.0018 |
-
-SDDP clearly dominates: 8.7% lower cost than TS-DDR, and the SDDP and Random
-cost distributions are non-overlapping.  This is expected for a convex problem
-where SDDP can represent the demand dynamics exactly through the PAR(1) state
-variable.
-
-## Integer (MIP) Problem
-
-Introducing the binary ``z_t`` and fixed cost ``K=500`` changes the
-landscape.  SDDP can only use LP relaxation for training (``z \in [0,1]``),
-which systematically underestimates ``K``: when the LP says ``z=0.3``,
-``q=20``, the relaxed cost is ``0.3 \times 500 + 2 \times 20 = 190``, but
-the true integer cost with ``z=1`` is ``500 + 40 = 540``.
-
-TS-DDR with `FixedDiscreteIntegerStrategy` handles this correctly: it
-solves the full MIP, fixes the binary incumbent, and reads LP duals in
-that integer-consistent state.
 
 ![Integer results](../assets/inventory_integer_results.png)
 
-SDDP LP bound: **3346.6**
+### Relaxed (continuous) results
 
-| Method                   |   N | Mean cost |   Std | 95% CI | vs TS-DDR (FD) | Fit (s) | Eval (s) |
-|:-------------------------|----:|----------:|------:|-------:|---------------:|--------:|---------:|
-| TS-DDR (FixedDiscrete)   | 300 |    8015.8 | 719.5 |   81.4 |          +0.0% |   339.2 |   0.0112 |
-| TS-DDR (ContRelax)       | 300 |    8318.1 | 720.0 |   81.5 |          +3.8% |   109.4 |   0.0117 |
-| SDDP integer rollout     | 300 |    8274.2 | 912.5 |  103.3 |          +3.2% |     0.0 |   7.9088 |
-| Base-stock (S\*=160)    | 300 |    9035.6 | 506.8 |   57.3 |         +12.7% |     0.0 |   0.0000 |
-| Random (untrained)      | 300 |    9594.6 | 361.1 |   40.9 |         +19.7% |     0.0 |   0.0120 |
+SDDP uses a PAR(1) approximation of the true latent demand process, which
+is not exact for this problem. Despite this advantage for TS-DDR, the gap
+between the best TS-DDR variant and SDDP is ~7%.
 
-`FixedDiscreteIntegerStrategy` achieves the lowest cost (8016), beating both
-SDDP (8274, +3.2%) and `ContinuousRelaxationIntegerStrategy` (8318, +3.8%).
-The continuous relaxation strategy performs similarly to SDDP — both use LP
-relaxation and both underestimate the fixed ordering cost.
+The LSTM encoder closes ~25% of the gap versus the feedforward baseline by
+learning temporal demand patterns from lagged observations.
 
-`ContinuousRelaxationIntegerStrategy` trains 3× faster (109s vs 339s)
-because it only solves LPs, but the resulting policy is less accurate on
-integer-constrained problems.
+| Method                          |   N | Mean cost |   Std | vs SDDP |
+|:--------------------------------|----:|----------:|------:|--------:|
+| SDDP (PAR)                      | 300 |    2434.0 |     — |   0.0%  |
+| TS-DDR (LSTM)                   | 300 |    2610.6 | 540.3 |  +7.3%  |
+| TS-DDR (feedforward)            | 300 |    2667.3 | 593.5 |  +9.6%  |
+| TS-DDR (HighPenalty)            | 300 |    2677.5 | 547.0 | +10.0%  |
+| TS-DDR (LSTM+HP)                | 300 |    2712.0 | 554.6 | +11.4%  |
 
-## Runnable Scripts
+### Integer (MIP) results
 
-The complete experiment lives in `examples/inventory_control/`:
+SDDP uses an `AlternativeForwardPass`: MIP in the forward pass, LP
+relaxation in the backward pass for valid cuts. The TS-DDR gap is ~36%.
 
-| Script | Purpose |
-|:-------|:--------|
-| `build_inventory_problem.jl` | JuMP subproblem and det-equivalent builders, demand process, policy architecture |
-| `train_dr_inventory.jl` | TS-DDR training (relaxed, FixedDiscrete, ContRelax) and trajectory evaluation |
-| `evaluate_inventory.jl` | Base-stock grid-search and random baseline evaluation |
-| `solve_sddp.jl` | SDDP (2T-stage PAR(1)) training and rollout |
-| `compare_results.jl` | Load all CSVs, print summary tables, save plots |
+| Method                          |   N | Mean cost |   Std | vs SDDP |
+|:--------------------------------|----:|----------:|------:|--------:|
+| SDDP (MIP fwd)                  | 300 |    5871.6 |1087.4 |   0.0%  |
+| TS-DDR (FixedDiscrete)          | 300 |    8015.8 | 718.3 | +36.5%  |
+| TS-DDR (MixedGrad)              | 300 |    8268.0 | 715.3 | +40.8%  |
+| TS-DDR (ContRelax)              | 300 |    8318.1 | 718.8 | +41.7%  |
+| TS-DDR (HighPenalty)            | 300 |    8388.4 | 615.9 | +42.8%  |
+| SDDP (LP relax)                 | 300 |    8274.2 | 912.5 | +40.9%  |
+| Base-stock (S\*=160)            | 300 |    9035.6 | 506.8 | +53.9%  |
+| Random (untrained)              | 300 |    9594.6 | 361.1 | +63.4%  |
 
-```bash
-julia --project=examples/inventory_control examples/inventory_control/train_dr_inventory.jl
-julia --project=examples/inventory_control examples/inventory_control/evaluate_inventory.jl
-julia --project=examples/inventory_control examples/inventory_control/solve_sddp.jl
-julia --project=examples/inventory_control examples/inventory_control/compare_results.jl
-```

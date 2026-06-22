@@ -15,15 +15,30 @@ generation to meet those targets at minimum cost.
 
 ## Training scripts
 
+### TS-DDR (Deep Decision Rules — LSTM policy)
+
 | Script | Decomposition | Reference |
 |--------|--------------|-----------|
 | `train_dr_hydropowermodels.jl` | Deterministic equivalent (GPU-enabled) | Extension §1 |
 | `train_dr_hydropowermodels_subproblems.jl` | Stage-wise (single shooting) | Extension §2 |
 | `train_dr_hydropowermodels_multipleshooting.jl` | Windowed (multiple shooting) | Extension §3 |
 
-All three share the same data loader (`load_hydropowermodels.jl`) and
-policy architecture (LSTM encoder + state-conditioned dense layers).
-Training logs to Weights & Biases and saves the best model to JLD2.
+These use a `StateConditionedPolicy` (LSTM encoder + state-conditioned dense
+layers, `[128, 128]`, sigmoid activation).
+
+### TS-LDR (Linear Decision Rules — linear policy)
+
+| Script | Decomposition | Reference |
+|--------|--------------|-----------|
+| `train_ldr_hydropowermodels.jl` | Deterministic equivalent (GPU-enabled) | §3 |
+
+TS-LDR uses `dense_multilayer_nn` with identity activation — a composition
+of linear layers that is equivalent to a single linear map from
+(uncertainties, state) to targets.  Same training pipeline as TS-DDR; the
+only difference is the policy architecture.
+
+All training scripts share the data loader (`load_hydropowermodels.jl`),
+log to Weights & Biases, and save the best model to JLD2.
 
 ### GPU training
 
@@ -64,20 +79,30 @@ policy relying on slack.
 
 | Script | Purpose |
 |--------|---------|
+| `evaluate_hydro_policies.jl` | Load all trained TS-DDR and TS-LDR models and evaluate on a common out-of-sample scenario set using stage-wise ACP rollout; writes `eval_costs.csv` |
 | `eval_jump_de.jl` | Solve the DE with a constant policy and save a reference solution (JLD2) for cross-validation with ExaModels |
-| `test_dr_hydropowermodels.jl` | Load a trained model and produce volume/generation/cost comparison plots and CSVs |
 | `check_consistent_state_paths.jl` | Verify that stage-wise, deterministic equivalent, and multiple-shooting decompositions produce identical state trajectories under the same policy and inflows |
 
 ## SDDP baselines
 
-These scripts require [HydroPowerModels.jl](https://github.com/andrewrosemberg/HydroPowerModels.jl),
-Gurobi, and Mosek licenses.
+These scripts use a dedicated Julia environment in `sddp/`. The inconsistent
+SOC-backward/AC-forward baseline uses
+[HydroPowerModels.jl](https://github.com/LAMPSPUC/HydroPowerModels.jl), SDDP.jl,
+Clarabel for the SOC backward pass, and MadNLP for the AC forward pass. Training
+runs log iteration and final simulation metrics to Weights & Biases using the
+same keys as the DR runs: `metrics/loss` is the SDDP bound, and
+`metrics/rollout_realized_objective_no_deficit` is the SDDP forward-pass
+objective. SDDP iterations are logged as `batch` so W&B plots can share the same
+x-axis as the DR training runs. Because SDDP solves the forward policy
+stage-wise, that forward-pass objective is already the no-target-penalty
+objective.
 
 | Script | Description |
 |--------|-------------|
-| `run_sddp.jl` | Train SDDP with a consistent convex (SOCWRConic) formulation |
-| `run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward pass and ACP forward pass |
-| `simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP and produce comparison plots |
+| `sddp/run_sddp.jl` | Train SDDP with a consistent convex (SOCWRConic) formulation |
+| `sddp/run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward pass and ACP forward pass |
+| `sddp/run_sddp_inconsistent.sbatch` | Submit the SOC-backward/AC-forward run with a 12-hour wall time |
+| `sddp/simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP and produce comparison plots |
 
 ## Learning-to-Optimize (L2O) pipeline
 

@@ -68,6 +68,26 @@ subproblems. Two strategies are available:
 For the relaxed formulation (no integer variables), `NoIntegerStrategy`
 is used — subproblems are solved and duals read as-is.
 
+## Score-Function Gradient Mixing
+
+`ScoreFunctionConfig` adds a REINFORCE-style correction to the dual
+gradient, enabling TS-DDR to capture discrete transitions that LP duals
+miss. Stage-wise rollouts with Gaussian-perturbed targets estimate the
+gradient of the true integer cost, and the two signals are mixed:
+
+    g = α · g_dual + (1-α) · g_score_function
+
+There are two solves in the mixed-gradient training loop:
+
+- `train_multistage(...; integer_strategy=...)` controls the
+  deterministic-equivalent solve used to read the local dual-gradient term.
+- `ScoreFunctionConfig(subproblems, ...)` uses its rollout subproblems exactly
+  as built. If those subproblems contain binary setup variables, the
+  score-function term measures true MIP rollout costs.
+
+So the integer strategy is not duplicated: it belongs to the dual path. The
+score-function path measures costs from the rollout models you pass in.
+
 ## Scripts
 
 Run from the repository root:
@@ -105,11 +125,14 @@ Figures are written to `docs/src/assets/`:
 - **TS-DDR** learns an ex-ante order target from inventory and demand history,
   using the same time-invariant neural policy at every period.
 - **SDDP** uses a PAR(1) demand approximation in a 24-stage order/demand graph.
-  For the integer case, it uses LP relaxation with integer rounding at rollout.
+  For the integer case, it uses `AlternativeForwardPass`: the forward pass solves
+  true MIP subproblems (`z ∈ {0,1}`), while the backward pass uses LP relaxation
+  (`z ∈ [0,1]`) to compute cuts with valid duals.
 - **Base-stock** is a tuned constant order-up-to policy.
 - **Random** is an untrained ex-ante neural policy.
 
 The expected qualitative result is:
 - **Relaxed**: SDDP dominates (near-optimal for convex problems with Markov noise).
 - **Integer**: TS-DDR dominates (handles MIP subproblems natively via integer
-  postprocessing strategies, while SDDP's LP relaxation underestimates fixed costs).
+  postprocessing strategies, while SDDP with `AlternativeForwardPass` generates
+  cuts at MIP-realistic trial points but still relies on LP duals for cuts).

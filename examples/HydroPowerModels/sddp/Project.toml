@@ -1,0 +1,11 @@
+[deps]
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+HydroPowerModels = "1bf2e10f-7293-4f36-bafb-f7584ca75eae"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+MadNLP = "2621e9c9-9eb4-46b1-8089-e8c72242dfb6"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+PowerModels = "c36e90e8-916a-50a6-bd94-075b64ef4655"
+SDDP = "f4570300-c277-11e8-125c-4912f86ce65d"
+Wandb = "ad70616a-06c9-5745-b1f1-6a5f42545108"

@@ -1,4 +1,21 @@
-# Train HydroPowerModels using Deterministic Equivalent formulation (GPU-enabled)
+# Train a TS-LDR (Linear Decision Rule) policy on the Bolivia LTHD problem.
+#
+# TS-LDR uses the same target-setting framework as TS-DDR but replaces the
+# deep neural network with a linear map:
+#
+#   x̂_t = W [w_{1:t}; x_{t-1}] + b
+#
+# where W, b are the trainable parameters.  This is a `dense_multilayer_nn`
+# with identity activation — a composition of linear layers is still linear,
+# so the result is a standard linear decision rule.
+#
+# Training uses the Deterministic Equivalent pipeline (all stages coupled in
+# one NLP), identical to train_dr_hydropowermodels.jl except for the policy
+# architecture.  The saved model is evaluated by evaluate_hydro_policies.jl.
+#
+# Usage:
+#   julia --project=. train_ldr_hydropowermodels.jl
+
 using DecisionRules
 using Statistics
 using Random
@@ -23,49 +40,42 @@ end
 HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
 
-# Functions
-
 function non_ensurance(x_out, x_in, uncertainty, max_volume)
     return x_out
 end
 
-# Parameters
-case_name = "bolivia"                    # bolivia, case3
-formulation = "ACPPowerModel"            # SOCWRConicPowerModel, DCPPowerModel, ACPPowerModel
-num_stages = parse(Int, get(ENV, "DR_NUM_STAGES", "126"))
+# ── Parameters ───────────────────────────────────────────────────────────────
+
+case_name = "bolivia"
+formulation = "ACPPowerModel"
+num_stages = 96
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 solver_tag = USE_GPU ? "gpu" : "cpu"
+save_file = "$(case_name)-$(formulation)-h$(num_stages)-ldr-$(solver_tag)-$(now())"
 formulation_file = formulation * ".mof.json"
 
-# Training parameters
-num_epochs = parse(Int, get(ENV, "DR_NUM_EPOCHS", "80"))
+num_epochs = 40
 num_batches = 100
 _num_train_per_batch = 1
-activation = sigmoid                     # tanh, identity, relu, sigmoid
-layers = Int64[128, 128]
+activation = identity
+layers = Int64[64, 64]
 ensure_feasibility = non_ensurance
-grad_clip = parse(Float32, get(ENV, "DR_GRAD_CLIP", "0"))
-optimizers = if grad_clip > 0
-    [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
-else
-    [Flux.Adam()]
-end
+optimizers = [Flux.Adam()]
 pre_trained_model = nothing
 penalty_l2 = :auto
 penalty_l1 = :auto
-penalty_schedule = if get(ENV, "DR_PENALTY_SCHEDULE", "annealed") == "annealed"
-    :default_annealed
-else
-    nothing
-end
-clip_tag = grad_clip > 0 ? "-clip$(Int(grad_clip))" : ""
-sched_tag = isnothing(penalty_schedule) ? "-const" : "-anneal"
-save_file = "$(case_name)-$(formulation)-h$(num_stages)-deteq-$(solver_tag)$(clip_tag)$(sched_tag)-$(now())"
+penalty_schedule = [
+    (1, 100, 0.1),
+    (101, 210, 1.0),
+    (211, 300, 10.0),
+    (301, num_epochs * num_batches, 30.0),
+]
 num_eval_scenarios = 4
 eval_every = 25
 
-# Build MSP: subproblems for rollout evaluation (stage-wise, CPU, with DiffOpt)
+# ── Build MSP: subproblems for rollout evaluation ────────────────────────────
+
 diff_optimizer =
     () -> DiffOpt.diff_optimizer(
         optimizer_with_attributes(
@@ -83,7 +93,8 @@ subproblems, state_params_in_sub, state_params_out_sub, uncertainty_samples_sub,
     penalty_l2=penalty_l2,
 )
 
-# Build det-eq for training
+# ── Build det-eq for training ────────────────────────────────────────────────
+
 subproblems_de, state_params_in, state_params_out, uncertainty_samples, _, _ = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name),
     formulation_file;
@@ -102,7 +113,6 @@ if USE_GPU
 else
     set_optimizer_attribute(det_equivalent, "print_level", MadNLP.ERROR)
     set_optimizer_attribute(det_equivalent, "barrier", MadNLP.LOQOUpdate())
-    # set_optimizer_attribute(det_equivalent, "linear_solver", MadNLPGPU.LapackCPUSolver())
 end
 
 det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
@@ -116,18 +126,18 @@ det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
 
 num_hydro = length(initial_state)
 
-# Logging
+# ── Logging ──────────────────────────────────────────────────────────────────
+
 lg = WandbLogger(;
     project="RL",
     name=save_file,
     save_code=false,
     config=Dict(
         "layers" => layers,
-        "activation" => string(activation),
-        "encoder_type" => "LSTM",
+        "activation" => "identity (LDR)",
+        "policy_type" => "dense_multilayer_nn",
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
-        "grad_clip" => grad_clip,
         "training_method" => "deterministic_equivalent",
         "solver" => USE_GPU ? "MadNLP+CUDSS (GPU)" : "MadNLP (CPU)",
         "penalty_l1" => string(penalty_l1),
@@ -142,25 +152,23 @@ lg = WandbLogger(;
     ),
 )
 
-# Define Model
+# ── Define linear policy ─────────────────────────────────────────────────────
+
 num_uncertainties = length(uncertainty_samples[1][1])
-models = state_conditioned_policy(
-    num_uncertainties,
-    num_hydro,
-    num_hydro,
-    layers;
+num_inputs = DecisionRules.policy_input_dim(num_uncertainties, num_hydro)
+models = dense_multilayer_nn(
+    num_inputs, num_hydro, layers;
     activation=activation,
-    encoder_type=Flux.LSTM,
 )
 
-# Load pretrained Model
 if !isnothing(pre_trained_model)
     model_save = JLD2.load(pre_trained_model)
     model_state = model_save["model_state"]
     Flux.loadmodel!(models, model_state)
 end
 
-# Initial evaluation
+# ── Initial evaluation ───────────────────────────────────────────────────────
+
 Random.seed!(8788)
 @time objective_values = [
     simulate_multistage(
@@ -176,11 +184,11 @@ best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
-stall_train = StallingCriterium(num_epochs * num_batches, best_obj, 0)
-stall_rollout = StallingCriterium(num_epochs * num_batches, best_obj, 0)
+stall_train = StallingCriterium(100, best_obj, 0)
+stall_rollout = StallingCriterium(5, best_obj, 0)
 
+# ── Rollout evaluation (stage-wise subproblems, CPU) ─────────────────────────
 
-# Rollout evaluation (stage-wise subproblems, CPU)
 Random.seed!(8789)
 eval_scenarios = [
     DecisionRules.sample(uncertainty_samples_sub) for _ in 1:num_eval_scenarios
@@ -206,7 +214,8 @@ realized_rollout_evaluation = RolloutEvaluation(
 resolved_penalty_schedule = isnothing(penalty_schedule) ? nothing :
     DecisionRules._resolve_penalty_schedule(penalty_schedule, num_epochs * num_batches)
 
-# Train Model using deterministic equivalent.
+# ── Train ────────────────────────────────────────────────────────────────────
+
 train_multistage(
     models,
     initial_state,
@@ -252,5 +261,4 @@ train_multistage(
     penalty_schedule=penalty_schedule,
 )
 
-# Finish the run
 close(lg)

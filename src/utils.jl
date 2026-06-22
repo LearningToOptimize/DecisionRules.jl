@@ -323,6 +323,30 @@ function _apply_deficit_penalty_multiplier!(
     return models
 end
 
+"""
+    SaveBest(best_loss::Float64, model_path::String)
+
+Callback that saves the best policy state seen during training.
+
+`SaveBest` is a small callable object used as a training callback. When called
+as `callback(iter, model, loss)`, it compares `loss` with the best loss stored
+so far. If the new loss is smaller, it copies `model` to CPU, normalizes any
+recurrent layer state, and writes the Flux state to `model_path` with JLD2.
+It returns `false`, so it records checkpoints without stopping training.
+
+# Arguments
+- `best_loss::Float64`: incumbent loss. Use `Inf` to save the first observed
+  model.
+- `model_path::String`: path of the JLD2 file that receives the best model
+  state.
+
+# Examples
+```julia
+callback = SaveBest(Inf, "best_policy.jld2")
+train_multistage(policy, x0, subproblems, state_in, state_out, sampler;
+    record = (log, iter, model) -> callback(iter, model, mean(log.losses)))
+```
+"""
 mutable struct SaveBest <: Function
     best_loss::Float64
     model_path::String
@@ -428,6 +452,9 @@ _reset_sample_log!(sample_log::SampleLog) = empty!(sample_log)
 _reset_sample_log!(sample_log) = sample_log
 
 function _total_objective_value(model::JuMP.Model)
+    if model.is_model_dirty
+        return get(model.ext, :_last_obj, 0.0)
+    end
     try
         return objective_value(model)
     catch
@@ -575,6 +602,7 @@ mutable struct RolloutEvaluation <: Function
     stride::Int
     policy_state::Symbol
     integer_strategy::AbstractIntegerStrategy
+    gradient_fallback::AbstractGradientFallback
     last_objective_no_deficit::Float64
     last_violation_share::Float64
 end
@@ -588,6 +616,7 @@ function RolloutEvaluation(
     stride=1,
     policy_state::Symbol=:realized,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
     isempty(scenarios) && throw(
         ArgumentError(
@@ -607,6 +636,7 @@ function RolloutEvaluation(
         stride,
         policy_state,
         integer_strategy,
+        gradient_fallback,
         NaN,
         NaN,
     )
@@ -658,32 +688,45 @@ function (evaluation::RolloutEvaluation)(iter, model)
     iter % evaluation.stride == 0 || return nothing
     total = 0.0
     total_no_deficit = 0.0
+    n_success = 0
     for scenario in evaluation.scenarios
-        total += if evaluation.policy_state === :realized
-            simulate_multistage(
-                evaluation.subproblems,
-                evaluation.state_params_in,
-                evaluation.state_params_out,
-                evaluation.initial_state,
-                scenario,
-                model;
-                integer_strategy=evaluation.integer_strategy,
-            )
-        else
-            _simulate_multistage_target_feedback(
-                evaluation.subproblems,
-                evaluation.state_params_in,
-                evaluation.state_params_out,
-                evaluation.initial_state,
-                scenario,
-                model,
-                evaluation.integer_strategy,
-            )
+        obj = try
+            if evaluation.policy_state === :realized
+                simulate_multistage(
+                    evaluation.subproblems,
+                    evaluation.state_params_in,
+                    evaluation.state_params_out,
+                    evaluation.initial_state,
+                    scenario,
+                    model;
+                    integer_strategy=evaluation.integer_strategy,
+                )
+            else
+                _simulate_multistage_target_feedback(
+                    evaluation.subproblems,
+                    evaluation.state_params_in,
+                    evaluation.state_params_out,
+                    evaluation.initial_state,
+                    scenario,
+                    model,
+                    evaluation.integer_strategy,
+                )
+            end
+        catch e
+            handle_rollout_error(evaluation.gradient_fallback, e, iter)
+            nothing
         end
+        isnothing(obj) && continue
+        total += obj
         total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
+        n_success += 1
     end
-    objective = total / length(evaluation.scenarios)
-    evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
+    if n_success == 0
+        @warn "All rollout scenarios failed at iter $iter"
+        return nothing
+    end
+    objective = total / n_success
+    evaluation.last_objective_no_deficit = total_no_deficit / n_success
     evaluation.last_violation_share = _target_violation_share(
         objective, evaluation.last_objective_no_deficit
     )
@@ -909,8 +952,15 @@ stage subproblems into `model`.  Variables are renamed with a `#t` suffix to avo
 conflicts.  Stage coupling is enforced by identifying the realized state variable of
 stage `t` with the incoming state parameter of stage `t+1`.
 
-Returns `(model, uncertainties_new)` where `uncertainties_new` maps the original
-uncertainty parameter refs to the new refs in the combined model.
+`uncertainties` accepts both sampling formats (see [`sample`](@ref)):
+
+- **Per-unit pools**: `Vector{Vector{Tuple{VariableRef, Vector{T}}}}` — one pool per
+  parameter, drawing independently per parameter.
+- **Joint-scenario pools**: `Vector{Vector{Vector{Tuple{VariableRef, T}}}}` — pre-built
+  joint scenarios preserving cross-parameter correlations.
+
+Returns `(model, uncertainties_new)` where `uncertainties_new` has the same format as
+the input but with variable refs remapped to the deterministic-equivalent model.
 """
 function deterministic_equivalent!(
     model::JuMP.Model,
@@ -918,12 +968,9 @@ function deterministic_equivalent!(
     state_params_in::Vector{Vector{Any}},
     state_params_out::Vector{Vector{Tuple{Any,VariableRef}}},
     initial_state::Vector{Float64},
-    uncertainties::Vector{Vector{Tuple{VariableRef,Vector{Float64}}}},
+    uncertainties,
 )
     set_objective_sense(model, objective_sense(subproblems[1]))
-    uncertainties_new = Vector{Vector{Tuple{VariableRef,Vector{Float64}}}}(
-        undef, length(uncertainties)
-    )
     var_src_to_dest = Dict{VariableRef,VariableRef}()
     for t in 1:length(subproblems)
         DecisionRules.add_child_model_vars!(
@@ -944,31 +991,52 @@ function deterministic_equivalent!(
         )
     end
 
-    if uncertainties[1][1][1] isa VariableRef
-        # use var_src_to_dest
-        for t in 1:length(subproblems)
-            uncertainties_new[t] = Vector{Tuple{VariableRef,Vector{Float64}}}(
-                undef, length(uncertainties[t])
-            )
-            for (i, tup) in enumerate(uncertainties[t])
-                ky, val = tup
-                uncertainties_new[t][i] = (var_src_to_dest[ky], val)
-            end
-        end
-    else
-        # use cons_to_cons
-        for t in 1:length(subproblems)
-            uncertainties_new[t] = Vector{Tuple{VariableRef,Vector{Float64}}}(
-                undef, length(uncertainties[t])
-            )
-            for (i, tup) in enumerate(uncertainties[t])
-                ky, val = tup
-                uncertainties_new[t] = (cons_to_cons[t][ky], val)
-            end
-        end
-    end
-
+    uncertainties_new = _remap_uncertainties(uncertainties, var_src_to_dest, cons_to_cons)
     return model, uncertainties_new
+end
+
+"""
+    _remap_uncertainties(uncertainties, var_src_to_dest, cons_to_cons)
+
+Replace source-model `VariableRef` keys in an uncertainty pool with their
+destination-model counterparts (using the variable or constraint mapping built
+by [`deterministic_equivalent!`](@ref)).
+
+Two methods dispatch on the pool format:
+
+- **Per-unit pools** (`Vector{Vector{Tuple{VariableRef, Vector{T}}}}`):
+  each stage maps `[(param₁, [v₁, …]), …]` independently.
+- **Joint-scenario pools** (`Vector{Vector{Vector{Tuple{VariableRef, T}}}}`):
+  each stage maps `[[scenario₁…], [scenario₂…], …]` preserving the grouped
+  structure.
+
+This is an internal helper; users interact with it indirectly through
+[`deterministic_equivalent!`](@ref).
+"""
+function _remap_uncertainties(
+    uncertainties::Vector{Vector{Tuple{VariableRef,Vector{T}}}},
+    var_src_to_dest, cons_to_cons,
+) where {T<:Real}
+    remap = if uncertainties[1][1][1] isa VariableRef
+        ky -> var_src_to_dest[ky]
+    else
+        ky -> cons_to_cons[1][ky]
+    end
+    return [
+        [(remap(ky), val) for (ky, val) in uncertainties[t]]
+        for t in eachindex(uncertainties)
+    ]
+end
+
+function _remap_uncertainties(
+    uncertainties::Vector{Vector{Vector{Tuple{VariableRef,T}}}},
+    var_src_to_dest, cons_to_cons,
+) where {T<:Real}
+    remap = ky -> haskey(var_src_to_dest, ky) ? var_src_to_dest[ky] : cons_to_cons[1][ky]
+    return [
+        [[(remap(ky), val) for (ky, val) in scenario] for scenario in uncertainties[t]]
+        for t in eachindex(uncertainties)
+    ]
 end
 
 function find_variables(model::JuMP.Model, variable_name_parts::Vector{S}) where {S}

@@ -21,27 +21,32 @@ end
 # Parameters
 case_name = "bolivia"                    # bolivia, case3
 formulation = "ACPPowerModel"            # SOCWRConicPowerModel, DCPPowerModel, ACPPowerModel
-num_stages = 96                          # 96, 48
+num_stages = parse(Int, get(ENV, "DR_NUM_STAGES", "126"))
 window_size = 12                       # 12, 6
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
-save_file = "$(case_name)-$(formulation)-h$(num_stages)-shooting-w$(window_size)-$(now())"
 formulation_file = formulation * ".mof.json"
 
 # Training parameters
-num_epochs = 30
+num_epochs = parse(Int, get(ENV, "DR_NUM_EPOCHS", "80"))
 num_batches = 100
 _num_train_per_batch = 1
 activation = sigmoid                     # tanh, identity, relu, sigmoid
 layers = Int64[128, 128]
 ensure_feasibility = non_ensurance
-optimizers = [Flux.Adam()]
+grad_clip = parse(Float32, get(ENV, "DR_GRAD_CLIP", "0"))
+optimizers = if grad_clip > 0
+    [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
+else
+    [Flux.Adam()]
+end
 pre_trained_model = nothing
 penalty_l2 = :auto
-penalty_l1 = nothing
-# Annealed target-penalty multipliers (relative to the :auto base above); set to `nothing`
-# to train with the constant penalties the models were built with.
-penalty_schedule = :default_annealed
+penalty_l1 = :auto
+penalty_schedule = get(ENV, "DR_PENALTY_SCHEDULE", "annealed") == "annealed" ? :default_annealed : nothing
+clip_tag = grad_clip > 0 ? "-clip$(Int(grad_clip))" : ""
+sched_tag = isnothing(penalty_schedule) ? "-const" : "-anneal"
+save_file = "$(case_name)-$(formulation)-h$(num_stages)-shooting-w$(window_size)$(clip_tag)$(sched_tag)-$(now())"
 num_eval_scenarios = 4
 eval_every = 25
 
@@ -87,6 +92,7 @@ lg = WandbLogger(;
         "activation" => string(activation),
         "ensure_feasibility" => string(ensure_feasibility),
         "optimizer" => string(optimizers),
+        "grad_clip" => grad_clip,
         "training_method" => "multiple_shooting",
         "window_size" => string(window_size),
         "penalty_l1" => string(penalty_l1),
@@ -100,7 +106,7 @@ lg = WandbLogger(;
 
 # Define Model
 # Policy architecture: LSTM processes uncertainty, Dense combines with previous state
-num_uncertainties = length(uncertainty_samples[1])
+num_uncertainties = length(uncertainty_samples[1][1])
 models = state_conditioned_policy(
     num_uncertainties,
     num_hydro,
@@ -145,7 +151,7 @@ best_obj = mean(objective_values)
 
 model_path = joinpath(model_dir, save_file * ".jld2")
 save_control = SaveBest(best_obj, model_path)
-convergence_criterium = StallingCriterium(200, best_obj, 0)
+convergence_criterium = StallingCriterium(num_epochs * num_batches, best_obj, 0)
 
 Random.seed!(8789)
 eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:num_eval_scenarios]
@@ -170,7 +176,7 @@ train_multiple_shooting(
     models,
     initial_state,
     windows,
-    () -> uncertainty_samples;
+    uncertainty_samples;
     num_batches=num_epochs * num_batches,
     num_train_per_batch=_num_train_per_batch,
     optimizer=first(optimizers),

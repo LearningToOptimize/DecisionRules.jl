@@ -2,8 +2,16 @@
 Evaluate non-neural baselines for the inventory control problem.
 
 Evaluates base-stock and random policies for both relaxed and integer cases.
+
+Pass a run ID as the first CLI argument, or omit to generate one from the
+current timestamp:
+
+```bash
+julia --project=. evaluate_inventory.jl 20260619_231417
+```
 """
 
+using Dates
 using DecisionRules
 using JuMP
 using Flux
@@ -11,6 +19,9 @@ using CSV, DataFrames
 using Random, Statistics
 
 include(joinpath(@__DIR__, "build_inventory_problem.jl"))
+
+const RUN_ID = isempty(ARGS) ?
+    Dates.format(Dates.now(), "yyyymmdd_HHMMss") : ARGS[1]
 
 const N_EVAL = 300
 
@@ -156,7 +167,7 @@ function evaluate_baselines(; tag::String, integer::Bool)
     println("  Mean: $(round(mean(rand_costs), digits=1)) ± $(round(std(rand_costs), digits=1))")
 
     # --- Save results ---
-    result_dir = joinpath(@__DIR__, "results")
+    result_dir = joinpath(@__DIR__, "results", RUN_ID)
     mkpath(result_dir)
 
     df_bs_traj = DataFrame(bs_traj, [Symbol("t$i") for i in 0:INVENTORY_T])
@@ -184,4 +195,4 @@ end
 evaluate_baselines(tag="relaxed", integer=false)
 println()
 evaluate_baselines(tag="integer", integer=true)
-println("\nAll baseline results saved to results/")
+println("\nAll baseline results saved to results/$RUN_ID/")
