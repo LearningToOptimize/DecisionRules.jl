@@ -464,32 +464,28 @@ using Statistics, Random
 #
 # ### Summary
 #
-# The TS-DDR/TS-LDR costs below are from 4-scenario rollout evaluations
-# recorded during training (operational cost excluding target-deficit
-# penalty).  The SDDP cost is from 100 out-of-sample simulations.
-# Use `evaluate_hydro_policies.jl` to re-evaluate all policies on a
-# common large scenario set for a rigorous comparison.
+# The TS-DDR costs below are from 100-scenario out-of-sample evaluations
+# using `evaluate_hydro_policies.jl` (operational cost excluding
+# target-deficit penalty).  The SDDP cost is from the same 100
+# out-of-sample simulation protocol.
 #
-# | Method | Policy | Mean Cost | N | Violation % | Notes |
-# |:-------|:------:|----------:|--:|------------:|:------|
-# | TS-LDR (DE) | linear | — | — | — | Linear baseline; train with `train_ldr_hydropowermodels.jl` |
-# | TS-DDR (DE) | LSTM | 321 189 | 4 | 48.66% | Strongest gradient but open-loop targets |
-# | TS-DDR (stage-wise) | LSTM | 364 110 | 4 | 0.59% | Closed-loop; targets are followable |
-# | TS-DDR (shooting w=12) | LSTM | 319 462 | 4 | 36.18% | Best TS-DDR cost; 8 windows of 12 stages |
-# | SDDP (SOC-WR / ACP) | cuts | 303 684 | 100 | — | 126 stages (96 + 30 margin) |
+# | Method | Policy | Mean Cost | Std | N | Notes |
+# |:-------|:------:|----------:|----:|--:|:------|
+# | TS-DDR (DE) | LSTM | 325 540 | 6 266 | 100 | Coupled horizon, open-loop targets |
+# | TS-DDR (DE, anneal) | LSTM | 324 445 | 6 134 | 100 | Penalty annealing helps slightly |
+# | TS-DDR (shooting w=12) | LSTM | 323 289 | 5 593 | 100 | Windowed coupling |
+# | TS-DDR (shooting w=12, anneal) | LSTM | 322 812 | 6 081 | 100 | Best shooting variant |
+# | TS-DDR (stage-wise, anneal) | LSTM | **321 543** | 6 214 | 100 | **Best TS-DDR** |
+# | SDDP (SOC-WR / ACP) | cuts | **303 684** | — | 100 | 126 stages (96 + 30 margin) |
 #
-# The DE achieves a good objective but nearly half its cost comes from
-# target-violation slack, meaning the policy's targets are not physically
-# realizable stage-by-stage.  Stage-wise subproblems produce a policy
-# whose targets are almost perfectly followable (0.59% violation) but at
-# the price of a higher operational cost.  Multiple shooting strikes a
-# middle ground.  TS-LDR provides a linear baseline — the gap between
-# TS-LDR and TS-DDR quantifies the value of nonlinear policy expressiveness.
+# The subproblems method with penalty annealing achieves the best TS-DDR
+# cost (321 543), about 5.9% above SDDP (303 684).  Penalty annealing
+# is essential for the subproblems method: without it, the cost jumps to
+# 368 498.  All three methods with annealing converge to similar costs
+# (321K–325K range), with subproblems slightly ahead.
 #
-# SDDP with inconsistent formulations provides a complementary baseline:
-# it can leverage convex cuts but must simulate under the true nonconvex
-# physics.  Note that SDDP trains on **126 stages** (96 real + 30 margin)
-# which gives its value function foresight beyond the evaluation horizon,
-# while TS-DDR/TS-LDR train on 96 stages only.  The reservoir and
-# generation trajectories show how each method manages the hydro–thermal
-# trade-off differently.
+# SDDP with inconsistent formulations provides a strong baseline: it
+# leverages convex cuts and trains on **126 stages** (96 real + 30 margin),
+# giving its value function foresight beyond the evaluation horizon.
+# TS-DDR trains on 96 stages only.  Extending to 126 stages and training
+# longer may close part of the remaining gap.
