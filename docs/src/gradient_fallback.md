@@ -27,7 +27,7 @@ these errors at three levels:
 - [`ZeroGradientFallback`](@ref) — log a warning, return zero gradients, continue training (default)
 - [`ErrorGradientFallback`](@ref) — re-throw the error (useful in tests)
 
-See the [API Reference](@ref) for full docstrings.
+See the [API Reference](api.md) for full docstrings.
 
 ## Usage
 
