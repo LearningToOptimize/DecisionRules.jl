@@ -23,11 +23,11 @@ these errors at three levels:
 
 ## Built-in fallback types
 
-```@docs
-AbstractGradientFallback
-ZeroGradientFallback
-ErrorGradientFallback
-```
+- [`AbstractGradientFallback`](@ref) — abstract supertype for all fallback strategies
+- [`ZeroGradientFallback`](@ref) — log a warning, return zero gradients, continue training (default)
+- [`ErrorGradientFallback`](@ref) — re-throw the error (useful in tests)
+
+See the [API Reference](@ref) for full docstrings.
 
 ## Usage
 
