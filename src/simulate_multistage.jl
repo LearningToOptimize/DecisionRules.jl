@@ -301,16 +301,8 @@ function ChainRulesCore.rrule(
                 )
             end
         catch e
-            msg = sprint(showerror, e)
-            throw(
-                ArgumentError(
-                    "Differentiating get_next_state requires a DiffOpt-enabled model " *
-                    "because the closed-loop rollout needs solution sensitivities of the " *
-                    "realized state variables. Use an appropriate DiffOpt wrapper for the " *
-                    "stage subproblems (for target-slack conic models, " *
-                    "`DiffOpt.conic_diff_model(...)`), or use the deterministic-equivalent " *
-                    "training path when only target duals are needed. Original error: $msg",
-                ),
+            return handle_gradient_error(
+                _DEFAULT_GRADIENT_FALLBACK, e, length(state_in), length(state_out_target)
             )
         end
     end
@@ -1186,12 +1178,18 @@ function train_multistage(
     record=default_record,
     penalty_schedule=nothing,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
+    if gradient_fallback isa ZeroGradientFallback
+        @info "Training with ZeroGradientFallback: solver/differentiation errors will be " *
+              "caught and the iteration skipped (zero gradient). Pass " *
+              "`gradient_fallback=ErrorGradientFallback()` to throw instead, or implement " *
+              "a custom `AbstractGradientFallback` subtype."
+    end
+
     record = _resolve_record(record, record_loss)
-    # Flux keeps optimizer state separately from the model parameters.
     opt_state = Flux.setup(optimizer, model)
 
-    # Resolve the target-penalty schedule once before the training loop.
     schedule = _resolve_penalty_schedule(penalty_schedule, num_batches)
     penalty_bases = if isnothing(schedule)
         nothing
@@ -1210,35 +1208,39 @@ function train_multistage(
         end
         num_train_per_batch = adjust_hyperparameters(iter, opt_state, num_train_per_batch)
 
-        # Draw the Monte Carlo batch used to approximate the expectation.
         uncertainty_samples = [sample(uncertainty_sampler) for _ in 1:num_train_per_batch]
 
-        # Accumulate the sampled objective inside the AD closure.
         objective = 0.0
         _reset_sample_log!(sample_log)
-        grads = Flux.gradient(model) do m
-            for s in 1:num_train_per_batch
-                # Reset recurrent Flux layers before each sampled trajectory.
-                Flux.reset!(m)
-
-                # The stage-wise rollout differentiates through each stage solve.
-                objective += simulate_multistage(
-                    subproblems,
-                    state_params_in,
-                    state_params_out,
-                    initial_state,
-                    uncertainty_samples[s],
-                    m;
-                    integer_strategy=integer_strategy,
-                )
-                @ignore_derivatives sample_log(s, subproblems)
+        grads = try
+            Flux.gradient(model) do m
+                for s in 1:num_train_per_batch
+                    Flux.reset!(m)
+                    objective += simulate_multistage(
+                        subproblems,
+                        state_params_in,
+                        state_params_out,
+                        initial_state,
+                        uncertainty_samples[s],
+                        m;
+                        integer_strategy=integer_strategy,
+                    )
+                    @ignore_derivatives sample_log(s, subproblems)
+                end
+                objective /= num_train_per_batch
+                return objective
             end
-            objective /= num_train_per_batch
-            return objective
+        catch e
+            if handle_training_error(gradient_fallback, e, iter)
+                nothing
+            end
         end
         record(sample_log, iter, model) && break
 
-        # Convert ChainRules tangents to the structure expected by Flux.update!.
+        if isnothing(grads)
+            continue
+        end
+
         grad = materialize_tangent(grads[1])
         Flux.update!(opt_state, model, grad)
     end
@@ -1393,6 +1395,7 @@ function train_multistage(
     penalty_schedule=nothing,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
     score_function::Union{Nothing,ScoreFunctionConfig,ScoreFunctionSchedule}=nothing,
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
     record = _resolve_record(record, record_loss)
     opt_state = Flux.setup(optimizer, model)
@@ -1437,52 +1440,62 @@ function train_multistage(
 
         objective = 0.0
         _reset_sample_log!(sample_log)
-        grads = Flux.gradient(model) do m
-            for s in 1:num_train_per_batch
-                Flux.reset!(m)
-                x0 = Float32.(initial_state)
-                states = vcat([x0], accumulate(
-                    uncertainty_samples_vec[s]; init=x0
-                ) do prev, ξ
-                    m(vcat(ξ, prev))
-                end)
+        grads = try
+            Flux.gradient(model) do m
+                for s in 1:num_train_per_batch
+                    Flux.reset!(m)
+                    x0 = Float32.(initial_state)
+                    states = vcat([x0], accumulate(
+                        uncertainty_samples_vec[s]; init=x0
+                    ) do prev, ξ
+                        m(vcat(ξ, prev))
+                    end)
 
-                dual_obj = simulate_multistage(
-                    det_equivalent, state_params_in, state_params_out,
-                    uncertainty_samples[s], states;
-                    integer_strategy=integer_strategy)
-                @ignore_derivatives sample_log(s, det_equivalent)
-                objective += score_params.alpha * dual_obj
+                    dual_obj = simulate_multistage(
+                        det_equivalent, state_params_in, state_params_out,
+                        uncertainty_samples[s], states;
+                        integer_strategy=integer_strategy)
+                    @ignore_derivatives sample_log(s, det_equivalent)
+                    objective += score_params.alpha * dual_obj
 
-                if score_params.active
-                    advantages, perturbations = @ignore_derivatives(
-                        _score_function_rollouts(
-                            sf_cfg,
-                            initial_state,
-                            uncertainty_samples[s],
-                            states;
-                            perturbation_std = score_params.perturbation_std,
-                            num_rollouts = score_params.num_rollouts,
+                    if score_params.active
+                        advantages, perturbations = @ignore_derivatives(
+                            _score_function_rollouts(
+                                sf_cfg,
+                                initial_state,
+                                uncertainty_samples[s],
+                                states;
+                                perturbation_std = score_params.perturbation_std,
+                                num_rollouts = score_params.num_rollouts,
+                            )
                         )
-                    )
-                    for rollout in 1:score_params.num_rollouts
-                        advantage = @ignore_derivatives advantages[rollout]
-                        perturbation = @ignore_derivatives perturbations[rollout]
-                        surrogate = _score_function_surrogate(
-                            advantage,
-                            perturbation,
-                            states,
-                            score_params.perturbation_std,
-                        )
-                        objective += score_params.score_weight *
-                            surrogate / Float32(score_params.num_rollouts)
+                        for rollout in 1:score_params.num_rollouts
+                            advantage = @ignore_derivatives advantages[rollout]
+                            perturbation = @ignore_derivatives perturbations[rollout]
+                            surrogate = _score_function_surrogate(
+                                advantage,
+                                perturbation,
+                                states,
+                                score_params.perturbation_std,
+                            )
+                            objective += score_params.score_weight *
+                                surrogate / Float32(score_params.num_rollouts)
+                        end
                     end
                 end
+                objective /= num_train_per_batch
+                return objective
             end
-            objective /= num_train_per_batch
-            return objective
+        catch e
+            if handle_training_error(gradient_fallback, e, iter)
+                nothing
+            end
         end
         record(sample_log, iter, model) && break
+
+        if isnothing(grads)
+            continue
+        end
 
         Flux.update!(opt_state, model, materialize_tangent(grads[1]))
     end

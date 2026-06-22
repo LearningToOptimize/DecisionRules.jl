@@ -953,6 +953,7 @@ function train_multiple_shooting(
     get_objective_no_target_deficit=get_objective_no_target_deficit,
     penalty_schedule=nothing,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
     opt_state = Flux.setup(optimizer, model)
 
@@ -981,7 +982,8 @@ function train_multiple_shooting(
 
         objective = 0.0
 
-        grads = Flux.gradient(model) do m
+        grads = try
+        Flux.gradient(model) do m
             objective = 0.0
             for _ in 1:num_train_per_batch
                 @ignore_derivatives Flux.reset!(m)
@@ -1002,6 +1004,11 @@ function train_multiple_shooting(
             end
             objective /= num_train_per_batch
             return objective
+        end
+        catch e
+            if handle_training_error(gradient_fallback, e, iter)
+                nothing
+            end
         end
 
         eval_loss = @ignore_derivatives begin
@@ -1055,6 +1062,10 @@ function train_multiple_shooting(
 
         record_loss(iter, model, eval_loss, "metrics/loss") && break
         record_loss(iter, model, objective, "metrics/training_loss") && break
+
+        if isnothing(grads)
+            continue
+        end
 
         grad = materialize_tangent(grads[1])
         Flux.update!(opt_state, model, grad)

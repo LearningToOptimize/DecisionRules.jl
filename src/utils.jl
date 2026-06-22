@@ -602,6 +602,7 @@ mutable struct RolloutEvaluation <: Function
     stride::Int
     policy_state::Symbol
     integer_strategy::AbstractIntegerStrategy
+    gradient_fallback::AbstractGradientFallback
     last_objective_no_deficit::Float64
     last_violation_share::Float64
 end
@@ -615,6 +616,7 @@ function RolloutEvaluation(
     stride=1,
     policy_state::Symbol=:realized,
     integer_strategy::AbstractIntegerStrategy=NoIntegerStrategy(),
+    gradient_fallback::AbstractGradientFallback=ZeroGradientFallback(),
 )
     isempty(scenarios) && throw(
         ArgumentError(
@@ -634,6 +636,7 @@ function RolloutEvaluation(
         stride,
         policy_state,
         integer_strategy,
+        gradient_fallback,
         NaN,
         NaN,
     )
@@ -685,32 +688,45 @@ function (evaluation::RolloutEvaluation)(iter, model)
     iter % evaluation.stride == 0 || return nothing
     total = 0.0
     total_no_deficit = 0.0
+    n_success = 0
     for scenario in evaluation.scenarios
-        total += if evaluation.policy_state === :realized
-            simulate_multistage(
-                evaluation.subproblems,
-                evaluation.state_params_in,
-                evaluation.state_params_out,
-                evaluation.initial_state,
-                scenario,
-                model;
-                integer_strategy=evaluation.integer_strategy,
-            )
-        else
-            _simulate_multistage_target_feedback(
-                evaluation.subproblems,
-                evaluation.state_params_in,
-                evaluation.state_params_out,
-                evaluation.initial_state,
-                scenario,
-                model,
-                evaluation.integer_strategy,
-            )
+        obj = try
+            if evaluation.policy_state === :realized
+                simulate_multistage(
+                    evaluation.subproblems,
+                    evaluation.state_params_in,
+                    evaluation.state_params_out,
+                    evaluation.initial_state,
+                    scenario,
+                    model;
+                    integer_strategy=evaluation.integer_strategy,
+                )
+            else
+                _simulate_multistage_target_feedback(
+                    evaluation.subproblems,
+                    evaluation.state_params_in,
+                    evaluation.state_params_out,
+                    evaluation.initial_state,
+                    scenario,
+                    model,
+                    evaluation.integer_strategy,
+                )
+            end
+        catch e
+            handle_rollout_error(evaluation.gradient_fallback, e, iter)
+            nothing
         end
+        isnothing(obj) && continue
+        total += obj
         total_no_deficit += get_objective_no_target_deficit(evaluation.subproblems)
+        n_success += 1
     end
-    objective = total / length(evaluation.scenarios)
-    evaluation.last_objective_no_deficit = total_no_deficit / length(evaluation.scenarios)
+    if n_success == 0
+        @warn "All rollout scenarios failed at iter $iter"
+        return nothing
+    end
+    objective = total / n_success
+    evaluation.last_objective_no_deficit = total_no_deficit / n_success
     evaluation.last_violation_share = _target_violation_share(
         objective, evaluation.last_objective_no_deficit
     )

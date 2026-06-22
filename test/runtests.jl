@@ -2850,4 +2850,227 @@ include("test_score_function.jl")
             @test_skip false
         end
     end
+
+    @testset "GradientFallback" begin
+        @testset "type hierarchy and exports" begin
+            @test ZeroGradientFallback() isa AbstractGradientFallback
+            @test ErrorGradientFallback() isa AbstractGradientFallback
+        end
+
+        @testset "ZeroGradientFallback returns zero cotangents" begin
+            fb = ZeroGradientFallback()
+            result = @test_logs (:warn,) DecisionRules.handle_gradient_error(
+                fb, ErrorException("test"), 3, 2
+            )
+            @test result[5] == zeros(3)
+            @test result[6] == zeros(2)
+            @test result[1] == ChainRulesCore.NoTangent()
+        end
+
+        @testset "ErrorGradientFallback rethrows" begin
+            fb = ErrorGradientFallback()
+            @test_throws ErrorException DecisionRules.handle_gradient_error(
+                fb, ErrorException("test"), 3, 2
+            )
+        end
+
+        @testset "handle_training_error" begin
+            @test_logs (:warn,) DecisionRules.handle_training_error(
+                ZeroGradientFallback(), ErrorException("test"), 1
+            ) == true
+            @test_throws ErrorException DecisionRules.handle_training_error(
+                ErrorGradientFallback(), ErrorException("test"), 1
+            )
+        end
+
+        @testset "handle_rollout_error" begin
+            @test_logs (:warn,) DecisionRules.handle_rollout_error(
+                ZeroGradientFallback(), ErrorException("test"), 1
+            ) == true
+            @test_throws ErrorException DecisionRules.handle_rollout_error(
+                ErrorGradientFallback(), ErrorException("test"), 1
+            )
+        end
+
+        @testset "custom fallback subtype" begin
+            struct CountingFallback <: AbstractGradientFallback
+                count::Ref{Int}
+            end
+            function DecisionRules.handle_gradient_error(fb::CountingFallback, e, n_in, n_out)
+                fb.count[] += 1
+                return DecisionRules._zero_cotangents(n_in, n_out)
+            end
+            function DecisionRules.handle_training_error(fb::CountingFallback, e, iter)
+                fb.count[] += 1
+                return true
+            end
+            function DecisionRules.handle_rollout_error(fb::CountingFallback, e, iter)
+                fb.count[] += 1
+                return true
+            end
+
+            fb = CountingFallback(Ref(0))
+            DecisionRules.handle_gradient_error(fb, ErrorException("x"), 2, 2)
+            @test fb.count[] == 1
+            DecisionRules.handle_training_error(fb, ErrorException("x"), 1)
+            @test fb.count[] == 2
+            DecisionRules.handle_rollout_error(fb, ErrorException("x"), 1)
+            @test fb.count[] == 3
+        end
+
+        @testset "train_multistage accepts gradient_fallback kwarg" begin
+            subproblems, spi, spo, usamples, _ = let
+                subs = JuMP.Model[]
+                spi_vec = Vector{Any}[]
+                spo_vec = Vector{Tuple{Any,VariableRef}}[]
+                us_vec = Vector{Tuple{VariableRef,Vector{Float64}}}[]
+                for d in [4.0, 5.0]
+                    s, si, so, sov, u = build_subproblem(d; subproblem=quiet_conic_ipopt_model())
+                    push!(subs, s)
+                    push!(spi_vec, [si])
+                    push!(spo_vec, [(so, sov)])
+                    push!(us_vec, [(u, [1.0, 2.0, 3.0])])
+                end
+                subs, spi_vec, spo_vec, us_vec, [5.0]
+            end
+            policy = dense_multilayer_nn(2, 1, [8]; activation=Flux.relu)
+
+            model_out = train_multistage(
+                policy, [5.0], subproblems, spi, spo, usamples;
+                num_batches=2,
+                num_train_per_batch=1,
+                optimizer=Flux.Adam(0.01),
+                gradient_fallback=ErrorGradientFallback(),
+            )
+            @test model_out isa Any
+
+            model_out2 = train_multistage(
+                policy, [5.0], subproblems, spi, spo, usamples;
+                num_batches=2,
+                num_train_per_batch=1,
+                optimizer=Flux.Adam(0.01),
+                gradient_fallback=ZeroGradientFallback(),
+            )
+            @test model_out2 isa Any
+        end
+
+        @testset "RolloutEvaluation accepts gradient_fallback kwarg" begin
+            subproblems, spi, spo, usamples, _ = let
+                subs = JuMP.Model[]
+                spi_vec = Vector{Any}[]
+                spo_vec = Vector{Tuple{Any,VariableRef}}[]
+                us_vec = Vector{Tuple{VariableRef,Vector{Float64}}}[]
+                for d in [4.0, 5.0]
+                    s, si, so, sov, u = build_subproblem(d; subproblem=quiet_conic_ipopt_model())
+                    push!(subs, s)
+                    push!(spi_vec, [si])
+                    push!(spo_vec, [(so, sov)])
+                    push!(us_vec, [(u, [1.0, 2.0, 3.0])])
+                end
+                subs, spi_vec, spo_vec, us_vec, [5.0]
+            end
+            policy = dense_multilayer_nn(2, 1, [8]; activation=Flux.relu)
+
+            eval_scenarios = [sample(usamples) for _ in 1:2]
+            re = RolloutEvaluation(
+                subproblems, spi, spo, [5.0], eval_scenarios;
+                stride=1, policy_state=:realized,
+                gradient_fallback=ErrorGradientFallback(),
+            )
+            re(1, policy)
+            @test isfinite(re.last_objective_no_deficit)
+
+            re2 = RolloutEvaluation(
+                subproblems, spi, spo, [5.0], eval_scenarios;
+                stride=1, policy_state=:realized,
+                gradient_fallback=ZeroGradientFallback(),
+            )
+            re2(1, policy)
+            @test isfinite(re2.last_objective_no_deficit)
+        end
+    end
+
+    @testset "Uncertainty sampling" begin
+        m = quiet_highs_model()
+        @variable(m, p1 in MOI.Parameter(0.0))
+        @variable(m, p2 in MOI.Parameter(0.0))
+        T = 3
+
+        @testset "independent pool: each param drawn independently" begin
+            indep_pool = [
+                [(p1, [1.0, 2.0, 3.0]), (p2, [10.0, 20.0, 30.0])]
+                for _ in 1:T
+            ]
+            Random.seed!(42)
+            N = 3000
+            trajectories = [sample(indep_pool) for _ in 1:N]
+
+            @test length(trajectories[1]) == T
+            @test length(trajectories[1][1]) == 2
+
+            # Values always come from the declared support
+            for traj in trajectories, stage in traj
+                @test stage[1][2] in [1.0, 2.0, 3.0]
+                @test stage[2][2] in [10.0, 20.0, 30.0]
+            end
+
+            # k^n = 9 combinations possible; independent draws break correlation
+            combos = Set((s[1][2], s[2][2]) for traj in trajectories for s in traj)
+            @test length(combos) == 9
+        end
+
+        @testset "joint pool: all params from same scenario" begin
+            joint_pool = [
+                [[(p1, 1.0), (p2, 10.0)],
+                 [(p1, 2.0), (p2, 20.0)],
+                 [(p1, 3.0), (p2, 30.0)]]
+                for _ in 1:T
+            ]
+            Random.seed!(42)
+            N = 3000
+            trajectories = [sample(joint_pool) for _ in 1:N]
+
+            @test length(trajectories[1]) == T
+            @test length(trajectories[1][1]) == 2
+
+            # Only k=3 combinations possible (never cross-scenario combos)
+            combos = Set((s[1][2], s[2][2]) for traj in trajectories for s in traj)
+            @test combos == Set([(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)])
+        end
+
+        @testset "trajectory sampler: temporal conditioning" begin
+            calls = Tuple{Int, Vector}[]
+            function my_sampler(t, past)
+                push!(calls, (t, copy(past)))
+                prev = isempty(past) ? 0.0 : past[end][1][2]
+                return [(p1, prev + 1.0)]
+            end
+
+            Random.seed!(42)
+            traj = sample(my_sampler, 3)
+
+            @test length(traj) == 3
+            @test traj[1][1][2] == 1.0   # 0 + 1
+            @test traj[2][1][2] == 2.0   # 1 + 1
+            @test traj[3][1][2] == 3.0   # 2 + 1
+
+            # Sampler received correct past at each stage
+            @test calls[1] == (1, [])
+            @test length(calls[2][2]) == 1
+            @test length(calls[3][2]) == 2
+        end
+
+        @testset "all formats produce same trajectory type" begin
+            indep_pool = [[(p1, [1.0]), (p2, [10.0])] for _ in 1:T]
+            joint_pool = [[[(p1, 1.0), (p2, 10.0)]] for _ in 1:T]
+            sampler_fn = (t, past) -> [(p1, 1.0), (p2, 10.0)]
+
+            t1 = sample(indep_pool)
+            t2 = sample(joint_pool)
+            t3 = sample(sampler_fn, T)
+
+            @test typeof(t1) == typeof(t2) == typeof(t3)
+            @test t1[1][1][2] == t2[1][1][2] == t3[1][1][2] == 1.0
+        end
+    end
 end
