@@ -1,13 +1,524 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl</title><meta name="title" content="Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl"/><meta property="og:title" content="Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl"/><meta property="twitter:title" content="Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl"/><meta name="description" content="Documentation for DecisionRules.jl."/><meta property="og:description" content="Documentation for DecisionRules.jl."/><meta property="twitter:description" content="Documentation for DecisionRules.jl."/><meta property="og:url" content="https://LearningToOptimize.github.io/DecisionRules.jl/examples/inventory/"/><meta property="twitter:url" content="https://LearningToOptimize.github.io/DecisionRules.jl/examples/inventory/"/><link rel="canonical" href="https://LearningToOptimize.github.io/DecisionRules.jl/examples/inventory/"/><script data-outdated-warner src="../../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="../.."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../../assets/documenter.js"></script><script src="../../search_index.js"></script><script src="../../siteinfo.js"></script><script src="../../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../../">DecisionRules.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../../">Home</a></li><li><a class="tocitem" href="../../algorithm/">Algorithm</a></li><li><span class="tocitem">Examples</span><ul><li><a class="tocitem" href="../hydro/">Hydropower Scheduling</a></li><li><a class="tocitem" href="../rocket/">Rocket Control</a></li><li class="is-active"><a class="tocitem" href>Stochastic Lot-Sizing (Integer Variables)</a><ul class="internal"><li><a class="tocitem" href="#Information-Pattern"><span>Information Pattern</span></a></li><li><a class="tocitem" href="#Inventory-Model"><span>Inventory Model</span></a></li><li><a class="tocitem" href="#Demand-Process"><span>Demand Process</span></a></li><li><a class="tocitem" href="#Integer-Postprocessing-Strategies"><span>Integer Postprocessing Strategies</span></a></li><li><a class="tocitem" href="#Relaxed-(Continuous)-Problem"><span>Relaxed (Continuous) Problem</span></a></li><li><a class="tocitem" href="#Integer-(MIP)-Problem"><span>Integer (MIP) Problem</span></a></li><li><a class="tocitem" href="#Runnable-Scripts"><span>Runnable Scripts</span></a></li></ul></li></ul></li><li><a class="tocitem" href="../../api/">API Reference</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">Examples</a></li><li class="is-active"><a href>Stochastic Lot-Sizing (Integer Variables)</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Stochastic Lot-Sizing (Integer Variables)</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/LearningToOptimize/DecisionRules.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/LearningToOptimize/DecisionRules.jl/blob/main/docs/src/examples/inventory.jl" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Inventory-Control-with-Ordering-Costs"><a class="docs-heading-anchor" href="#Inventory-Control-with-Ordering-Costs">Inventory Control with Ordering Costs</a><a id="Inventory-Control-with-Ordering-Costs-1"></a><a class="docs-heading-anchor-permalink" href="#Inventory-Control-with-Ordering-Costs" title="Permalink"></a></h1><p>This example studies a 12-period stochastic lot-sizing problem with two formulations — a <strong>relaxed</strong> (continuous) case and an <strong>integer</strong> (MIP) case with fixed ordering costs.  The comparison shows:</p><ol><li><strong>Relaxed problem</strong>: SDDP with a PAR(1) demand approximation is near-optimal and outperforms TS-DDR.</li><li><strong>Integer problem</strong>: TS-DDR with <code>FixedDiscreteIntegerStrategy</code> outperforms both SDDP and TS-DDR with <code>ContinuousRelaxationIntegerStrategy</code>, because SDDP and continuous relaxation both underestimate the fixed ordering cost.</li></ol><pre><code class="language- hljs">using DecisionRules
-using JuMP, HiGHS
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl</title><meta name="title" content="Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl"/><meta property="og:title" content="Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl"/><meta property="twitter:title" content="Stochastic Lot-Sizing (Integer Variables) · DecisionRules.jl"/><meta name="description" content="Documentation for DecisionRules.jl."/><meta property="og:description" content="Documentation for DecisionRules.jl."/><meta property="twitter:description" content="Documentation for DecisionRules.jl."/><meta property="og:url" content="https://LearningToOptimize.github.io/DecisionRules.jl/examples/inventory/"/><meta property="twitter:url" content="https://LearningToOptimize.github.io/DecisionRules.jl/examples/inventory/"/><link rel="canonical" href="https://LearningToOptimize.github.io/DecisionRules.jl/examples/inventory/"/><script data-outdated-warner src="../../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="../.."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../../assets/documenter.js"></script><script src="../../search_index.js"></script><script src="../../siteinfo.js"></script><script src="../../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../../">DecisionRules.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../../">Home</a></li><li><a class="tocitem" href="../../algorithm/">Algorithm</a></li><li><a class="tocitem" href="../../gradient_fallback/">Gradient Fallback</a></li><li><a class="tocitem" href="../../sampling/">Uncertainty Sampling</a></li><li><a class="tocitem" href="../../gpu_acceleration/">GPU Acceleration</a></li><li><span class="tocitem">Examples</span><ul><li><a class="tocitem" href="../hydro/">Hydropower Scheduling</a></li><li><a class="tocitem" href="../rocket/">Rocket Control</a></li><li class="is-active"><a class="tocitem" href>Stochastic Lot-Sizing (Integer Variables)</a><ul class="internal"><li><a class="tocitem" href="#Information-Pattern"><span>Information Pattern</span></a></li><li><a class="tocitem" href="#Complete-Stage-Model"><span>Complete Stage Model</span></a></li><li><a class="tocitem" href="#Parameters"><span>Parameters</span></a></li><li><a class="tocitem" href="#Demand-Process"><span>Demand Process</span></a></li><li><a class="tocitem" href="#Build-the-Continuous-and-Integer-Models"><span>Build the Continuous and Integer Models</span></a></li><li><a class="tocitem" href="#Integer-Sensitivity-Strategies"><span>Integer Sensitivity Strategies</span></a></li><li><a class="tocitem" href="#Score-Function-Correction"><span>Score-Function Correction</span></a></li><li><a class="tocitem" href="#Policy"><span>Policy</span></a></li><li><a class="tocitem" href="#Training-Calls"><span>Training Calls</span></a></li><li><a class="tocitem" href="#Evaluation"><span>Evaluation</span></a></li><li><a class="tocitem" href="#Experiment-Scripts"><span>Experiment Scripts</span></a></li></ul></li></ul></li><li><a class="tocitem" href="../../api/">API Reference</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">Examples</a></li><li class="is-active"><a href>Stochastic Lot-Sizing (Integer Variables)</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Stochastic Lot-Sizing (Integer Variables)</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/LearningToOptimize/DecisionRules.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/LearningToOptimize/DecisionRules.jl/blob/main/docs/src/examples/inventory.jl" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Stochastic-Lot-Sizing-with-Fixed-Ordering-Costs"><a class="docs-heading-anchor" href="#Stochastic-Lot-Sizing-with-Fixed-Ordering-Costs">Stochastic Lot-Sizing with Fixed Ordering Costs</a><a id="Stochastic-Lot-Sizing-with-Fixed-Ordering-Costs-1"></a><a class="docs-heading-anchor-permalink" href="#Stochastic-Lot-Sizing-with-Fixed-Ordering-Costs" title="Permalink"></a></h1><p>This example shows how to train target-state decision rules for a stochastic inventory problem with ex-ante ordering decisions.</p><p>The example has two purposes:</p><ol><li>show the complete optimization model before discussing implementation details; and</li><li>show the code in the same order a reader would run it.</li></ol><pre><code class="language-julia hljs">using DecisionRules
 using Flux
-using Statistics, Random</code></pre><h2 id="Information-Pattern"><a class="docs-heading-anchor" href="#Information-Pattern">Information Pattern</a><a id="Information-Pattern-1"></a><a class="docs-heading-anchor-permalink" href="#Information-Pattern" title="Permalink"></a></h2><p>At the beginning of a period, the controller observes current inventory and recent realized demand.  It does <strong>not</strong> observe current demand before ordering. The order is therefore ex-ante.  After ordering, demand is realized and becomes part of the state for the next period.</p><p>The state carried between periods is:</p><pre><code class="language-julia hljs">[net_inventory, last_demand, previous_demand]</code></pre><p>This lets a time-invariant policy infer the latent demand regime from recent observations without receiving a period counter or synthetic seasonal features.</p><h2 id="Inventory-Model"><a class="docs-heading-anchor" href="#Inventory-Model">Inventory Model</a><a id="Inventory-Model-1"></a><a class="docs-heading-anchor-permalink" href="#Inventory-Model" title="Permalink"></a></h2><h3 id="Relaxed-formulation"><a class="docs-heading-anchor" href="#Relaxed-formulation">Relaxed formulation</a><a id="Relaxed-formulation-1"></a><a class="docs-heading-anchor-permalink" href="#Relaxed-formulation" title="Permalink"></a></h3><p>The order quantity is continuous with no setup cost:</p><p class="math-container">\[0 \le q_t \le Q_{\max}, \qquad
-\text{cost}_t = c\,q_t + h\max(s_t,0) + p\max(-s_t,0).\]</p><h3 id="Integer-formulation"><a class="docs-heading-anchor" href="#Integer-formulation">Integer formulation</a><a id="Integer-formulation-1"></a><a class="docs-heading-anchor-permalink" href="#Integer-formulation" title="Permalink"></a></h3><p>A binary variable <span>$z_t \in \{0,1\}$</span> controls whether an order is placed. If <span>$z_t = 0$</span>, then <span>$q_t$</span> must be zero; if <span>$z_t = 1$</span>, the model pays a fixed setup cost <span>$K$</span>:</p><p class="math-container">\[0 \le q_t \le Q_{\max}\,z_t, \qquad
-\text{cost}_t = K\,z_t + c\,q_t + h\max(s_t,0) + p\max(-s_t,0).\]</p><p>In both cases, ordered units arrive before demand:</p><p class="math-container">\[s^{mid}_t = s_{t-1} + q_t, \qquad s_t = s^{mid}_t - d_t.\]</p><table><tr><th style="text-align: left">Parameter</th><th style="text-align: right">Value</th><th style="text-align: left">Meaning</th></tr><tr><td style="text-align: left"><span>$T$</span></td><td style="text-align: right">12</td><td style="text-align: left">periods</td></tr><tr><td style="text-align: left"><span>$K$</span></td><td style="text-align: right">500</td><td style="text-align: left">fixed order/setup cost (integer case)</td></tr><tr><td style="text-align: left"><span>$c$</span></td><td style="text-align: right">2</td><td style="text-align: left">unit ordering cost</td></tr><tr><td style="text-align: left"><span>$h$</span></td><td style="text-align: right">1</td><td style="text-align: left">holding cost</td></tr><tr><td style="text-align: left"><span>$p$</span></td><td style="text-align: right">25</td><td style="text-align: left">backlog penalty</td></tr><tr><td style="text-align: left"><span>$Q_{\max}$</span></td><td style="text-align: right">350</td><td style="text-align: left">order capacity</td></tr><tr><td style="text-align: left"><span>$s_0$</span></td><td style="text-align: right">30</td><td style="text-align: left">initial inventory</td></tr></table><h2 id="Demand-Process"><a class="docs-heading-anchor" href="#Demand-Process">Demand Process</a><a id="Demand-Process-1"></a><a class="docs-heading-anchor-permalink" href="#Demand-Process" title="Permalink"></a></h2><p>Each trajectory has a path-level phase shift <span>$\phi \sim \mathrm{Unif}\{0,\ldots,T-1\}$</span>, a persistent latent regime <span>$r_t \in \{-1,0,1\}$</span> (switch probability 0.04), and an autoregressive shock <span>$\epsilon_t$</span>:</p><p class="math-container">\[\epsilon_t = 0.92\,\epsilon_{t-1} + 0.35\,\eta_t, \qquad
-d_t = \operatorname{clip}\!\bigl(
-  m_{\kappa_t} + w_{\kappa_t}(0.85\,r_t + 0.42\,\epsilon_t + 0.12\,\eta&#39;_t)
-\bigr),\]</p><p>where <span>$\kappa_t = 1 + ((t + \phi - 1) \bmod T)$</span> is the shifted seasonal index, and <span>$m_{\kappa_t}$</span> and <span>$w_{\kappa_t}$</span> are the midpoint and half-width of the seasonal demand band.  None of the latent variables are observed; the policy sees only inventory and realized demand history.</p><p>The plot below shows 24 sampled demand paths.  Because each trajectory has a different phase and persistent regime, the same calendar period can correspond to high, medium, or low demand across scenarios.</p><p><img src="../../assets/inventory_demand_process.png" alt="Demand process"/></p><h2 id="Integer-Postprocessing-Strategies"><a class="docs-heading-anchor" href="#Integer-Postprocessing-Strategies">Integer Postprocessing Strategies</a><a id="Integer-Postprocessing-Strategies-1"></a><a class="docs-heading-anchor-permalink" href="#Integer-Postprocessing-Strategies" title="Permalink"></a></h2><p>DecisionRules.jl provides two strategies for extracting gradient information from subproblems with discrete variables:</p><p><strong><code>FixedDiscreteIntegerStrategy</code></strong>: (1) solve the MIP for incumbent binary values <span>$z^*_t$</span>; (2) fix <span>$z_t = z^*_t$</span> and relax integrality; (3) re-solve the resulting LP; (4) read LP duals as gradient signal.  This is the same principle as SDDP.jl&#39;s <code>FixedDiscreteDuality</code>.</p><p><strong><code>ContinuousRelaxationIntegerStrategy</code></strong>: relax all binary/integer constraints to continuous bounds (binary → [0,1]), solve the resulting LP, and read duals directly.  This is faster (one LP instead of MIP + LP) and gives smoother gradients, but the solution may have fractional integer variables — the gradient does not correspond to any feasible integer assignment.</p><p>For the relaxed formulation (no integer variables), <code>NoIntegerStrategy</code> is used and subproblems are solved as-is.</p><h2 id="Relaxed-(Continuous)-Problem"><a class="docs-heading-anchor" href="#Relaxed-(Continuous)-Problem">Relaxed (Continuous) Problem</a><a id="Relaxed-(Continuous)-Problem-1"></a><a class="docs-heading-anchor-permalink" href="#Relaxed-(Continuous)-Problem" title="Permalink"></a></h2><p>When there are no integer variables, SDDP can model the demand process exactly via a PAR(1) approximation that carries <span>$d_{t-1}$</span> as a state variable.  This makes SDDP near-optimal for the relaxed problem.</p><p>SDDP uses a PAR(1) fit: <span>$d_t \approx \mu_t + \alpha(d_{t-1} - \mu_{t-1}) + \omega_t$</span> with per-stage means <span>$\mu_t$</span>, autocorrelation <span>$\alpha \approx 0.86$</span>, and 9 equiprobable innovation points fitted from 10,000 simulated demand paths.</p><p><img src="../../assets/inventory_relaxed_results.png" alt="Relaxed results"/></p><table><tr><th style="text-align: left">Method</th><th style="text-align: right">N</th><th style="text-align: right">Mean cost</th><th style="text-align: right">Std</th><th style="text-align: right">95% CI</th><th style="text-align: right">vs TS-DDR</th><th style="text-align: right">Fit (s)</th><th style="text-align: right">Eval (s)</th></tr><tr><td style="text-align: left">TS-DDR (trained)</td><td style="text-align: right">300</td><td style="text-align: right">2667.3</td><td style="text-align: right">594.5</td><td style="text-align: right">67.3</td><td style="text-align: right">+0.0%</td><td style="text-align: right">54.6</td><td style="text-align: right">0.0018</td></tr><tr><td style="text-align: left">SDDP (PAR)</td><td style="text-align: right">300</td><td style="text-align: right">2434.2</td><td style="text-align: right">774.8</td><td style="text-align: right">87.7</td><td style="text-align: right">-8.7%</td><td style="text-align: right">0.0</td><td style="text-align: right">20.6455</td></tr><tr><td style="text-align: left">Base-stock (S*=160)</td><td style="text-align: right">300</td><td style="text-align: right">3035.6</td><td style="text-align: right">506.8</td><td style="text-align: right">57.3</td><td style="text-align: right">+13.8%</td><td style="text-align: right">0.0</td><td style="text-align: right">0.0002</td></tr><tr><td style="text-align: left">Random (untrained)</td><td style="text-align: right">300</td><td style="text-align: right">3751.7</td><td style="text-align: right">221.7</td><td style="text-align: right">25.1</td><td style="text-align: right">+40.7%</td><td style="text-align: right">0.0</td><td style="text-align: right">0.0018</td></tr></table><p>SDDP clearly dominates: 8.7% lower cost than TS-DDR, 40.7% lower than Random.  The SDDP and Random cost distributions are non-overlapping, confirming that informed methods have a clear edge on this demand process.</p><h2 id="Integer-(MIP)-Problem"><a class="docs-heading-anchor" href="#Integer-(MIP)-Problem">Integer (MIP) Problem</a><a id="Integer-(MIP)-Problem-1"></a><a class="docs-heading-anchor-permalink" href="#Integer-(MIP)-Problem" title="Permalink"></a></h2><p>Introducing the binary <span>$z_t$</span> and fixed cost <span>$K=500$</span> changes the landscape.  SDDP can only use LP relaxation for training (<span>$z \in [0,1]$</span>), which systematically underestimates <span>$K$</span>: when the LP says <span>$z=0.3$</span>, <span>$q=20$</span>, the relaxed cost is <span>$0.3 \times 500 + 2 \times 20 = 190$</span>, but the true integer cost with <span>$z=1$</span> is <span>$500 + 40 = 540$</span>.</p><p>TS-DDR with <code>FixedDiscreteIntegerStrategy</code> handles this correctly: it solves the full MIP, fixes the binary incumbent, and reads LP duals in that integer-consistent state.</p><p><img src="../../assets/inventory_integer_results.png" alt="Integer results"/></p><table><tr><th style="text-align: left">Method</th><th style="text-align: right">N</th><th style="text-align: right">Mean cost</th><th style="text-align: right">Std</th><th style="text-align: right">95% CI</th><th style="text-align: right">vs TS-DDR (FD)</th><th style="text-align: right">Fit (s)</th><th style="text-align: right">Eval (s)</th></tr><tr><td style="text-align: left">TS-DDR (FixedDiscrete)</td><td style="text-align: right">300</td><td style="text-align: right">8015.8</td><td style="text-align: right">719.5</td><td style="text-align: right">81.4</td><td style="text-align: right">+0.0%</td><td style="text-align: right">339.2</td><td style="text-align: right">0.0112</td></tr><tr><td style="text-align: left">TS-DDR (ContRelax)</td><td style="text-align: right">300</td><td style="text-align: right">8318.1</td><td style="text-align: right">720.0</td><td style="text-align: right">81.5</td><td style="text-align: right">+3.8%</td><td style="text-align: right">109.4</td><td style="text-align: right">0.0117</td></tr><tr><td style="text-align: left">SDDP integer rollout</td><td style="text-align: right">300</td><td style="text-align: right">8274.2</td><td style="text-align: right">912.5</td><td style="text-align: right">103.3</td><td style="text-align: right">+3.2%</td><td style="text-align: right">0.0</td><td style="text-align: right">7.9088</td></tr><tr><td style="text-align: left">Base-stock (S*=160)</td><td style="text-align: right">300</td><td style="text-align: right">9035.6</td><td style="text-align: right">506.8</td><td style="text-align: right">57.3</td><td style="text-align: right">+12.7%</td><td style="text-align: right">0.0</td><td style="text-align: right">0.0000</td></tr><tr><td style="text-align: left">Random (untrained)</td><td style="text-align: right">300</td><td style="text-align: right">9594.6</td><td style="text-align: right">361.1</td><td style="text-align: right">40.9</td><td style="text-align: right">+19.7%</td><td style="text-align: right">0.0</td><td style="text-align: right">0.0120</td></tr></table><p><code>FixedDiscreteIntegerStrategy</code> achieves the lowest cost (8016), beating both SDDP (8274, +3.2%) and <code>ContinuousRelaxationIntegerStrategy</code> (8318, +3.8%). The continuous relaxation strategy performs similarly to SDDP — both use LP relaxation and both underestimate the fixed ordering cost.</p><p><code>ContinuousRelaxationIntegerStrategy</code> trains 3× faster (109s vs 339s) because it only solves LPs, but the resulting policy is less accurate on integer-constrained problems.</p><h2 id="Runnable-Scripts"><a class="docs-heading-anchor" href="#Runnable-Scripts">Runnable Scripts</a><a id="Runnable-Scripts-1"></a><a class="docs-heading-anchor-permalink" href="#Runnable-Scripts" title="Permalink"></a></h2><p>The complete experiment lives in <code>examples/inventory_control/</code>:</p><table><tr><th style="text-align: left">Script</th><th style="text-align: left">Purpose</th></tr><tr><td style="text-align: left"><code>build_inventory_problem.jl</code></td><td style="text-align: left">JuMP subproblem and det-equivalent builders, demand process, policy architecture</td></tr><tr><td style="text-align: left"><code>train_dr_inventory.jl</code></td><td style="text-align: left">TS-DDR training (relaxed, FixedDiscrete, ContRelax) and trajectory evaluation</td></tr><tr><td style="text-align: left"><code>evaluate_inventory.jl</code></td><td style="text-align: left">Base-stock grid-search and random baseline evaluation</td></tr><tr><td style="text-align: left"><code>solve_sddp.jl</code></td><td style="text-align: left">SDDP (2T-stage PAR(1)) training and rollout</td></tr><tr><td style="text-align: left"><code>compare_results.jl</code></td><td style="text-align: left">Load all CSVs, print summary tables, save plots</td></tr></table><pre><code class="language-bash hljs">julia --project=examples/inventory_control examples/inventory_control/train_dr_inventory.jl
-julia --project=examples/inventory_control examples/inventory_control/evaluate_inventory.jl
-julia --project=examples/inventory_control examples/inventory_control/solve_sddp.jl
-julia --project=examples/inventory_control examples/inventory_control/compare_results.jl</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../rocket/">« Rocket Control</a><a class="docs-footer-nextpage" href="../../api/">API Reference »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Thursday 18 June 2026 13:27">Thursday 18 June 2026</span>. Using Julia version 1.10.11.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
+using HiGHS
+using JuMP
+using Random
+using Statistics</code></pre><p>The runnable experiment lives outside the documentation tree. The file defines the demand process, JuMP builders, and policy architecture used below.</p><pre><code class="language-julia hljs">include(joinpath(@__DIR__, &quot;..&quot;, &quot;..&quot;, &quot;..&quot;, &quot;examples&quot;, &quot;inventory_control&quot;,
+    &quot;build_inventory_problem.jl&quot;))</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Main.build_lstm_exante_policy</code></pre><h2 id="Information-Pattern"><a class="docs-heading-anchor" href="#Information-Pattern">Information Pattern</a><a id="Information-Pattern-1"></a><a class="docs-heading-anchor-permalink" href="#Information-Pattern" title="Permalink"></a></h2><p>At the beginning of period <code>t</code>, the controller knows</p><p class="math-container">\[x_t = (s_{t-1}, d_{t-1}, d_{t-2}),\]</p><p>where <code>s</code> is net inventory and <code>d</code> is realized demand. The controller chooses the order quantity before seeing current demand <code>d_t</code>. This is an ex-ante decision.</p><p>The neural policy receives <code>[d_t, x_t...]</code> during training because DecisionRules policies output target states after the stage uncertainty is sampled. The implementation below uses that target only to guide the optimization model; the actual order still respects the model&#39;s information pattern.</p><h2 id="Complete-Stage-Model"><a class="docs-heading-anchor" href="#Complete-Stage-Model">Complete Stage Model</a><a id="Complete-Stage-Model-1"></a><a class="docs-heading-anchor-permalink" href="#Complete-Stage-Model" title="Permalink"></a></h2><p>For each period <code>t = 1, ..., T</code>, the stage model is</p><p class="math-container">\[\begin{aligned}
+\min_{q_t,z_t,s_t^{mid},s_t,h_t,b_t}
+    \quad &amp; K z_t + c q_t + h h_t + p b_t
+            + \lambda |s_t^{mid} - \hat{s}_t| \\
+\text{s.t.}\quad
+    &amp; 0 \le q_t \le Q_{\max} z_t, &amp;&amp; \text{(1) order capacity} \\
+    &amp; z_t \in \{0,1\},             &amp;&amp; \text{(2) setup decision} \\
+    &amp; s_t^{mid} = s_{t-1} + q_t,   &amp;&amp; \text{(3) order arrives} \\
+    &amp; s_t = s_t^{mid} - d_t,       &amp;&amp; \text{(4) demand realizes} \\
+    &amp; h_t - b_t = s_t,             &amp;&amp; \text{(5) inventory split} \\
+    &amp; h_t \ge 0,\; b_t \ge 0.      &amp;&amp; \text{(6) split bounds}
+\end{aligned}\]</p><p>The relaxed model removes (2) and replaces (1) by <span>$0 \le q_t \le Q_{\max}$</span>; it also removes the fixed cost <code>K z_t</code> from the objective.</p><p>The target <code>\hat{s}_t</code> is not an operational requirement. It is the state target produced by the neural decision rule, and the penalty term gives the policy a gradient signal.</p><h2 id="Parameters"><a class="docs-heading-anchor" href="#Parameters">Parameters</a><a id="Parameters-1"></a><a class="docs-heading-anchor-permalink" href="#Parameters" title="Permalink"></a></h2><pre><code class="language-julia hljs">inventory_parameters = (
+    T = INVENTORY_T,
+    setup_cost = INVENTORY_K,
+    unit_order_cost = INVENTORY_C,
+    holding_cost = INVENTORY_H,
+    backlog_cost = INVENTORY_P,
+    order_capacity = INVENTORY_Q_MAX,
+    initial_inventory = INVENTORY_I0,
+    target_penalty = INVENTORY_PENALTY,
+)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">(T = 12, setup_cost = 500.0, unit_order_cost = 2.0, holding_cost = 1.0, backlog_cost = 25.0, order_capacity = 350.0, initial_inventory = 30.0, target_penalty = 75.0)</code></pre><h2 id="Demand-Process"><a class="docs-heading-anchor" href="#Demand-Process">Demand Process</a><a id="Demand-Process-1"></a><a class="docs-heading-anchor-permalink" href="#Demand-Process" title="Permalink"></a></h2><p>Demand has a hidden seasonal phase, a persistent hidden regime, and an AR(1) shock:</p><p class="math-container">\[\epsilon_t = 0.92 \epsilon_{t-1} + 0.35 \eta_t,\]</p><p class="math-container">\[d_t =
+\operatorname{clip}\!\left(
+    m_{\kappa_t}
+    + w_{\kappa_t}(0.85 r_t + 0.42 \epsilon_t + 0.12 \eta&#39;_t)
+\right),\]</p><p>where <code>r_t</code> is the hidden regime and <span>$\kappa_t = 1 + ((t + \phi - 1) \bmod T)$</span> is the hidden seasonal index.</p><pre><code class="language-julia hljs">Random.seed!(11)
+demand_paths = [sample_inventory_demand_path() for _ in 1:3]</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">3-element Vector{Vector{Float64}}:
+ [140.27957223310318, 120.13602692784835, 84.52413828360736, 66.42497332612164, 30.203507099786783, 21.532366274129416, 23.569729350226368, 25.382477943381183, 36.62016501123337, 59.941965455171044, 84.87346850226275, 116.74446297187289]
+ [93.00459235715715, 79.48901751183757, 66.51138359599099, 47.56538250301797, 30.26403947318441, 22.000849292036136, 18.0501383475498, 21.10920899665569, 27.249268559662696, 38.384409214789926, 59.21646965840418, 77.88399163890075]
+ [34.98148478302812, 28.301769921307635, 31.919096823374215, 43.22633221808005, 66.37498702882962, 92.31135599583436, 114.47850802136863, 134.47476479238463, 109.50631135153354, 87.58163704187803, 64.33436178525484, 60.45803932952831]</code></pre><h2 id="Build-the-Continuous-and-Integer-Models"><a class="docs-heading-anchor" href="#Build-the-Continuous-and-Integer-Models">Build the Continuous and Integer Models</a><a id="Build-the-Continuous-and-Integer-Models-1"></a><a class="docs-heading-anchor-permalink" href="#Build-the-Continuous-and-Integer-Models" title="Permalink"></a></h2><p>The builders return the JuMP model(s), input-state parameters, output-target parameters, an uncertainty sampler, and the initial state.</p><pre><code class="language-julia hljs">relaxed_subproblems,
+relaxed_state_in,
+relaxed_state_out,
+relaxed_sampler,
+initial_state = build_inventory_subproblems(;
+    num_scenarios = 100,
+    integer = false,
+)
+
+integer_subproblems,
+integer_state_in,
+integer_state_out,
+integer_sampler,
+_ = build_inventory_subproblems(;
+    num_scenarios = 100,
+    integer = true,
+)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">(JuMP.Model[A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z], Vector{Any}[[s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in]], Vector{Tuple{Any, JuMP.VariableRef}}[[(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)]], Main.InventoryProcessSampler(JuMP.VariableRef[demand, demand, demand, demand, demand, demand, demand, demand, demand, demand, demand, demand]), [30.0, 0.0, 0.0])</code></pre><p>The deterministic equivalent is the full-horizon model used by direct transcription training.</p><pre><code class="language-julia hljs">integer_det_equivalent,
+integer_det_state_in,
+integer_det_state_out,
+integer_det_sampler,
+_ = build_inventory_det_equivalent(;
+    num_scenarios = 50,
+    integer = true,
+)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">(A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 171
+├ num_constraints: 219
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 72
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 12
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 12
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 48
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 12
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 12
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 51
+└ Names registered in the model
+  └ :back, :deficit_arr, :demand, :inv_hold, :last_demand_init, :last_demand_out, :last_demand_target, :norm_deficit_arr, :prev_demand_init, :prev_demand_out, :prev_demand_target, :q, :s_init, :s_mid, :s_out, :s_target, :z, Vector{Any}[[s_init, last_demand_init, prev_demand_init], [s_out[1], last_demand_out[1], prev_demand_out[1]], [s_out[2], last_demand_out[2], prev_demand_out[2]], [s_out[3], last_demand_out[3], prev_demand_out[3]], [s_out[4], last_demand_out[4], prev_demand_out[4]], [s_out[5], last_demand_out[5], prev_demand_out[5]], [s_out[6], last_demand_out[6], prev_demand_out[6]], [s_out[7], last_demand_out[7], prev_demand_out[7]], [s_out[8], last_demand_out[8], prev_demand_out[8]], [s_out[9], last_demand_out[9], prev_demand_out[9]], [s_out[10], last_demand_out[10], prev_demand_out[10]], [s_out[11], last_demand_out[11], prev_demand_out[11]]], Vector{Tuple{Any, JuMP.VariableRef}}[[(s_target[1], s_out[1]), (last_demand_target[1], last_demand_out[1]), (prev_demand_target[1], prev_demand_out[1])], [(s_target[2], s_out[2]), (last_demand_target[2], last_demand_out[2]), (prev_demand_target[2], prev_demand_out[2])], [(s_target[3], s_out[3]), (last_demand_target[3], last_demand_out[3]), (prev_demand_target[3], prev_demand_out[3])], [(s_target[4], s_out[4]), (last_demand_target[4], last_demand_out[4]), (prev_demand_target[4], prev_demand_out[4])], [(s_target[5], s_out[5]), (last_demand_target[5], last_demand_out[5]), (prev_demand_target[5], prev_demand_out[5])], [(s_target[6], s_out[6]), (last_demand_target[6], last_demand_out[6]), (prev_demand_target[6], prev_demand_out[6])], [(s_target[7], s_out[7]), (last_demand_target[7], last_demand_out[7]), (prev_demand_target[7], prev_demand_out[7])], [(s_target[8], s_out[8]), (last_demand_target[8], last_demand_out[8]), (prev_demand_target[8], prev_demand_out[8])], [(s_target[9], s_out[9]), (last_demand_target[9], last_demand_out[9]), (prev_demand_target[9], prev_demand_out[9])], [(s_target[10], s_out[10]), (last_demand_target[10], last_demand_out[10]), (prev_demand_target[10], prev_demand_out[10])], [(s_target[11], s_out[11]), (last_demand_target[11], last_demand_out[11]), (prev_demand_target[11], prev_demand_out[11])], [(s_target[12], s_out[12]), (last_demand_target[12], last_demand_out[12]), (prev_demand_target[12], prev_demand_out[12])]], Main.InventoryProcessSampler(JuMP.VariableRef[demand[1], demand[2], demand[3], demand[4], demand[5], demand[6], demand[7], demand[8], demand[9], demand[10], demand[11], demand[12]]), [30.0, 0.0, 0.0])</code></pre><h2 id="Integer-Sensitivity-Strategies"><a class="docs-heading-anchor" href="#Integer-Sensitivity-Strategies">Integer Sensitivity Strategies</a><a id="Integer-Sensitivity-Strategies-1"></a><a class="docs-heading-anchor-permalink" href="#Integer-Sensitivity-Strategies" title="Permalink"></a></h2><p>Mixed-integer models do not have ordinary LP duals. DecisionRules therefore makes the chosen postprocessing strategy explicit.</p><pre><code class="language-julia hljs">fixed_discrete = FixedDiscreteIntegerStrategy()
+continuous_relaxation = ContinuousRelaxationIntegerStrategy()</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">ContinuousRelaxationIntegerStrategy()</code></pre><p><code>FixedDiscreteIntegerStrategy</code> solves the MIP, fixes the incumbent integer variables, re-solves the fixed LP, and reads local dual information.</p><p><code>ContinuousRelaxationIntegerStrategy</code> relaxes integer variables first and reads duals from the relaxed LP. This is smoother and faster, but the gradient is for the relaxation, not for an integer-feasible decision.</p><h2 id="Score-Function-Correction"><a class="docs-heading-anchor" href="#Score-Function-Correction">Score-Function Correction</a><a id="Score-Function-Correction-1"></a><a class="docs-heading-anchor-permalink" href="#Score-Function-Correction" title="Permalink"></a></h2><p>Local LP duals do not see a discrete switch such as &quot;open the setup variable&quot;. A score-function correction estimates the effect of target changes by solving perturbed integer rollouts:</p><p class="math-container">\[\nabla L
+=
+\alpha \nabla L_{\mathrm{dual}}
++ (1-\alpha)
+  \frac{1}{M}
+  \sum_{m=1}^{M}
+  (R_m - b)
+  \nabla_\theta
+  \sum_{t=1}^{T}
+  \left\langle
+      \delta_{m,t}/\sigma^2,
+      \hat{x}_{t+1}(\theta)
+  \right\rangle .\]</p><p>There are two different solves in the mixed-gradient training loop:</p><ul><li><code>train_multistage(...; integer_strategy = fixed_discrete)</code> controls the deterministic-equivalent solve used for the dual-gradient term <span>$\nabla L_{\mathrm{dual}}$</span>. This solve needs a postprocessing strategy because duals are not directly defined for a MIP.</li><li><code>ScoreFunctionConfig(integer_subproblems, ...)</code> controls the Monte Carlo rollout term. These rollout models are solved exactly as they are built. Because <code>integer_subproblems</code> contain binary setup variables, the rollout costs <code>R_m</code> are true MIP rollout costs.</li></ul><p>In short: <code>integer_strategy</code> is for reading local duals; score-function rollouts are for measuring realized costs.</p><pre><code class="language-julia hljs">score_function = ScoreFunctionConfig(
+    integer_subproblems,
+    integer_state_in,
+    integer_state_out;
+    dual_weight = 0.5,
+    perturbation_std = 1.0,
+    num_rollouts = 8,
+)
+
+score_schedule = ScoreFunctionSchedule(
+    score_function;
+    sf_start = 200,
+    ramp_batches = 300,
+    perturbation_std_initial = 0.1,
+    num_rollouts_initial = 2,
+)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">ScoreFunctionSchedule(ScoreFunctionConfig(JuMP.Model[A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z, A JuMP Model
+├ solver: HiGHS
+├ objective_sense: MIN_SENSE
+│ └ objective_function_type: JuMP.AffExpr
+├ num_variables: 17
+├ num_constraints: 21
+│ ├ JuMP.AffExpr in MOI.EqualTo{Float64}: 6
+│ ├ JuMP.AffExpr in MOI.LessThan{Float64}: 1
+│ ├ Vector{JuMP.VariableRef} in MOI.NormOneCone: 1
+│ ├ JuMP.VariableRef in MOI.GreaterThan{Float64}: 4
+│ ├ JuMP.VariableRef in MOI.LessThan{Float64}: 1
+│ ├ JuMP.VariableRef in MOI.ZeroOne: 1
+│ └ JuMP.VariableRef in MOI.Parameter{Float64}: 7
+└ Names registered in the model
+  └ :_deficit, :back, :demand, :inv_hold, :last_demand_in, :last_demand_out, :last_demand_target, :norm_deficit, :prev_demand_in, :prev_demand_out, :prev_demand_target, :q, :s_in, :s_mid, :s_out, :s_target, :z], Vector{Any}[[s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in], [s_in, last_demand_in, prev_demand_in]], Vector{Tuple{Any, JuMP.VariableRef}}[[(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)], [(s_target, s_out), (last_demand_target, last_demand_out), (prev_demand_target, prev_demand_out)]], 0.5, 1.0, 8, :mean), 200, 300, 0.5, 0.1, 1.0, 2, 8)</code></pre><h2 id="Policy"><a class="docs-heading-anchor" href="#Policy">Policy</a><a id="Policy-1"></a><a class="docs-heading-anchor-permalink" href="#Policy" title="Permalink"></a></h2><p>A DecisionRules policy is any callable <code>π(x) -&gt; target</code> where <code>x</code> is the concatenation <code>[uncertainty..., state...]</code> and <code>target</code> is the desired next state. The only requirement is that it is differentiable via <code>Zygote.gradient</code> and registered with <code>Functors.@functor</code> so that <code>Flux.loadmodel!</code> can checkpoint its parameters.</p><h3 id="Feedforward-policy"><a class="docs-heading-anchor" href="#Feedforward-policy">Feedforward policy</a><a id="Feedforward-policy-1"></a><a class="docs-heading-anchor-permalink" href="#Feedforward-policy" title="Permalink"></a></h3><p>The simplest architecture is a feedforward MLP. This policy is ex-ante: it ignores the current demand <code>d_t</code> (index 1) and uses only the state entries <code>[inventory, d_{t-1}, d_{t-2}]</code>.</p><pre><code class="language-julia hljs">using Functors: @functor
+
+struct ExAntePolicy{N}
+    net::N
+end
+
+@functor ExAntePolicy (net,)</code></pre><p>The callable normalizes features to ≈[0,1] and maps through the network. The sigmoid output bounds the target to <code>[0, 500]</code>.</p><pre><code class="language-julia hljs">function (p::ExAntePolicy)(x)
+    inventory = Float32(x[2])
+    d_prev    = Float32(x[3])
+    d_prev2   = Float32(x[4])
+    features  = Float32[inventory / 100, d_prev / 100, d_prev2 / 100]
+    target    = 500f0 .* Flux.sigmoid.(p.net(features))
+    return Float32[target[1], x[1], d_prev]
+end
+
+Random.seed!(2024)
+policy = ExAntePolicy(Chain(Dense(3, 32, relu), Dense(32, 24, relu), Dense(24, 1)))</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Main.ExAntePolicy{Flux.Chain{Tuple{Flux.Dense{typeof(NNlib.relu), Matrix{Float32}, Vector{Float32}}, Flux.Dense{typeof(NNlib.relu), Matrix{Float32}, Vector{Float32}}, Flux.Dense{typeof(identity), Matrix{Float32}, Vector{Float32}}}}}(Chain(Dense(3 =&gt; 32, relu), Dense(32 =&gt; 24, relu), Dense(24 =&gt; 1)))</code></pre><h3 id="Recurrent-(LSTM)-policy"><a class="docs-heading-anchor" href="#Recurrent-(LSTM)-policy">Recurrent (LSTM) policy</a><a id="Recurrent-(LSTM)-policy-1"></a><a class="docs-heading-anchor-permalink" href="#Recurrent-(LSTM)-policy" title="Permalink"></a></h3><p>When the uncertainty process has temporal structure (regimes, trends, seasonality), a recurrent encoder can learn patterns that a feedforward MLP cannot detect from a fixed-length window.</p><p>The design below uses <code>Flux.LSTMCell</code> to process one <em>lagged</em> demand value per stage. The LSTM hidden state accumulates across stages within a scenario, then resets between scenarios via <code>Flux.reset!</code>.</p><p>The affine output <code>raw × 200 + 150</code> avoids sigmoid saturation and centers the target on typical inventory levels.</p><pre><code class="language-julia hljs">mutable struct RecurrentExAntePolicy{E,C,S}
+    encoder::E
+    combiner::C
+    state::S
+end
+
+@functor RecurrentExAntePolicy (encoder, combiner)
+
+function (p::RecurrentExAntePolicy)(x)
+    d_prev    = Float32(x[3])
+    inventory = Float32(x[2])
+    d_prev2   = Float32(x[4])
+    T = eltype(first(p.state))
+    encoded, new_state = p.encoder(T[d_prev / 100], p.state)
+    p.state = new_state
+    raw = p.combiner(vcat(encoded, T[inventory / 100, d_prev2 / 100]))
+    target = raw[1] * 200f0 + 150f0
+    return Float32[target, x[1], d_prev]
+end
+
+function Flux.reset!(p::RecurrentExAntePolicy)
+    p.state = Flux.initialstates(p.encoder)
+    return nothing
+end
+
+Random.seed!(2024)
+lstm_encoder = Flux.LSTMCell(1 =&gt; 16)
+lstm_policy = RecurrentExAntePolicy(
+    lstm_encoder,
+    Dense(16 + 2, 1),
+    Flux.initialstates(lstm_encoder),
+)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Main.RecurrentExAntePolicy{Flux.LSTMCell{Matrix{Float32}, Matrix{Float32}, Vector{Float32}}, Flux.Dense{typeof(identity), Matrix{Float32}, Vector{Float32}}, Tuple{Vector{Float32}, Vector{Float32}}}(LSTMCell(1 =&gt; 16), Dense(18 =&gt; 1), (Float32[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], Float32[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))</code></pre><h2 id="Training-Calls"><a class="docs-heading-anchor" href="#Training-Calls">Training Calls</a><a id="Training-Calls-1"></a><a class="docs-heading-anchor-permalink" href="#Training-Calls" title="Permalink"></a></h2><p>The continuous problem uses ordinary dual information.</p><pre><code class="language-julia hljs">train_multistage(
+    policy,
+    initial_state,
+    relaxed_subproblems,
+    relaxed_state_in,
+    relaxed_state_out,
+    relaxed_sampler;
+    num_batches = 400,
+    num_train_per_batch = 5,
+    optimizer = Flux.Adam(0.0015),
+    integer_strategy = NoIntegerStrategy(),
+    penalty_schedule = [(1, 80, 0.4), (81, 400, 1.0)],
+)</code></pre><p>The integer deterministic-equivalent run uses the fixed-discrete local dual path plus the scheduled score-function correction.</p><pre><code class="language-julia hljs">train_multistage(
+    policy,
+    initial_state,
+    integer_det_equivalent,
+    integer_det_state_in,
+    integer_det_state_out,
+    integer_det_sampler;
+    num_batches = 800,
+    num_train_per_batch = 10,
+    optimizer = Flux.Adam(0.0008),
+    integer_strategy = fixed_discrete,
+    penalty_schedule = [(1, 120, 0.4), (121, 800, 1.0)],
+    score_function = score_schedule,
+)</code></pre><h2 id="Evaluation"><a class="docs-heading-anchor" href="#Evaluation">Evaluation</a><a id="Evaluation-1"></a><a class="docs-heading-anchor-permalink" href="#Evaluation" title="Permalink"></a></h2><p>A trained policy should be evaluated by stage-wise rollout, because that is the deployment semantics: solve one period, observe the realized next state, then solve the next period.</p><pre><code class="language-julia hljs">uncertainty_sample = sample(integer_sampler)
+rollout_cost = simulate_multistage(
+    integer_subproblems,
+    integer_state_in,
+    integer_state_out,
+    initial_state,
+    uncertainty_sample,
+    policy;
+    integer_strategy = fixed_discrete,
+)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">10134.684587793752</code></pre><h2 id="Experiment-Scripts"><a class="docs-heading-anchor" href="#Experiment-Scripts">Experiment Scripts</a><a id="Experiment-Scripts-1"></a><a class="docs-heading-anchor-permalink" href="#Experiment-Scripts" title="Permalink"></a></h2><p>Each variant can be trained independently via SLURM or directly:</p><pre><code class="language-bash hljs"># Single variant
+julia --project=. train_dr_inventory.jl integer_lstm
+
+# All variants in parallel via SLURM
+cd examples/inventory_control &amp;&amp; bash launch_all.sh</code></pre><p>Available variant tags: <code>relaxed</code>, <code>relaxed_lstm</code>, <code>relaxed_hp</code>, <code>relaxed_lstm_hp</code>, <code>integer</code>, <code>integer_cr</code>, <code>integer_sf</code>, <code>integer_hp</code>, <code>integer_lstm</code>, <code>integer_lstm_sf</code>.</p><p>After training, run the comparison script to regenerate tables and figures:</p><pre><code class="language-bash hljs">julia --project=. evaluate_inventory.jl
+julia --project=. solve_sddp.jl
+julia --project=. compare_results.jl</code></pre><p>The figures used by this page are generated by <code>compare_results.jl</code>.</p><p><img src="../../assets/inventory_demand_process.png" alt="Demand process"/></p><p><img src="../../assets/inventory_relaxed_results.png" alt="Relaxed results"/></p><p><img src="../../assets/inventory_integer_results.png" alt="Integer results"/></p><h3 id="Relaxed-(continuous)-results"><a class="docs-heading-anchor" href="#Relaxed-(continuous)-results">Relaxed (continuous) results</a><a id="Relaxed-(continuous)-results-1"></a><a class="docs-heading-anchor-permalink" href="#Relaxed-(continuous)-results" title="Permalink"></a></h3><p>SDDP uses a PAR(1) approximation of the true latent demand process, which is not exact for this problem. Despite this advantage for TS-DDR, the gap between the best TS-DDR variant and SDDP is ~7%.</p><p>The LSTM encoder closes ~25% of the gap versus the feedforward baseline by learning temporal demand patterns from lagged observations.</p><table><tr><th style="text-align: left">Method</th><th style="text-align: right">N</th><th style="text-align: right">Mean cost</th><th style="text-align: right">Std</th><th style="text-align: right">vs SDDP</th></tr><tr><td style="text-align: left">SDDP (PAR)</td><td style="text-align: right">300</td><td style="text-align: right">2434.0</td><td style="text-align: right">—</td><td style="text-align: right">0.0%</td></tr><tr><td style="text-align: left">TS-DDR (LSTM)</td><td style="text-align: right">300</td><td style="text-align: right">2610.6</td><td style="text-align: right">540.3</td><td style="text-align: right">+7.3%</td></tr><tr><td style="text-align: left">TS-DDR (feedforward)</td><td style="text-align: right">300</td><td style="text-align: right">2667.3</td><td style="text-align: right">593.5</td><td style="text-align: right">+9.6%</td></tr><tr><td style="text-align: left">TS-DDR (HighPenalty)</td><td style="text-align: right">300</td><td style="text-align: right">2677.5</td><td style="text-align: right">547.0</td><td style="text-align: right">+10.0%</td></tr><tr><td style="text-align: left">TS-DDR (LSTM+HP)</td><td style="text-align: right">300</td><td style="text-align: right">2712.0</td><td style="text-align: right">554.6</td><td style="text-align: right">+11.4%</td></tr></table><h3 id="Integer-(MIP)-results"><a class="docs-heading-anchor" href="#Integer-(MIP)-results">Integer (MIP) results</a><a id="Integer-(MIP)-results-1"></a><a class="docs-heading-anchor-permalink" href="#Integer-(MIP)-results" title="Permalink"></a></h3><p>SDDP uses an <code>AlternativeForwardPass</code>: MIP in the forward pass, LP relaxation in the backward pass for valid cuts. The TS-DDR gap is ~36%.</p><table><tr><th style="text-align: left">Method</th><th style="text-align: right">N</th><th style="text-align: right">Mean cost</th><th style="text-align: right">Std</th><th style="text-align: right">vs SDDP</th></tr><tr><td style="text-align: left">SDDP (MIP fwd)</td><td style="text-align: right">300</td><td style="text-align: right">5871.6</td><td style="text-align: right">1087.4</td><td style="text-align: right">0.0%</td></tr><tr><td style="text-align: left">TS-DDR (FixedDiscrete)</td><td style="text-align: right">300</td><td style="text-align: right">8015.8</td><td style="text-align: right">718.3</td><td style="text-align: right">+36.5%</td></tr><tr><td style="text-align: left">TS-DDR (MixedGrad)</td><td style="text-align: right">300</td><td style="text-align: right">8268.0</td><td style="text-align: right">715.3</td><td style="text-align: right">+40.8%</td></tr><tr><td style="text-align: left">TS-DDR (ContRelax)</td><td style="text-align: right">300</td><td style="text-align: right">8318.1</td><td style="text-align: right">718.8</td><td style="text-align: right">+41.7%</td></tr><tr><td style="text-align: left">TS-DDR (HighPenalty)</td><td style="text-align: right">300</td><td style="text-align: right">8388.4</td><td style="text-align: right">615.9</td><td style="text-align: right">+42.8%</td></tr><tr><td style="text-align: left">SDDP (LP relax)</td><td style="text-align: right">300</td><td style="text-align: right">8274.2</td><td style="text-align: right">912.5</td><td style="text-align: right">+40.9%</td></tr><tr><td style="text-align: left">Base-stock (S*=160)</td><td style="text-align: right">300</td><td style="text-align: right">9035.6</td><td style="text-align: right">506.8</td><td style="text-align: right">+53.9%</td></tr><tr><td style="text-align: left">Random (untrained)</td><td style="text-align: right">300</td><td style="text-align: right">9594.6</td><td style="text-align: right">361.1</td><td style="text-align: right">+63.4%</td></tr></table></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../rocket/">« Rocket Control</a><a class="docs-footer-nextpage" href="../../api/">API Reference »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Monday 22 June 2026 19:03">Monday 22 June 2026</span>. Using Julia version 1.10.11.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
