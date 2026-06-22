@@ -464,28 +464,18 @@ using Statistics, Random
 #
 # ### Summary
 #
-# The TS-DDR costs below are from 100-scenario out-of-sample evaluations
-# using `evaluate_hydro_policies.jl` (operational cost excluding
-# target-deficit penalty).  The SDDP cost is from the same 100
-# out-of-sample simulation protocol.
+# | Method | Policy | Mean Cost | Std | N |
+# |:-------|:------:|----------:|----:|--:|
+# | TS-DDR (DE) | LSTM | 325 540 | 6 266 | 100 |
+# | TS-DDR (DE, anneal) | LSTM | 324 445 | 6 134 | 100 |
+# | TS-DDR (shooting w=12) | LSTM | 323 289 | 5 593 | 100 |
+# | TS-DDR (shooting w=12, anneal) | LSTM | 322 812 | 6 081 | 100 |
+# | TS-DDR (stage-wise, anneal) | LSTM | 321 543 | 6 214 | 100 |
+# | SDDP (SOC-WR / ACP) | cuts | 303 684 | — | 100 |
 #
-# | Method | Policy | Mean Cost | Std | N | Notes |
-# |:-------|:------:|----------:|----:|--:|:------|
-# | TS-DDR (DE) | LSTM | 325 540 | 6 266 | 100 | Coupled horizon, open-loop targets |
-# | TS-DDR (DE, anneal) | LSTM | 324 445 | 6 134 | 100 | Penalty annealing helps slightly |
-# | TS-DDR (shooting w=12) | LSTM | 323 289 | 5 593 | 100 | Windowed coupling |
-# | TS-DDR (shooting w=12, anneal) | LSTM | 322 812 | 6 081 | 100 | Best shooting variant |
-# | TS-DDR (stage-wise, anneal) | LSTM | **321 543** | 6 214 | 100 | **Best TS-DDR** |
-# | SDDP (SOC-WR / ACP) | cuts | **303 684** | — | 100 | 126 stages (96 + 30 margin) |
+# All three TS-DDR methods with penalty annealing converge to similar
+# costs (321K–325K).  SDDP trains on 126 stages (96 + 30 margin).
 #
-# The subproblems method with penalty annealing achieves the best TS-DDR
-# cost (321 543), about 5.9% above SDDP (303 684).  Penalty annealing
-# is essential for the subproblems method: without it, the cost jumps to
-# 368 498.  All three methods with annealing converge to similar costs
-# (321K–325K range), with subproblems slightly ahead.
-#
-# SDDP with inconsistent formulations provides a strong baseline: it
-# leverages convex cuts and trains on **126 stages** (96 real + 30 margin),
-# giving its value function foresight beyond the evaluation horizon.
-# TS-DDR trains on 96 stages only.  Extending to 126 stages and training
-# longer may close part of the remaining gap.
+# !!! note "Preliminary results"
+#     These numbers reflect the current default training scripts.
+#     They will be updated as the package evolves.
