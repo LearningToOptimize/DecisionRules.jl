@@ -202,6 +202,18 @@ Each evaluation reports (a) the rollout objective **excluding** the target-slack
 
 Per-sample debugging hooks can be attached with `SampleLog(on_sample=(s, models, log) -> ...)`; the training loop calls the hook after each sample's solve with the live JuMP model(s). The previous `record_loss=(iter, model, loss, tag) -> ...` keyword keeps working as a deprecated adapter.
 
+## GPU acceleration with DecisionRulesExa.jl
+
+For large-scale problems where the inner NLP solve is the bottleneck (e.g., AC-OPF with hundreds of buses), [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) provides a GPU-accelerated backend that replaces JuMP with [ExaModels.jl](https://github.com/exanauts/ExaModels.jl) and solves with [MadNLP.jl](https://github.com/MadNLP/MadNLP.jl) + CUDSS on GPU.
+
+DecisionRulesExa.jl implements the same TS-DDR algorithm (deterministic-equivalent mode) with the same envelope-theorem gradient computation but formulates the NLP in ExaModels' SIMD-compatible modeling layer. This enables:
+
+- **GPU-native interior-point solves** via MadNLP + CUDSS
+- **Parallel GPU solves** for multiple training samples per gradient step
+- **Runtime parameter updates** via `ExaModels.set_parameter!` (no model reconstruction)
+
+See the [GPU Acceleration](https://LearningToOptimize.github.io/DecisionRules.jl/dev/gpu_acceleration/) page in the documentation for a tutorial on getting started with DecisionRulesExa.jl.
+
 ## Examples and tests
 
 Examples live in `examples/`. Run tests with:

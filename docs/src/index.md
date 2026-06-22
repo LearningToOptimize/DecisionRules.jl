@@ -56,8 +56,9 @@ train_multistage(
 ```
 
 See the [Algorithm](@ref) page for the mathematical formulation, the
-[Uncertainty Sampling](@ref) guide for how to prepare your scenario data, and the
-examples for complete worked problems.
+[Uncertainty Sampling](@ref) guide for how to prepare your scenario data, the
+[GPU Acceleration with DecisionRulesExa.jl](@ref) page for GPU-accelerated training,
+and the examples for complete worked problems.
 
 ## Citation
 

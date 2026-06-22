@@ -26,6 +26,7 @@ makedocs(;
         "Algorithm" => "algorithm.md",
         "Gradient Fallback" => "gradient_fallback.md",
         "Uncertainty Sampling" => "sampling.md",
+        "GPU Acceleration" => "gpu_acceleration.md",
         "Examples" => [
             "Hydropower Scheduling" => "examples/hydro.md",
             "Rocket Control" => "examples/rocket.md",
