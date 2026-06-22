@@ -21,11 +21,11 @@ end
 # Parameters
 case_name = "bolivia"
 formulation = "ACPPowerModel"
-num_stages = 96
+num_stages = parse(Int, get(ENV, "DR_NUM_STAGES", "126"))
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 formulation_file = formulation * ".mof.json"
-num_epochs = 30
+num_epochs = parse(Int, get(ENV, "DR_NUM_EPOCHS", "80"))
 num_batches = 100
 _num_train_per_batch = 1
 activation = sigmoid

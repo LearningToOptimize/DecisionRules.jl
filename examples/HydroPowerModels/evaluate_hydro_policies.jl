@@ -99,24 +99,55 @@ struct PolicySpec
     is_ldr::Bool
 end
 
+function _method_variant(base)
+    method = if contains(base, "ldr")
+        "ldr"
+    elseif contains(base, "shooting")
+        "shooting"
+    elseif contains(base, "subproblems")
+        "subproblems"
+    elseif contains(base, "deteq")
+        "deteq"
+    else
+        return nothing
+    end
+    clip_tag = contains(base, "clip") ? "-clip" : ""
+    sched_tag = contains(base, "anneal") ? "-anneal" :
+                contains(base, "const") ? "-const" : ""
+    return method * clip_tag * sched_tag
+end
+
+function _variant_label(variant)
+    labels = Dict(
+        "subproblems-anneal" => "Subproblems (anneal)",
+        "subproblems-clip-anneal" => "Subproblems (clip, anneal)",
+        "subproblems-const" => "Subproblems (const)",
+        "subproblems-clip-const" => "Subproblems (clip, const)",
+        "subproblems" => "Subproblems",
+        "shooting-anneal" => "Shooting w=12 (anneal)",
+        "shooting-clip-anneal" => "Shooting w=12 (clip, anneal)",
+        "shooting" => "Shooting w=12",
+        "deteq-anneal" => "DE (anneal)",
+        "deteq-clip-anneal" => "DE (clip, anneal)",
+        "deteq" => "DE",
+        "ldr" => "TS-LDR",
+    )
+    return get(labels, variant, variant)
+end
+
 function discover_policies(model_dir)
     files = sort(filter(f -> endswith(f, ".jld2"), readdir(model_dir; join=true)))
     best = Dict{String,Tuple{String,Bool}}()
     for f in files
         base = basename(f)
-        if contains(base, "ldr")
-            best["TS-LDR"] = (f, true)
-        elseif contains(base, "shooting")
-            best["Multiple Shooting (w=12)"] = (f, false)
-        elseif contains(base, "subproblems")
-            best["Stage-wise Subproblems"] = (f, false)
-        elseif contains(base, "deteq")
-            best["Deterministic Equivalent"] = (f, false)
-        end
+        variant = _method_variant(base)
+        isnothing(variant) && continue
+        is_ldr = contains(base, "ldr")
+        best[variant] = (f, is_ldr)
     end
     specs = PolicySpec[]
-    for (label, (path, is_ldr)) in sort(collect(best); by=first)
-        push!(specs, PolicySpec(label, path, is_ldr))
+    for (variant, (path, is_ldr)) in sort(collect(best); by=first)
+        push!(specs, PolicySpec(_variant_label(variant), path, is_ldr))
     end
     return specs
 end
@@ -165,7 +196,7 @@ for spec in policies
             models;
         )
 
-        objectives_no_deficit[i] = get_objective_no_target_deficit(subproblems)
+        objectives_no_deficit[i] = DecisionRules.get_objective_no_target_deficit(subproblems)
     end
 
     violation_share = 1.0 - mean(objectives_no_deficit) / mean(objectives_total)
