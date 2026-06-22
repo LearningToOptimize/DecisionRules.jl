@@ -16,4 +16,5 @@ Private = false
 ```@autodocs
 Modules = [DecisionRules]
 Public = false
+Filter = t -> t != DecisionRules
 ```
