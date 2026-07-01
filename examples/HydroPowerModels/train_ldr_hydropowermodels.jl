@@ -84,7 +84,7 @@ diff_optimizer =
             "linear_solver" => "mumps",
         ),
     )
-subproblems, state_params_in_sub, state_params_out_sub, uncertainty_samples_sub, initial_state, max_volume = build_hydropowermodels(
+subproblems, state_params_in_sub, state_params_out_sub, uncertainty_samples_sub, initial_state, max_volume, _ = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name),
     formulation_file;
     num_stages=num_stages,
@@ -95,7 +95,7 @@ subproblems, state_params_in_sub, state_params_out_sub, uncertainty_samples_sub,
 
 # ── Build det-eq for training ────────────────────────────────────────────────
 
-subproblems_de, state_params_in, state_params_out, uncertainty_samples, _, _ = build_hydropowermodels(
+subproblems_de, state_params_in, state_params_out, uncertainty_samples, _, _, _ = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name),
     formulation_file;
     num_stages=num_stages,

@@ -17,7 +17,7 @@ HydroPowerModels_dir = dirname(@__FILE__)
 include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
 case_dir = joinpath(HydroPowerModels_dir, case_name)
 
-subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume = build_hydropowermodels(
+subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume, _ = build_hydropowermodels(
     joinpath(HydroPowerModels_dir, case_name), formulation_file; num_stages=num_stages
 )
 

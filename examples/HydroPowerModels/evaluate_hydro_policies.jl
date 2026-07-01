@@ -32,6 +32,7 @@ using DataFrames
 
 const HYDRO_DIR = dirname(@__FILE__)
 include(joinpath(HYDRO_DIR, "load_hydropowermodels.jl"))
+include(joinpath(HYDRO_DIR, "hydro_reachable_policy.jl"))
 
 const CASE_NAME = "bolivia"
 const FORMULATION = "ACPPowerModel"
@@ -63,7 +64,7 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(
     ),
 )
 
-subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume =
+subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume, hydro_meta =
     build_hydropowermodels(
         CASE_DIR, FORMULATION_FILE;
         num_stages=NUM_STAGES,
@@ -97,6 +98,7 @@ struct PolicySpec
     label::String
     model_file::String
     is_ldr::Bool
+    is_strict::Bool
 end
 
 function _method_variant(base)
@@ -104,6 +106,8 @@ function _method_variant(base)
         "ldr"
     elseif contains(base, "shooting")
         "shooting"
+    elseif contains(base, "subproblems-strict") || contains(base, "strict")
+        "subproblems-strict"
     elseif contains(base, "subproblems")
         "subproblems"
     elseif contains(base, "deteq")
@@ -124,6 +128,8 @@ function _variant_label(variant)
         "subproblems-const" => "Subproblems (const)",
         "subproblems-clip-const" => "Subproblems (clip, const)",
         "subproblems" => "Subproblems",
+        "subproblems-strict" => "Subproblems (strict)",
+        "subproblems-strict-clip" => "Subproblems (strict, clip)",
         "shooting-anneal" => "Shooting w=12 (anneal)",
         "shooting-clip-anneal" => "Shooting w=12 (clip, anneal)",
         "shooting" => "Shooting w=12",
@@ -137,24 +143,27 @@ end
 
 function discover_policies(model_dir)
     files = sort(filter(f -> endswith(f, ".jld2"), readdir(model_dir; join=true)))
-    best = Dict{String,Tuple{String,Bool}}()
+    best = Dict{String,Tuple{String,Bool,Bool}}()
     for f in files
         base = basename(f)
         variant = _method_variant(base)
         isnothing(variant) && continue
         is_ldr = contains(base, "ldr")
-        best[variant] = (f, is_ldr)
+        is_strict = contains(base, "strict")
+        best[variant] = (f, is_ldr, is_strict)
     end
     specs = PolicySpec[]
-    for (variant, (path, is_ldr)) in sort(collect(best); by=first)
-        push!(specs, PolicySpec(_variant_label(variant), path, is_ldr))
+    for (variant, (path, is_ldr, is_strict)) in sort(collect(best); by=first)
+        push!(specs, PolicySpec(_variant_label(variant), path, is_ldr, is_strict))
     end
     return specs
 end
 
-function build_policy(spec::PolicySpec, num_inputs, num_hydro, num_uncertainties)
+function build_policy(spec::PolicySpec, num_inputs, num_hydro, num_uncertainties, hydro_meta)
     if spec.is_ldr
         return dense_multilayer_nn(num_inputs, num_hydro, Int64[64, 64]; activation=identity)
+    elseif spec.is_strict
+        return hydro_reachable_policy(hydro_meta, Int64[128, 128])
     else
         return state_conditioned_policy(
             num_uncertainties, num_hydro, num_hydro, Int64[128, 128];
@@ -166,7 +175,7 @@ end
 policies = discover_policies(MODEL_DIR)
 println("\nDiscovered policies:")
 for p in policies
-    tag = p.is_ldr ? " (LDR)" : " (DDR)"
+    tag = p.is_ldr ? " (LDR)" : p.is_strict ? " (DDR-strict)" : " (DDR)"
     println("  ", p.label, tag, " → ", basename(p.model_file))
 end
 
@@ -177,9 +186,13 @@ results = DataFrame()
 for spec in policies
     println("\nEvaluating: ", spec.label)
 
-    models = build_policy(spec, num_inputs, num_hydro, num_uncertainties)
+    models = build_policy(spec, num_inputs, num_hydro, num_uncertainties, hydro_meta)
     model_state = JLD2.load(spec.model_file, "model_state")
-    Flux.loadmodel!(models, model_state)
+    if spec.is_strict
+        load_policy_weights!(models, model_state)
+    else
+        Flux.loadmodel!(models, model_state)
+    end
 
     objectives_no_deficit = Vector{Float64}(undef, NUM_SIMULATIONS)
     objectives_total = Vector{Float64}(undef, NUM_SIMULATIONS)

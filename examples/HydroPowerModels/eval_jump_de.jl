@@ -34,7 +34,7 @@ const TARGET_FRAC = 0.6      # constant target = TARGET_FRAC × max_volume
 
 @info "Building HydroPowerModels ($FORMULATION, T=$NUM_STAGES)..."
 
-sub, state_in, state_out, uncert, initial_state, max_volume = build_hydropowermodels(
+sub, state_in, state_out, uncert, initial_state, max_volume, _ = build_hydropowermodels(
     CASE_DIR, FORMULATION * ".mof.json"; num_stages=NUM_STAGES, penalty_l2=:auto
 )
 nHyd = length(initial_state)

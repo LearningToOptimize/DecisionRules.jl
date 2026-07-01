@@ -34,7 +34,7 @@ function build_problem()
 end
 
 # ---- Stage-wise simulation ----
-sub_s, state_in_s, state_out_s, uncert_s, initial_state, max_volume = build_problem()
+sub_s, state_in_s, state_out_s, uncert_s, initial_state, max_volume, _ = build_problem()
 num_uncertainties = length(uncert_s[1])
 
 # Constant policy so targets do not depend on state or uncertainty.
@@ -60,7 +60,7 @@ for t in 1:num_stages
 end
 
 # ---- Deterministic equivalent ----
-sub_d, state_in_d, state_out_d, uncert_d, initial_state_d, _ = build_problem()
+sub_d, state_in_d, state_out_d, uncert_d, initial_state_d, _, _ = build_problem()
 
 Det_model = JuMP.Model(det_optimizer)
 Det_model, uncert_d = DecisionRules.deterministic_equivalent!(
@@ -83,7 +83,7 @@ for t in 1:num_stages
 end
 
 # ---- Multiple shooting ----
-sub_w, state_in_w, state_out_w, uncert_w, initial_state_w, _ = build_problem()
+sub_w, state_in_w, state_out_w, uncert_w, initial_state_w, _, _ = build_problem()
 
 windows = DecisionRules.setup_shooting_windows(
     sub_w,
