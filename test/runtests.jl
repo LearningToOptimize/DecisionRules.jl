@@ -1040,6 +1040,19 @@ include("test_score_function.jl")
         @test policy.n_uncertainty == n_uncertainty
         @test policy.n_state == n_state
 
+        policy_deep_head = state_conditioned_policy(
+            n_uncertainty,
+            n_state,
+            n_output,
+            layers;
+            activation=sigmoid,
+            encoder_type=Flux.LSTM,
+            combiner_layers=[7, 5],
+        )
+        @test policy_deep_head.combiner isa Flux.Chain
+        Flux.reset!(policy_deep_head)
+        @test length(policy_deep_head(rand(Float32, n_uncertainty + n_state))) == n_output
+
         # Test forward pass
         Flux.reset!(policy)
         input = rand(Float32, n_uncertainty + n_state)

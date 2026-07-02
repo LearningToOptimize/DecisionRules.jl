@@ -202,6 +202,48 @@ Each evaluation reports (a) the rollout objective **excluding** the target-slack
 
 Per-sample debugging hooks can be attached with `SampleLog(on_sample=(s, models, log) -> ...)`; the training loop calls the hook after each sample's solve with the live JuMP model(s). The previous `record_loss=(iter, model, loss, tag) -> ...` keyword keeps working as a deprecated adapter.
 
+## Strict mode and reachable policies
+
+The standard TS-DDR target constraint uses slack:
+
+```math
+x_t + \delta_t = \hat{x}_t,
+\qquad
+\text{objective} += C_\delta \|\delta_t\|.
+```
+
+Slack makes training robust to unreachable targets, but it also makes the dual
+signal depend on the target-penalty calibration. Strict mode removes the slack:
+
+```math
+x_t = \hat{x}_t.
+```
+
+The resulting dual is the clean shadow price of imposing the target. The price
+of that cleaner signal is feasibility: every policy target must be reachable
+from the state used to condition the policy.
+
+This is automatic in the hydro strict subproblem path because each stage is
+solved sequentially and the policy receives the realized previous reservoir
+state. It is also possible in regular deterministic equivalents when the target
+trajectory is rolled out from the true initial state using a reachable policy:
+
+```math
+\hat{x}_0 = x_0,\qquad
+\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}),\qquad
+\hat{x}_t \in R(\hat{x}_{t-1}, w_t).
+```
+
+By induction, all targets are feasible, and the strict equalities force the
+realized trajectory to match that reachable path. See the hydro example and the
+DecisionRulesExa.jl companion for the GPU strict regular-DE implementation.
+
+The policy helpers separate two architectural choices:
+
+- recurrent `layers` / `DR_ENCODER_LAYERS` process uncertainty history only;
+- `combiner_layers` / `DR_HEAD_LAYERS` add a nonlinear feed-forward
+  state-to-target head without recurrence over the state input.
+
 ## GPU acceleration with DecisionRulesExa.jl
 
 For large-scale problems where the inner NLP solve is the bottleneck (e.g., AC-OPF with hundreds of buses), [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) provides a GPU-accelerated backend that replaces JuMP with [ExaModels.jl](https://github.com/exanauts/ExaModels.jl) and solves with [MadNLP.jl](https://github.com/MadNLP/MadNLP.jl) + CUDSS on GPU.
@@ -221,6 +263,26 @@ Examples live in `examples/`. Run tests with:
 ```julia
 julia --project -e 'using Pkg; Pkg.test()'
 ```
+
+## Repository Map
+
+| Path | Purpose |
+|---|---|
+| `src/DecisionRules.jl` | Module entrypoint and exports |
+| `src/dense_multilayer_nn.jl` | MLP helpers, state-conditioned recurrent policies, nonlinear target heads |
+| `src/simulate_multistage.jl` | Stage-wise and deterministic-equivalent simulation logic |
+| `src/multiple_shooting.jl` | Windowed multiple-shooting setup, simulation, and training |
+| `src/utils.jl` | Target-parameter utilities, deficit construction, rollout evaluation |
+| `src/integer_strategies.jl` | Strategies for extracting gradients from integer/mixed-integer models |
+| `src/score_function.jl` | Score-function gradient correction for nonsmooth/integer problems |
+| `src/parameter_duals.jl` | Dual/sensitivity helpers for parameterized JuMP models |
+| `docs/src/` | Documenter.jl manual pages |
+| `examples/HydroPowerModels/` | Bolivia hydrothermal scheduling, strict reachable policies, SDDP comparisons |
+| `examples/inventory_control/` | Inventory-control example and dynamic-programming/SDDP comparisons |
+| `examples/rocket_control/` | Rocket MPC/control example |
+| `examples/RL/` | Reinforcement-learning style hydro scripts |
+| `examples/Experimental/` | Research prototypes and robotics/control explorations |
+| `test/runtests.jl` | Package test suite |
 
 ## Citation
 

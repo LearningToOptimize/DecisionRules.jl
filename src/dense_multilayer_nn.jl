@@ -1,6 +1,60 @@
 using Functors
 using ChainRulesCore
 
+raw"""
+    dense_policy_head(num_inputs, num_outputs, layers; activation=Flux.relu)
+
+Create the feed-forward target head used after recurrent uncertainty encoding.
+
+Unlike [`dense_multilayer_nn`](@ref), the final layer also uses `activation`.
+This is useful for bounded policies where the head must emit normalized values
+such as `sigmoid(z) ∈ [0, 1]`.
+
+Mathematically, when `layers = [h₁, …, h_L]`, the head computes
+
+```math
+H_\theta(z) =
+\sigma\left(W_{L+1}
+  \sigma\left(W_L \cdots \sigma(W_1 z + b_1) \cdots + b_L\right)
+  + b_{L+1}\right).
+```
+
+This helper exists so state-conditioned TS-DDR policies can make the map
+`[encoded_uncertainty; state] → target` nonlinear while keeping recurrence
+confined to the uncertainty encoder.
+
+# Arguments
+- `num_inputs::Int`: number of combined features, usually `encoded_uncertainty`
+  concatenated with the previous state.
+- `num_outputs::Int`: number of target outputs.
+- `layers::AbstractVector{Int}`: hidden widths for the nonrecurrent head.
+- `activation`: activation used by each hidden layer and by the output layer.
+
+# Returns
+- A `Dense` layer when `layers` is empty, otherwise a `Chain` of dense layers.
+
+# Examples
+```julia
+head = dense_policy_head(16, 3, [32, 32]; activation=sigmoid)
+```
+
+See also: [`state_conditioned_policy`](@ref), [`dense_multilayer_nn`](@ref)
+"""
+function dense_policy_head(
+    num_inputs::Int,
+    num_outputs::Int,
+    layers::AbstractVector{Int};
+    activation=Flux.relu,
+)
+    isempty(layers) && return Dense(num_inputs => num_outputs, activation)
+    head_layers = Any[Dense(num_inputs => layers[1], activation)]
+    for i in 1:(length(layers) - 1)
+        push!(head_layers, Dense(layers[i] => layers[i + 1], activation))
+    end
+    push!(head_layers, Dense(layers[end] => num_outputs, activation))
+    return Chain(head_layers...)
+end
+
 """
     dense_multilayer_nn(num_inputs, num_outputs, layers; activation=Flux.relu, dense=Dense)
 
@@ -143,8 +197,8 @@ A policy architecture that separates temporal encoding from state conditioning.
 
 The encoder is a recurrent cell (`LSTMCell`/`GRUCell`/`RNNCell`, or a `Chain`
 of cells) that processes only the uncertainty sequence to capture temporal
-dependencies. The combiner is a `Dense` layer that merges the encoder output
-with the previous state to predict the next state.
+dependencies. The combiner is a feed-forward target head that merges the
+encoder output with the previous state to predict the next state.
 
 Given uncertainty ``w_t`` and previous state ``x_{t-1}``, the forward pass is
 
@@ -165,7 +219,8 @@ a rollout.
 
 # Fields
 - `encoder::E`: recurrent cell or `Chain` of cells encoding uncertainty.
-- `combiner::C`: `Dense` layer mapping ``[h_t;\\; x_{t-1}]`` to ``\\hat{x}_t``.
+- `combiner::C`: feed-forward head mapping ``[h_t;\\; x_{t-1}]`` to
+  ``\\hat{x}_t``.
 - `state::S`: current recurrent state ``s_t``, carried across calls.
 - `n_uncertainty::Int`: dimensionality of ``w_t``.
 - `n_state::Int`: dimensionality of ``x_{t-1}``.
@@ -174,7 +229,7 @@ Input format: `[uncertainty..., previous_state...]`.
 """
 mutable struct StateConditionedPolicy{E,C,S}
     encoder::E          # Recurrent cell, or Chain of cells, that processes uncertainty only
-    combiner::C         # Dense that combines encoder output with previous state
+    combiner::C         # Feed-forward head combining encoder output with state
     state::S            # Encoder recurrent state, carried across calls
     n_uncertainty::Int  # Number of uncertainty dimensions
     n_state::Int        # Number of state dimensions
@@ -400,7 +455,7 @@ function (m::StateConditionedPolicy)(x)
     # Concatenate encoder output h_t with previous state x_{t-1}.
     combined = vcat(encoded, prev_state)
 
-    # Map the combined vector through the Dense combiner to produce x_hat_t.
+    # Map the combined vector through the feed-forward combiner to produce x_hat_t.
     return m.combiner(combined)
 end
 
@@ -418,7 +473,8 @@ end
 
 """
     state_conditioned_policy(n_uncertainty, n_state, n_output, layers;
-                             activation=Flux.relu, encoder_type=Flux.LSTM)
+                             activation=Flux.relu, encoder_type=Flux.LSTM,
+                             combiner_layers=Int[])
 
 Create a [`StateConditionedPolicy`](@ref) with the specified architecture.
 
@@ -431,7 +487,11 @@ h_t, s_t = \\text{encoder}(w_t, s_{t-1}) \\\\
 
 where the encoder is a stack of recurrent cells of width
 ``(l_1, \\dots, l_L)`` and the combiner has input dimension
-``l_L + n_{\\text{state}}``.
+``l_L + n_{\\text{state}}``. `combiner_layers` adds optional hidden layers
+to this nonrecurrent combiner, making the state-to-target map nonlinear while
+keeping recurrence confined to the uncertainty sequence. This distinction is
+important for TS-DDR hydro experiments: inflow history is recurrent, but the
+current reservoir state is used only as contemporaneous conditioning.
 
 # Arguments
 - `n_uncertainty::Int`: dimensionality of the uncertainty input ``w_t``.
@@ -444,6 +504,8 @@ where the encoder is a stack of recurrent cells of width
   their `*Cell` variants; default: `Flux.LSTM`). Must support
   `Flux.initialstates` and the stateful `(x, state) -> (output, new_state)`
   interface (Flux >= 0.16).
+- `combiner_layers::Vector{Int}`: hidden widths for the state-conditioned
+  target head. The default `Int[]` preserves the original single Dense head.
 
 # Returns
 - `StateConditionedPolicy`: ready-to-use policy with initialized recurrent state.
@@ -453,6 +515,12 @@ where the encoder is a stack of recurrent cells of width
 policy = state_conditioned_policy(5, 3, 3, [16, 16])
 x = randn(Float32, 8)  # [uncertainty(5); state(3)]
 y = policy(x)           # predicted next state (length 3)
+
+deep_head = state_conditioned_policy(
+    5, 3, 3, [16, 16];
+    activation = sigmoid,
+    combiner_layers = [32, 32],
+)
 ```
 """
 function state_conditioned_policy(
@@ -462,6 +530,7 @@ function state_conditioned_policy(
     layers::Vector{Int};
     activation=Flux.relu,
     encoder_type=Flux.LSTM,
+    combiner_layers=Int[],
 )
     # Build encoder: a stack of recurrent cells that process only the uncertainty
     # input w_t. The number of hidden layers determines the encoder topology.
@@ -484,8 +553,13 @@ function state_conditioned_policy(
         encoder_output_dim = layers[end]
     end
 
-    # Build combiner: Dense([h_t; x_{t-1}]) → x_hat_t with activation σ.
-    combiner = Dense(encoder_output_dim + n_state => n_output, activation)
+    # Build combiner: feed-forward [h_t; x_{t-1}] → x_hat_t with activation σ.
+    combiner = dense_policy_head(
+        encoder_output_dim + n_state,
+        n_output,
+        collect(Int, combiner_layers);
+        activation=activation,
+    )
 
     # Initialize the recurrent state to Flux.initialstates for the chosen cell(s).
     return StateConditionedPolicy(

@@ -281,11 +281,17 @@ parameters between solves automatically changes the NLP without
 rebuilding it.  Use `invalidate_policy_cache!` if your oracle caches
 policy-dependent intermediates.
 
-### Strict embedded targets
+### Strict reachable targets
 
 When the policy is guaranteed to produce feasible targets (e.g., via a
 reachable-set mapping), the slack variables ``\delta_t`` can be removed
-entirely:
+entirely. This is strict mode: target constraints are hard equalities, the duals
+are pure shadow prices, and there is no target penalty to tune.
+
+There are two safe strict paths in the hydro example.
+
+**Embedded strict DE** evaluates the policy inside the NLP against realized
+reservoir decision variables:
 
 ```julia
 prob = build_embedded_hydro_de(policy, power_data, hydro_data, T;
@@ -294,30 +300,62 @@ prob = build_embedded_hydro_de(policy, power_data, hydro_data, T;
 )
 ```
 
-In strict mode the constraint is simply ``x_t = \pi_\theta(w_t, x_{t-1}^*)``,
-the dual ``\lambda_t`` is the pure economic shadow price, and there is no
-target penalty to tune.
+Its constraint is simply ``x_t = \pi_\theta(w_t, x_{t-1}^*)``. Because the
+policy receives the realized previous state, a reachable-set map can guarantee
+that the next strict equality is feasible. The current embedded hydro oracle
+hand-codes the reachable policy Jacobian for the default single Dense head; use
+`combiner_layers = Int[]` unless that oracle is extended.
 
-## Sequential training
+**Regular strict DE** keeps the policy outside the NLP but rolls out targets
+from the known initial state:
 
-`train_tsddr` solves the full deterministic equivalent in one shot.
-For problems where this is too large (or where stage-wise gradient
-accumulation is preferred), `train_tsddr_sequential!` decomposes the
-training into sequential stage solves:
+```math
+\hat{x}_0 = x_0,\qquad
+\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}).
+```
+
+If the policy returns ``\hat{x}_t \in R(\hat{x}_{t-1}, w_t)`` at every stage,
+then the entire strict DE target trajectory is feasible by induction. The solve
+then enforces ``x_t = \hat{x}_t`` for every stage, so the realized state path is
+exactly the reachable target path. This is why strict regular DE is valid for
+the hydro reachable policy even though a generic regular DE target generator is
+open-loop after ``x_0``.
+
+The Exa hydro script exposing this path is:
+
+```bash
+DR_ENCODER_LAYERS=128,128 \
+DR_HEAD_LAYERS=128,128 \
+julia --project -t auto train_hydro_exa_strict.jl
+```
+
+`DR_ENCODER_LAYERS` controls recurrence over inflows. `DR_HEAD_LAYERS` controls
+the nonrecurrent state-conditioned target head; it can be used to make the
+reachable policy nonlinear in the current reservoir state without adding state
+recurrence.
+
+## Sequential rollout evaluation
+
+`train_tsddr` solves the full deterministic equivalent in one shot. For
+deployment diagnostics, DecisionRulesExa.jl provides `RolloutEvaluation`, which
+solves a one-stage ExaModels problem sequentially over a materialized scenario:
 
 ```julia
-train_tsddr_sequential!(
-    policy, x0, stage_problem, sampler;
+eval = RolloutEvaluation(
+    stage_problem,
+    x0,
+    eval_scenarios;
     horizon             = T,
     n_uncertainty        = nw,
     set_stage_parameters! = my_setter!,
     realized_state       = my_state_reader,
-    num_batches         = 500,
+    policy_state         = :realized,
 )
 ```
 
-This mirrors the stage-wise decomposition in DecisionRules.jl but uses
-ExaModels + MadNLP per stage.
+This mirrors deployment semantics: the policy can be evaluated with the
+realized previous state (`policy_state = :realized`) or with its previous target
+(`policy_state = :target`) to match regular-DE target-generation semantics.
 
 ## Critic control variate
 

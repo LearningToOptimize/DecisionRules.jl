@@ -259,12 +259,64 @@ The bounds ``\ell_r, u_r`` are computed from physics (no gradient flows through
 them); the gradient path is solely through ``\sigma(z_r)``, exactly as in the
 standard TS-DDR pipeline.
 
+### Why strict mode is usually closed-loop
+
+Strict target equality is naturally compatible with formulations where the
+policy sees the state from which the target must be reached.
+
+- In **stage-wise subproblems**, stage ``t`` is solved after stage ``t-1`` has
+  produced a realized state. The next policy call receives that realized state,
+  so a reachable policy can produce a target that is feasible for the next
+  strict stage solve.
+- In **embedded deterministic equivalents**, the policy is evaluated inside the
+  NLP against realized state decision variables. The strict equality then
+  couples policy output and realized next state directly.
+
+A plain deterministic equivalent is different. The training loop normally
+computes all targets before solving the coupled multi-stage NLP. Except for
+``x_0``, the policy receives its own previously predicted targets rather than
+the realized states that the optimizer will eventually choose. With an arbitrary
+policy this is open-loop target generation, so a strict equality can make the
+DE infeasible.
+
+### Strict regular DE by induction
+
+The hydro reachable policy creates an important exception. Suppose
+``x_0`` is feasible and the target rollout for a sampled inflow path is
+
+```math
+\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}),
+\qquad \hat{x}_0 = x_0,
+```
+
+with
+
+```math
+\hat{x}_t \in R(\hat{x}_{t-1}, w_t)
+```
+
+for every stage ``t``. Then the full strict deterministic-equivalent target
+trajectory is feasible. The proof is induction:
+
+1. Stage 1 is feasible because ``\hat{x}_1`` is reachable from the known
+   feasible initial state ``x_0``.
+2. If stages ``1,\ldots,t`` are feasible and strict equalities force
+   ``x_t = \hat{x}_t``, then stage ``t+1`` starts from a feasible state equal to
+   the state used by the policy rollout. Since
+   ``\hat{x}_{t+1} \in R(\hat{x}_t, w_{t+1})``, stage ``t+1`` is feasible.
+
+This is why strict mode can be used in the regular hydro DE when targets are
+generated from a reachability-preserving policy starting at the true initial
+state. The policy is still not reacting to optimizer deviations, but strict
+feasibility removes those deviations: the realized state path must equal the
+reachable target path.
+
 ### When to use strict mode
 
 Strict mode is the preferred approach when:
 
-1. The problem has **absolute recourse** — any state within the physical bounds
-   is feasible for the subproblem solver.
+1. The initial state is feasible and every policy target is **one-stage
+   reachable** from the state used as policy input.
 2. The reachable set is **easy to compute** — e.g., reservoir water balance with
    known turbine/spill bounds.
 3. You want to avoid **penalty tuning** — strict mode has no penalty hyperparameter.

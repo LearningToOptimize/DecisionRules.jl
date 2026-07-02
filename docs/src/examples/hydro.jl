@@ -5,7 +5,7 @@
 # LSTM-based) and **TS-LDR** (linear) — and compares them against an SDDP
 # baseline with inconsistent formulations.
 #
-# The Bolivia system has **10 hydro plants**, **96 monthly stages**, and
+# The Bolivia system has **11 hydro plants**, **96 monthly stages**, and
 # **AC power flow** constraints.  Inflow uncertainty is sampled from 47
 # historical scenarios.
 #
@@ -125,8 +125,8 @@ using Statistics, Random
 #
 # 1. **Encoder** — a stack of LSTM cells that processes only the uncertainty
 #    (inflow) sequence, capturing temporal dependencies across stages.
-# 2. **Combiner** — a Dense layer that merges the encoded uncertainty with the
-#    previous state to produce the next target.
+# 2. **Combiner** — a feed-forward target head that merges the encoded
+#    uncertainty with the previous state to produce the next target.
 #
 # At each stage the policy receives ``[w_t;\; x_{t-1}]`` and outputs
 # target reservoir volumes ``\hat{x}_t``:
@@ -134,8 +134,8 @@ using Statistics, Random
 # ```
 #  ┌─────────┐      ┌────────────────┐      ┌──────────────┐
 #  │   w_t   │─────▶│  LSTM encoder  │─────▶│              │
-#  └─────────┘      └────────────────┘      │    Dense     │──▶ x̂_t
-#  ┌─────────┐                              │   combiner   │
+#  └─────────┘      └────────────────┘      │ feed-forward │──▶ x̂_t
+#  ┌─────────┐                              │    head      │
 #  │ x_{t-1} │─────────────────────────────▶│              │
 #  └─────────┘                              └──────────────┘
 # ```
@@ -143,11 +143,17 @@ using Statistics, Random
 # The LSTM carries hidden state across stages, giving the policy memory of
 # past inflows.  The activation is `sigmoid` (bounding outputs to ``[0,1]``,
 # which is then scaled by the feasibility mapping).
+#
+# The `layers` argument controls recurrence over inflows only. The optional
+# `combiner_layers` argument adds hidden layers to the nonrecurrent
+# state-conditioned target head. This is the preferred way to make TS-DDR
+# nonlinear in the current reservoir state without adding recurrence over state.
 
 # ```julia
 # models = state_conditioned_policy(
 #     num_uncertainties, num_hydro, num_hydro, [128, 128];
 #     activation=sigmoid, encoder_type=Flux.LSTM,
+#     combiner_layers=[128, 128],
 # )
 # ```
 
@@ -231,6 +237,33 @@ using Statistics, Random
 # **Disadvantage**: the NLP has ``96 \times (\text{AC-OPF variables})``
 # decision variables; the policy generates targets without seeing realized
 # states (open-loop target generation).
+#
+# ### Strict regular DE with reachable targets
+#
+# Regular DE target generation is usually open-loop after ``x_0``: all targets
+# are computed before the coupled NLP solve, so later policy calls cannot see
+# realized states chosen by the optimizer. For a generic policy this makes
+# strict target equality unsafe.
+#
+# Hydro reachable policies create a special safe case. If targets are rolled out
+# as
+#
+# ```math
+# \hat{x}_0 = x_0,\qquad
+# \hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}),
+# ```
+#
+# and the policy guarantees
+#
+# ```math
+# \hat{x}_t \in R(\hat{x}_{t-1}, w_t),
+# ```
+#
+# then the target trajectory is feasible by induction. Stage 1 is reachable from
+# the feasible initial state. If strict equalities have realized
+# ``x_t = \hat{x}_t``, then stage ``t+1`` is reachable because the policy
+# computed ``\hat{x}_{t+1}`` from that same state. This is the reason the Exa
+# companion can run strict regular DE with `train_hydro_exa_strict.jl`.
 
 # ```julia
 # det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent!(
@@ -407,9 +440,9 @@ using Statistics, Random
 # from the current state ``v_{r,t-1}`` by choosing turbine flow ``q_r`` and
 # spillage ``s_r`` within their physical bounds.
 #
-# The [`HydroReachablePolicy`] wraps the same LSTM encoder + Dense combiner
-# architecture as [`StateConditionedPolicy`](@ref) but uses a **sigmoid**
-# activation to bound the output to the reachable interval:
+# The [`HydroReachablePolicy`] wraps the same LSTM uncertainty encoder plus
+# feed-forward state-conditioned target head as [`StateConditionedPolicy`](@ref)
+# but uses a **sigmoid** activation to bound the output to the reachable interval:
 #
 # ```math
 # \hat{v}_{r,t} = \ell_{r,t} + (u_{r,t} - \ell_{r,t}) \cdot \sigma(z_{r,t}),
@@ -437,6 +470,11 @@ using Statistics, Random
 
 # ```julia
 # models = hydro_reachable_policy(hydro_meta, [128, 128])
+# models_with_deep_state_head = hydro_reachable_policy(
+#     hydro_meta,
+#     [128, 128];
+#     combiner_layers=[256, 256],
+# )
 # ```
 
 # Training uses the same `train_multistage` with no penalty schedule:
@@ -519,7 +557,7 @@ using Statistics, Random
 # ## Results
 #
 # We evaluate the **strict subproblems** formulation against an SDDP
-# baseline on the Bolivia case with AC power flow (10 hydro plants, 47
+# baseline on the Bolivia case with AC power flow (11 hydro plants, 47
 # inflow scenarios).  The non-strict formulations (DE, stage-wise, multiple
 # shooting) are available through the same API but require penalty
 # scheduling and careful tuning.  Strict mode eliminates this entirely.

@@ -2,8 +2,8 @@
 #
 # This file defines HydroReachablePolicy, a policy architecture that guarantees
 # one-stage reachability for hydro reservoir targets. It wraps an LSTM encoder +
-# Dense combiner (same architecture as StateConditionedPolicy) but bounds the output
-# to the one-stage reachable set via sigmoid activation.
+# feed-forward combiner (same architecture family as StateConditionedPolicy) but
+# bounds the output to the one-stage reachable set via sigmoid activation.
 #
 # Depends on: DecisionRules (for _step_encoder, _init_recurrent_state, _state_eltype)
 # Must be included AFTER `using DecisionRules`.
@@ -16,9 +16,10 @@ using ChainRulesCore
 
 A policy that guarantees one-stage reachability for hydro reservoir targets.
 
-The policy architecture mirrors [`StateConditionedPolicy`](@ref) — an LSTM encoder
-processes the uncertainty (inflow) sequence, then a Dense combiner produces normalized
-targets in [0, 1] via sigmoid activation. These normalized targets are scaled to the
+The policy architecture mirrors [`StateConditionedPolicy`](@ref): an LSTM
+encoder processes only the uncertainty (inflow) sequence, then a feed-forward
+combiner maps `[encoded_inflow; current_reservoir_state]` to normalized targets
+in `[0, 1]` via sigmoid activation. These normalized targets are scaled to the
 one-stage **reachable set** `[lower, upper]` for each reservoir:
 
 ```math
@@ -51,9 +52,19 @@ The bounds are marked `@non_differentiable` — gradients flow only through the 
 path `σ(z_r)`, not through the bounds themselves. This matches the reference
 implementation in DecisionRulesExa.jl.
 
+# Strict-mode guarantee
+
+If `x₀` is a feasible initial reservoir state and each policy call returns
+``\hat{x}_t ∈ R(x_{t-1}, w_t)``, then the strict equality
+``x_t = \hat{x}_t`` is feasible for every stage solved in sequence. The proof is
+by induction: stage 1 is feasible because ``\hat{x}_1`` is reachable from
+``x_0``; if stage ``t`` is feasible and realizes ``x_t = \hat{x}_t``, then the
+policy computes ``\hat{x}_{t+1}`` from a feasible previous state, so stage
+``t+1`` is feasible.
+
 # Fields
 - `encoder::E`:          Recurrent cell or Chain of cells (processes inflow only)
-- `combiner::C`:         Dense layer combining encoder output with previous state
+- `combiner::C`:         Feed-forward head combining encoder output with previous state
 - `state::S`:            Recurrent state (threaded across stages)
 - `n_uncertainty::Int`:  Number of inflow dimensions (= nHyd)
 - `n_state::Int`:        Number of state dimensions (= nHyd)
@@ -69,7 +80,7 @@ See also: [`hydro_reachable_policy`](@ref), [`StateConditionedPolicy`](@ref)
 """
 mutable struct HydroReachablePolicy{E,C,S,V,SM}
     encoder::E           # Recurrent encoder (LSTM/GRU chain) processing inflow
-    combiner::C          # Dense(encoder_out + n_state => n_state, sigmoid)
+    combiner::C          # Feed-forward [encoder_out; state] => normalized target
     state::S             # Carried recurrent state, threaded across stages
     n_uncertainty::Int   # Number of uncertainty (inflow) dimensions
     n_state::Int         # Number of state (reservoir) dimensions
@@ -151,7 +162,7 @@ one-stage reachable reservoir targets.
 
 1. Split input into inflow and previous state
 2. Encode inflow through recurrent encoder (LSTM), carrying state across stages
-3. Combine encoder output with previous state via Dense(sigmoid) → y_norm ∈ [0,1]
+3. Combine encoder output with previous state via a sigmoid head → y_norm ∈ [0,1]
 4. Compute reachable bounds [lower, upper] from physics (no gradient)
 5. Scale: target = lower + (upper - lower) × y_norm
 
@@ -197,15 +208,18 @@ end
 
 """
     hydro_reachable_policy(hydro_meta, layers; encoder_type=Flux.LSTM,
-                           spill_max=nothing)
+                           spill_max=nothing, combiner_layers=Int[])
 
 Create a [`HydroReachablePolicy`](@ref) from hydro metadata (as returned by
 the 7th return value of `build_hydropowermodels`).
 
 The architecture mirrors [`state_conditioned_policy`](@ref): an LSTM encoder
-processes inflows, then a Dense combiner produces normalized targets in [0, 1].
-These are scaled to the one-stage reachable interval. The combiner uses sigmoid
-activation — this is mandatory and cannot be overridden.
+processes inflows, then a feed-forward combiner produces normalized targets in
+`[0, 1]`. These are scaled to the one-stage reachable interval. The combiner
+uses sigmoid activation — this is mandatory and cannot be overridden. Set
+`combiner_layers` to add hidden layers to the nonrecurrent state-conditioned
+target map. This is the preferred way to depart from linear decision rules
+without adding recurrence over the reservoir-state input.
 
 # Arguments
 - `hydro_meta::NamedTuple`: hydro system metadata with fields `nHyd`, `min_vol`,
@@ -216,6 +230,7 @@ activation — this is mandatory and cannot be overridden.
   `Flux.initialstates` and the stateful `(x, state) -> (output, new_state)` call
 - `spill_max`: per-unit maximum spillage vector (`nothing` = unlimited spillage,
   meaning `lower = min_vol` always)
+- `combiner_layers::Vector{Int}`: hidden widths for the nonrecurrent target head
 
 # Returns
 - `HydroReachablePolicy`: ready-to-train policy with sigmoid-bounded outputs
@@ -226,6 +241,11 @@ subproblems, _, _, _, _, _, hydro_meta = build_hydropowermodels(
     case_dir, formulation_file; strict=true, optimizer=diff_opt
 )
 policy = hydro_reachable_policy(hydro_meta, [128, 128])
+policy_with_deep_state_head = hydro_reachable_policy(
+    hydro_meta,
+    [128, 128];
+    combiner_layers=[256, 256],
+)
 ```
 
 See also: [`HydroReachablePolicy`](@ref), [`state_conditioned_policy`](@ref),
@@ -236,6 +256,7 @@ function hydro_reachable_policy(
     layers::Vector{Int};
     encoder_type=Flux.LSTM,
     spill_max=nothing,
+    combiner_layers=Int[],
 )
     nHyd = hydro_meta.nHyd
     # Validate layer sizes
@@ -259,7 +280,12 @@ function hydro_reachable_policy(
 
     # Build combiner — sigmoid activation is MANDATORY for reachable bounds guarantee
     # The sigmoid output ∈ [0, 1] is scaled to [lower, upper] in the forward pass
-    combiner = Dense(layers[end] + nHyd => nHyd, sigmoid)
+    combiner = DecisionRules.dense_policy_head(
+        layers[end] + nHyd,
+        nHyd,
+        collect(Int, combiner_layers);
+        activation=sigmoid,
+    )
 
     # Pre-compute maximum upstream inflow contribution per unit:
     # upstream_max[r] = Σ_{u ∈ upstream(r)} K × max_turn_u
@@ -321,7 +347,8 @@ end
 
 """
     load_hydro_reachable_policy(checkpoint_path, hydro_meta, layers;
-                                encoder_type=Flux.LSTM, spill_max=nothing)
+                                encoder_type=Flux.LSTM, spill_max=nothing,
+                                combiner_layers=Int[])
 
 Load a [`HydroReachablePolicy`](@ref) from a JLD2 checkpoint, reconstructing
 the hydro bounds from `hydro_meta` (since JLD2 may not preserve exact types).
@@ -332,6 +359,7 @@ the hydro bounds from `hydro_meta` (since JLD2 may not preserve exact types).
 - `layers::Vector{Int}`: encoder hidden layer sizes (must match checkpoint)
 - `encoder_type`: recurrent layer type (default: `Flux.LSTM`)
 - `spill_max`: per-unit max spillage, or `nothing` for unlimited
+- `combiner_layers::Vector{Int}`: hidden widths for the nonrecurrent target head
 
 # Returns
 - `HydroReachablePolicy`: policy with loaded weights and fresh hydro bounds
@@ -344,10 +372,12 @@ function load_hydro_reachable_policy(
     layers::Vector{Int};
     encoder_type=Flux.LSTM,
     spill_max=nothing,
+    combiner_layers=Int[],
 )
     # Build fresh policy with correct bounds from hydro_meta
     policy = hydro_reachable_policy(hydro_meta, layers; encoder_type=encoder_type,
-                                    spill_max=spill_max)
+                                    spill_max=spill_max,
+                                    combiner_layers=combiner_layers)
     # Load saved weights into the fresh policy
     model_state = JLD2.load(checkpoint_path, "model_state")
     load_policy_weights!(policy, model_state)
