@@ -236,6 +236,132 @@ target-deficit penalty, and target-violation share.
 | Stage-wise decomposition | — | JuMP only |
 | Multiple shooting | — | JuMP only |
 
+## Embedded deterministic equivalent
+
+The standard `DeterministicEquivalentProblem` treats the policy's target
+trajectory as an external parameter: the training loop generates
+``\hat{x}_{1:T}`` outside the NLP and passes it in via `set_targets!`.
+This is **open-loop** — the policy does not see the realized states
+from the coupled solve.
+
+`EmbeddedDeterministicEquivalentProblem` embeds the policy *inside*
+the NLP via a `VectorNonlinearOracle`.  The NLP constraint becomes:
+
+```math
+\pi_\theta(w_t,\, x_{t-1}^*) - x_t - \delta_t = 0 \quad \forall t
+```
+
+where ``x_{t-1}^*`` is the solver's realized state.  This is
+**closed-loop**: the policy sees realized states from the coupled solve,
+and the duals ``\lambda_t`` reflect the joint (policy + physics) system.
+
+```julia
+prob = build_embedded_deterministic_equivalent(
+    policy;
+    horizon       = T,
+    nx            = nx,
+    nu            = nu,
+    nw            = nw,
+    dynamics_eq   = my_dynamics,
+    stage_cost    = my_cost,
+    backend       = CUDABackend(),
+)
+
+train_tsddr_embedded(
+    policy, x0, prob, sampler;
+    num_batches         = 500,
+    num_train_per_batch = 4,
+    optimizer           = Flux.Adam(1f-3),
+    madnlp_kwargs       = (print_level = MadNLP.ERROR, tol = 1e-6),
+)
+```
+
+The oracle closures capture the policy **by reference** — updating Flux
+parameters between solves automatically changes the NLP without
+rebuilding it.  Use `invalidate_policy_cache!` if your oracle caches
+policy-dependent intermediates.
+
+### Strict embedded targets
+
+When the policy is guaranteed to produce feasible targets (e.g., via a
+reachable-set mapping), the slack variables ``\delta_t`` can be removed
+entirely:
+
+```julia
+prob = build_embedded_hydro_de(policy, power_data, hydro_data, T;
+    formulation    = :ac_polar,
+    strict_targets = true,
+)
+```
+
+In strict mode the constraint is simply ``x_t = \pi_\theta(w_t, x_{t-1}^*)``,
+the dual ``\lambda_t`` is the pure economic shadow price, and there is no
+target penalty to tune.
+
+## Sequential training
+
+`train_tsddr` solves the full deterministic equivalent in one shot.
+For problems where this is too large (or where stage-wise gradient
+accumulation is preferred), `train_tsddr_sequential!` decomposes the
+training into sequential stage solves:
+
+```julia
+train_tsddr_sequential!(
+    policy, x0, stage_problem, sampler;
+    horizon             = T,
+    n_uncertainty        = nw,
+    set_stage_parameters! = my_setter!,
+    realized_state       = my_state_reader,
+    num_batches         = 500,
+)
+```
+
+This mirrors the stage-wise decomposition in DecisionRules.jl but uses
+ExaModels + MadNLP per stage.
+
+## Critic control variate
+
+`train_tsddr` optionally trains a scalar critic ``C(w, \hat{x})`` that
+provides a learned control variate for the dual gradient signal.  The
+critic does not replace the NLP solve — dual multipliers remain the
+primary actor gradient.  The critic reduces gradient variance by
+subtracting a correlated baseline.
+
+```julia
+critic = Chain(Dense(input_dim => 128, tanh), Dense(128 => 128, tanh), Dense(128 => 1))
+
+cv = ScalarCriticControlVariate(critic;
+    featurizer          = default_critic_featurizer,
+    value_loss_weight   = 1.0,
+    gradient_loss_weight = 0.0,
+)
+
+critic_target = RolloutCriticTarget(stage_problem;
+    horizon            = T,
+    n_uncertainty      = nw,
+    set_stage_parameters! = my_setter!,
+    realized_state     = my_state_reader,
+    policy_state       = :target,
+)
+
+train_tsddr(policy, x0, prob, prob.p_x0, prob.p_target, prob.p_w, sampler;
+    control_variate              = cv,
+    critic_training_target       = critic_target,
+    actor_gradient_mode          = :control_variate,
+    critic_cv_weight             = 1.0,
+    critic_optimizer             = Flux.Adam(1f-3),
+)
+```
+
+Two actor modes are supported:
+
+- `:control_variate` — subtracts ``\nabla_{\hat{x}} C`` from the dual
+  signal and adds it back as a differentiable surrogate.  Unbiased when
+  the critic is exact; reduces variance otherwise.
+- `:surrogate` — blends dual and critic actor gradients via explicit
+  weights (`dual_actor_weight`, `critic_actor_weight`).  Useful when raw
+  duals are noisy, but no longer strictly unbiased.
+
 ## Full example: HydroPowerModels
 
 The `examples/HydroPowerModels/` directory in DecisionRulesExa.jl contains
@@ -250,4 +376,6 @@ a complete AC-OPF hydrothermal scheduling example for the Bolivia test case
 - GPU training with parallel MadNLP solves
 - Warm-start caching to prevent cascade solver failures
 - Penalty and sample-count annealing schedules
+- Embedded closed-loop training with strict reachable targets
+- Optional critic control variate with rollout-based value targets
 - W&B metric logging

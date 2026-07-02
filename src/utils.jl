@@ -27,21 +27,48 @@ end
 
 Create deficit variables to penalize state deviations in a JuMP model.
 
-Supports three modes:
-- L1 norm only: Uses `MOI.NormOneCone` (default if no penalty specified)
-- L2 squared norm only: Uses sum of squared deviations (solver-compatible alternative to SecondOrderCone)
-- Both norms: Creates both constraints with separate penalties
+Supports three modes controlled by the penalty keywords. Let
+``d \\in \\mathbb{R}^n`` be the deficit vector (`len = n`).
+
+**L1 norm only** (default when no penalty keyword is given, or `penalty_l1`
+alone):
+
+```math
+\\text{norm\\_deficit} \\geq \\| d \\|_1 = \\sum_{i=1}^{n} |d_i|,
+\\quad \\text{objective} \\mathrel{+}= \\lambda_1 \\cdot \\text{norm\\_deficit}.
+```
+
+Implemented via `MOI.NormOneCone(1 + n)`.
+
+**L2 squared norm only** (`penalty_l2` alone):
+
+```math
+\\text{norm\\_deficit} \\geq \\| d \\|_2^2 = \\sum_{i=1}^{n} d_i^2,
+\\quad \\text{objective} \\mathrel{+}= \\lambda_2 \\cdot \\text{norm\\_deficit}.
+```
+
+**Both norms** (`penalty_l1` and `penalty_l2`):
+
+```math
+\\text{norm\\_deficit}
+    \\geq \\lambda_1 \\| d \\|_1 + \\lambda_2 \\| d \\|_2^2,
+\\quad \\text{objective} \\mathrel{+}= 1 \\cdot \\text{norm\\_deficit}.
+```
 
 # Arguments
-- `model`: The JuMP model to add deficit variables to
-- `len`: Number of deficit variables (typically dimension of state)
-- `penalty_l1`: Penalty coefficient for L1 norm (NormOneCone). If `nothing` and L1 is used, defaults to max objective coefficient.
-- `penalty_l2`: Penalty coefficient for L2 squared norm (sum of squares). If `nothing` and L2 is used, defaults to max objective coefficient.
-- `penalty`: Legacy argument. If provided and penalty_l1/penalty_l2 are both `nothing`, uses this for L1 norm only.
+- `model`: The JuMP model to add deficit variables to.
+- `len`: Number of deficit variables (typically dimension of state).
+- `penalty_l1`: Penalty coefficient ``\\lambda_1`` for the L1 norm
+  (`NormOneCone`). Pass `:auto` to use `max |objective coefficients|`.
+- `penalty_l2`: Penalty coefficient ``\\lambda_2`` for the L2 squared norm
+  (sum of squares). Pass `:auto` to use `max |objective coefficients|`.
+- `penalty`: Legacy argument. If provided and `penalty_l1`/`penalty_l2` are
+  both `nothing`, uses this for L1 norm only.
 
 # Returns
-- `norm_deficit`: Single variable representing total penalized deviation (for logging compatibility)
-- `_deficit`: Vector of deficit variables for each state dimension
+- `norm_deficit`: Single variable representing total penalized deviation (for
+  logging compatibility).
+- `_deficit`: Vector of deficit variables for each state dimension.
 
 # Examples
 ```julia
@@ -381,6 +408,14 @@ function normalize_recur_state(state)
     end
 end
 
+"""
+    (callback::SaveBest)(iter, model, loss) -> Bool
+
+Compare `loss` against the incumbent `callback.best_loss`. When `loss` is
+strictly smaller, copy `model` to CPU, normalize recurrent state via
+[`normalize_recur_state`](@ref), and write the Flux state to
+`callback.model_path` with JLD2. Always returns `false` (never stops training).
+"""
 function (callback::SaveBest)(iter, model, loss)
     if loss < callback.best_loss
         m = cpu(model)
@@ -392,11 +427,36 @@ function (callback::SaveBest)(iter, model, loss)
     return false
 end
 
+"""
+    StallingCriterium(patience::Int, best_loss::Float64, stall_count::Int)
+
+Early-stopping callback that halts training when the loss stalls.
+
+Tracks the number of consecutive iterations without improvement. When
+`stall_count` reaches `patience`, the callback returns `true` to signal that
+training should stop. Use `best_loss = Inf` and `stall_count = 0` for a fresh
+start.
+
+# Arguments
+- `patience::Int`: maximum consecutive non-improving iterations before stopping.
+- `best_loss::Float64`: incumbent best loss. Use `Inf` to accept the first value.
+- `stall_count::Int`: current stall counter (typically initialized to `0`).
+"""
 mutable struct StallingCriterium <: Function
     patience::Int
     best_loss::Float64
     stall_count::Int
 end
+
+"""
+    (callback::StallingCriterium)(iter, model, loss) -> Bool
+
+Update the stall counter and return `true` when `stall_count >= patience`.
+
+If `loss < best_loss`, reset the counter to zero and update the incumbent.
+Otherwise increment `stall_count`. Returns `true` (stop training) once the
+patience budget is exhausted; `false` otherwise.
+"""
 function (callback::StallingCriterium)(iter, model, loss)
     if loss < callback.best_loss
         callback.best_loss = loss
@@ -448,9 +508,25 @@ function Base.empty!(sample_log::SampleLog)
     return sample_log
 end
 
+"""
+    _reset_sample_log!(sample_log::SampleLog) -> SampleLog
+    _reset_sample_log!(sample_log) -> typeof(sample_log)
+
+Clear the per-batch cache of a [`SampleLog`](@ref) before the next training
+batch. For a `SampleLog`, delegates to `Base.empty!`; for any other type the
+call is a no-op and returns `sample_log` unchanged.
+"""
 _reset_sample_log!(sample_log::SampleLog) = empty!(sample_log)
 _reset_sample_log!(sample_log) = sample_log
 
+"""
+    _total_objective_value(model::JuMP.Model) -> Float64
+    _total_objective_value(models::Vector{JuMP.Model}) -> Float64
+
+Return the objective value of `model`, falling back to the cached value
+`model.ext[:_last_obj]` (default `0.0`) when the model is dirty or
+`objective_value` throws. The multi-model method sums across all models.
+"""
 function _total_objective_value(model::JuMP.Model)
     if model.is_model_dirty
         return get(model.ext, :_last_obj, 0.0)
@@ -476,6 +552,13 @@ function (sample_log::SampleLog)(s::Int, models)
     return nothing
 end
 
+"""
+    _sequential_mean(values) -> Float64
+
+Compute the arithmetic mean of `values` using sequential accumulation (left
+fold). This preserves the same floating-point summation order as the historical
+`loss += ...; loss /= n` pattern inside the training loops.
+"""
 # Sequential accumulation keeps the same floating-point summation order as the
 # historical `loss += ...; loss /= n` pattern inside the training loops.
 function _sequential_mean(values)
@@ -642,6 +725,19 @@ function RolloutEvaluation(
     )
 end
 
+"""
+    _simulate_multistage_target_feedback(subproblems, state_params_in,
+        state_params_out, initial_state, uncertainties, decision_rules,
+        integer_strategy) -> Float64
+
+Run a stage-wise rollout where the **target** state (not the realized state) is
+fed back into the policy at each stage, matching the deterministic-equivalent
+target-generation semantics from [`simulate_states`](@ref). Each stage
+subproblem is solved sequentially; the accumulated objective value (including
+target-deficit penalties) is returned.
+
+Used by [`RolloutEvaluation`](@ref) when `policy_state == :target`.
+"""
 function _simulate_multistage_target_feedback(
     subproblems::Vector{JuMP.Model},
     state_params_in,
@@ -684,6 +780,18 @@ function _simulate_multistage_target_feedback(
     return objective
 end
 
+"""
+    (evaluation::RolloutEvaluation)(iter, model) -> Nothing
+
+Evaluate the policy on the held-out scenario set every `stride` iterations.
+
+On active iterations (`iter % stride == 0`), rolls `model` out over all fixed
+scenarios using either closed-loop (`:realized`) or target-feedback (`:target`)
+semantics. Prints `metrics/rollout_objective_no_deficit` and
+`metrics/rollout_target_violation_share`, and caches the values in
+`evaluation.last_objective_no_deficit` / `evaluation.last_violation_share`.
+Scenarios that fail to solve are skipped with a warning if all fail.
+"""
 function (evaluation::RolloutEvaluation)(iter, model)
     iter % evaluation.stride == 0 || return nothing
     total = 0.0
@@ -739,6 +847,13 @@ function (evaluation::RolloutEvaluation)(iter, model)
     return nothing
 end
 
+"""
+    var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int) -> Nothing
+
+Name `dest` after `src` with a `#t` stage suffix. If `src` has a JuMP name, the
+result is `"<name>#<t>"`; otherwise the MOI variable index is used as fallback,
+producing `"_[<index>]#<t>"`.
+"""
 function var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int)
     name = JuMP.name(src)
     if !isempty(name)
@@ -751,6 +866,19 @@ function var_set_name!(src::JuMP.VariableRef, dest::JuMP.VariableRef, t::Int)
     end
 end
 
+"""
+    add_child_model_vars!(model, subproblem, t, state_params_in, state_params_out,
+                          initial_state, var_src_to_dest) -> Dict{VariableRef,VariableRef}
+
+Copy decision variables from stage-`t` `subproblem` into the deterministic-
+equivalent `model`, populating the source-to-destination mapping
+`var_src_to_dest`. State-coupling variables (incoming parameters and outgoing
+realized-state/target pairs) are handled specially: at `t == 1` they become
+fresh parameters in `model`; at `t > 1` incoming state parameters are linked to
+the previous stage's realized state variables. Each copied variable is renamed
+via [`var_set_name!`](@ref) with a `#t` suffix. Mutates `state_params_in`,
+`state_params_out`, and `var_src_to_dest` in place; returns `var_src_to_dest`.
+"""
 function add_child_model_vars!(
     model::JuMP.Model,
     subproblem::JuMP.Model,
@@ -816,6 +944,22 @@ function add_child_model_vars!(
     return var_src_to_dest
 end
 
+"""
+    copy_and_replace_variables(src, map::Dict{VariableRef,VariableRef})
+
+Deep-copy a JuMP expression `src`, substituting every `VariableRef` key in
+`map` with its destination value. Dispatches on the concrete expression type:
+
+- `Vector`: element-wise recursive call.
+- `Real`: returned as-is (no variables to replace).
+- `VariableRef`: direct lookup in `map`.
+- `GenericAffExpr`: rebuild with remapped variable keys and same coefficients.
+- `GenericQuadExpr`: rebuild affine part and remapped `UnorderedPair` keys.
+- `GenericNonlinearExpr`: recursively remap arguments, then reconstruct via
+  `@expression`.
+
+Throws an error for unrecognized expression types.
+"""
 function copy_and_replace_variables(
     src::Vector, map::Dict{JuMP.VariableRef,JuMP.VariableRef}
 )
@@ -875,6 +1019,18 @@ function copy_and_replace_variables(src::Any, ::Dict{JuMP.VariableRef,JuMP.Varia
     )
 end
 
+"""
+    create_constraint(model, obj, var_src_to_dest) -> ConstraintRef
+
+Add a constraint to `model` whose function is `obj.func` with all `VariableRef`
+keys replaced via `var_src_to_dest` (see [`copy_and_replace_variables`](@ref)).
+
+Four methods handle different constraint types:
+- Generic `ScalarConstraint`: uses `@constraint(model, new_func in obj.set)`.
+- `ScalarConstraint{NonlinearExpr, MOI.EqualTo}`: `new_func == obj.set.value`.
+- `ScalarConstraint{NonlinearExpr, MOI.LessThan}`: `new_func <= obj.set.upper`.
+- `ScalarConstraint{NonlinearExpr, MOI.GreaterThan}`: `new_func >= obj.set.lower`.
+"""
 function create_constraint(model, obj, var_src_to_dest)
     new_func = copy_and_replace_variables(obj.func, var_src_to_dest)
     return @constraint(model, new_func in obj.set)
@@ -901,6 +1057,19 @@ function create_constraint(
     return @constraint(model, new_func >= obj.set.lower)
 end
 
+"""
+    add_child_model_exps!(model, subproblem, var_src_to_dest, state_params_out,
+                          state_params_in, t) -> Dict
+
+Copy all constraints and the objective contribution from stage-`t` `subproblem`
+into the deterministic-equivalent `model`, remapping variables through
+`var_src_to_dest` via [`create_constraint`](@ref) and
+[`copy_and_replace_variables`](@ref). Constraint-based state parameters and
+input parameters at `t == 1` are updated to point to the new model's
+constraint refs. The subproblem objective is added to `model`'s existing
+objective. Returns a `Dict` mapping source `ConstraintRef` to destination
+`ConstraintRef`.
+"""
 function add_child_model_exps!(
     model::JuMP.Model,
     subproblem::JuMP.Model,
@@ -1039,6 +1208,14 @@ function _remap_uncertainties(
     ]
 end
 
+"""
+    find_variables(model::JuMP.Model, variable_name_parts::Vector{<:AbstractString})
+
+Return variables from `model` whose JuMP name contains **all** substrings in
+`variable_name_parts`. When the initial filter yields more than one variable,
+results are reordered by matching `"<first_part>[i]"` for `i = 1, 2, ...` to
+produce a consistently indexed vector.
+"""
 function find_variables(model::JuMP.Model, variable_name_parts::Vector{S}) where {S}
     all_vars = all_variables(model)
     interest_vars = all_vars[findall(

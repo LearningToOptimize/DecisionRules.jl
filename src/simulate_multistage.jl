@@ -72,6 +72,31 @@ function simulate_stage(
     )
 end
 
+"""
+    _set_stage_parameters!(state_param_in, state_param_out, uncertainty,
+                           state_in, state_out_target) -> Nothing
+
+Write MOI parameter values into a single-stage JuMP subproblem before solving.
+
+Three groups of parameters are set:
+
+1. **Incoming state** ``x_{t-1}``: each element of `state_param_in` receives
+   the corresponding entry of `state_in`.
+2. **Uncertainty** ``w_t``: each `(parameter, value)` pair in `uncertainty`
+   is written directly.
+3. **Outgoing target** ``\\hat{x}_t``: the first element of each tuple in
+   `state_param_out` (the target parameter) receives the corresponding
+   entry of `state_out_target`.
+
+After this call the subproblem is ready for `optimize!`.
+
+# Arguments
+- `state_param_in`: JuMP parameter variables for the incoming state.
+- `state_param_out`: `(target_parameter, realized_state_variable)` pairs.
+- `uncertainty`: `(parameter, value)` pairs for stage uncertainty ``w_t``.
+- `state_in::AbstractVector{<:Real}`: realized incoming state ``x_{t-1}``.
+- `state_out_target::AbstractVector{<:Real}`: policy target ``\\hat{x}_t``.
+"""
 function _set_stage_parameters!(
     state_param_in,
     state_param_out,
@@ -79,17 +104,17 @@ function _set_stage_parameters!(
     state_in,
     state_out_target,
 )
-    # Update state parameters
+    # Write the realized incoming state into the input-state parameters.
     for (i, state_var) in enumerate(state_param_in)
         set_parameter_value(state_var, state_in[i])
     end
 
-    # Update uncertainty
+    # Write sampled exogenous values into the uncertainty parameters.
     for (uncertainty_param, uncertainty_value) in uncertainty
         set_parameter_value(uncertainty_param, uncertainty_value)
     end
 
-    # Update state parameters out
+    # Write policy targets into the output-state target parameters.
     for i in 1:length(state_param_out)
         state_var = state_param_out[i][1]
         set_parameter_value(state_var, state_out_target[i])
@@ -97,6 +122,27 @@ function _set_stage_parameters!(
     return nothing
 end
 
+"""
+    _simulate_stage(subproblem, state_param_in, state_param_out, uncertainty,
+                    state_in, state_out_target, integer_strategy) -> Float64
+
+Forward-solve one stage of the multistage problem and return the objective.
+
+Sets all parameters via [`_set_stage_parameters!`](@ref), then solves
+`subproblem` through [`with_sensitivity_solution`](@ref) (which applies the
+`integer_strategy` for models with discrete variables). Returns the scalar
+optimal objective value ``q_t(x_{t-1}, w_t; \\hat{x}_t)``.
+
+# Arguments
+- `subproblem::JuMP.Model`: stage-``t`` JuMP model.
+- `state_param_in`: incoming-state parameters.
+- `state_param_out`: `(target_parameter, realized_state_variable)` pairs.
+- `uncertainty`: `(parameter, value)` pairs for ``w_t``.
+- `state_in`: realized incoming state ``x_{t-1}``.
+- `state_out_target`: policy target ``\\hat{x}_t``.
+- `integer_strategy::AbstractIntegerStrategy`: controls how discrete
+  variables are handled during the solve.
+"""
 function _simulate_stage(
     subproblem::JuMP.Model,
     state_param_in,
@@ -106,15 +152,51 @@ function _simulate_stage(
     state_out_target,
     integer_strategy::AbstractIntegerStrategy,
 )
+    # Write all parameter values into the model before solving.
     _set_stage_parameters!(
         state_param_in, state_param_out, uncertainty, state_in, state_out_target
     )
 
+    # Solve and extract the objective value inside the sensitivity wrapper.
     return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
         return objective_value(sensitivity_model)
     end
 end
 
+"""
+    _simulate_stage_with_parameter_duals(subproblem, state_param_in, state_param_out,
+                                         uncertainty, state_in, state_out_target,
+                                         integer_strategy)
+        -> (objective, d_state_in, d_state_out_target)
+
+Forward-solve one stage and extract parameter duals for the rrule pullback.
+
+Like [`_simulate_stage`](@ref), this sets parameters and solves the stage
+problem. In addition it reads the dual sensitivities via [`pdual`](@ref):
+
+```math
+\\mu_t  = \\frac{\\partial q_t}{\\partial x_{t-1}}, \\qquad
+\\lambda_t = \\frac{\\partial q_t}{\\partial \\hat{x}_t}.
+```
+
+These duals are the preferred (closed-form) gradient path used by the
+[`simulate_stage`](@ref) rrule when parameter duals are available from the
+solver.
+
+# Arguments
+- `subproblem`: stage-``t`` JuMP model.
+- `state_param_in`: incoming-state parameters (yields ``\\mu_t``).
+- `state_param_out`: target parameters (yields ``\\lambda_t``).
+- `uncertainty`: `(parameter, value)` pairs for ``w_t``.
+- `state_in`: realized incoming state ``x_{t-1}``.
+- `state_out_target`: policy target ``\\hat{x}_t``.
+- `integer_strategy::AbstractIntegerStrategy`: discrete-variable strategy.
+
+# Returns
+- `objective::Float64`: optimal stage cost ``q_t``.
+- `d_state_in::Vector{Float64}`: ``\\mu_t`` (sensitivities w.r.t. incoming state).
+- `d_state_out_target::Vector{Float64}`: ``\\lambda_t`` (sensitivities w.r.t. target).
+"""
 function _simulate_stage_with_parameter_duals(
     subproblem,
     state_param_in,
@@ -124,12 +206,16 @@ function _simulate_stage_with_parameter_duals(
     state_out_target,
     integer_strategy::AbstractIntegerStrategy,
 )
+    # Write all parameter values into the model before solving.
     _set_stage_parameters!(
         state_param_in, state_param_out, uncertainty, state_in, state_out_target
     )
     return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
+        # Read the optimal objective value.
         objective = objective_value(sensitivity_model)
+        # Extract duals w.r.t. incoming state parameters (mu_t).
         d_state_in = pdual.(state_param_in)
+        # Extract duals w.r.t. target parameters (lambda_t).
         d_state_out_target = pdual.([s[1] for s in state_param_out])
         return objective, d_state_in, d_state_out_target
     end
@@ -336,15 +422,48 @@ function ChainRulesCore.rrule(
     return y, public_pullback
 end
 
+"""
+    get_objective_no_target_deficit(subproblem::JuMP.Model;
+                                   norm_deficit="norm_deficit") -> Float64
+
+Compute the operational cost of a solved subproblem, excluding the
+target-deficit penalty.
+
+The full objective includes a penalty ``C_\\delta \\|\\delta_t\\|`` that
+penalizes deviations between realized and target states. This function
+strips those terms so that logged costs reflect true operational cost:
+
+```math
+\\text{cost}_t = q_t - \\sum_{j \\in \\mathcal{D}} c_j \\, \\delta_j,
+```
+
+where ``\\mathcal{D}`` is the set of variables whose names contain
+`norm_deficit`.
+
+If the model is dirty (parameters changed since last solve) or the
+objective cannot be parsed, returns the cached value from a previous
+successful call (stored in `subproblem.ext[:_last_obj_no_deficit]`),
+defaulting to `0.0`.
+
+# Arguments
+- `subproblem::JuMP.Model`: a solved JuMP model.
+
+# Keywords
+- `norm_deficit::AbstractString`: substring matched against variable names
+  to identify deficit-penalty terms.
+"""
 function get_objective_no_target_deficit(
     subproblem::JuMP.Model; norm_deficit::AbstractString="norm_deficit"
 )
+    # If parameters were changed after the last solve, return the cached value.
     if subproblem.is_model_dirty
         return get(subproblem.ext, :_last_obj_no_deficit, 0.0)
     end
     try
+        # Parse the symbolic objective to identify deficit-penalty terms.
         obj = JuMP.objective_function(subproblem)
         objective_val = objective_value(subproblem)
+        # Subtract each term whose variable name contains the deficit marker.
         for term in obj.terms
             if occursin(norm_deficit, JuMP.name(term[1]))
                 objective_val -= term[2] * value(term[1])
@@ -352,13 +471,31 @@ function get_objective_no_target_deficit(
         end
         return objective_val
     catch
+        # Fallback: return cached value if objective parsing fails.
         return get(subproblem.ext, :_last_obj_no_deficit, 0.0)
     end
 end
 
+"""
+    get_objective_no_target_deficit(subproblems::Vector{JuMP.Model};
+                                   norm_deficit="norm_deficit") -> Float64
+
+Sum the deficit-free operational costs across all stage subproblems.
+
+Calls the single-model [`get_objective_no_target_deficit`](@ref) on each
+element and returns the total.
+
+# Arguments
+- `subproblems::Vector{JuMP.Model}`: one solved JuMP model per stage.
+
+# Keywords
+- `norm_deficit::AbstractString`: substring matched against variable names
+  to identify deficit-penalty terms.
+"""
 function get_objective_no_target_deficit(
     subproblems::Vector{JuMP.Model}; norm_deficit::AbstractString="norm_deficit"
 )
+    # Accumulate deficit-free costs across all stages.
     total_objective = 0.0
     for subproblem in subproblems
         total_objective += get_objective_no_target_deficit(
@@ -379,10 +516,40 @@ function ChainRulesCore.rrule(
     return objective_val, _pullback
 end
 
+"""
+    apply_rule(stage::Int, decision_rule, uncertainty, state_in) -> Vector
+
+Apply a single (shared) policy to produce the target state for stage `stage`.
+
+The policy receives a concatenated input vector
+``[w_t^{(1)}, \\ldots, w_t^{(n_w)}, x_{t-1}^{(1)}, \\ldots, x_{t-1}^{(n_x)}]``
+and returns the next target ``\\hat{x}_t = \\pi_\\theta(w_t, x_{t-1})``.
+
+# Arguments
+- `stage::Int`: current stage index (unused when a single rule is shared).
+- `decision_rule`: callable policy ``\\pi_\\theta``.
+- `uncertainty`: `(parameter, value)` pairs for ``w_t``; values are extracted.
+- `state_in`: realized incoming state ``x_{t-1}``.
+"""
 function apply_rule(::Int, decision_rule::T, uncertainty, state_in) where {T}
+    # Concatenate uncertainty values and incoming state into the policy input.
     return decision_rule(vcat([uncertainty[i][2] for i in 1:length(uncertainty)], state_in))
 end
 
+"""
+    apply_rule(stage::Int, decision_rules::Vector, uncertainty, state_in) -> Vector
+
+Apply a stage-specific policy from a vector of per-stage decision rules.
+
+Dispatches to `apply_rule(stage, decision_rules[stage], uncertainty, state_in)`,
+selecting the rule at index `stage`.
+
+# Arguments
+- `stage::Int`: current stage index, used to select `decision_rules[stage]`.
+- `decision_rules::Vector`: one callable policy per stage.
+- `uncertainty`: `(parameter, value)` pairs for ``w_t``.
+- `state_in`: realized incoming state ``x_{t-1}``.
+"""
 function apply_rule(stage::Int, decision_rules::Vector{T}, uncertainty, state_in) where {T}
     return apply_rule(stage, decision_rules[stage], uncertainty, state_in)
 end
@@ -467,6 +634,32 @@ function simulate_multistage(
     )
 end
 
+"""
+    _set_multistage_parameters!(state_params_in, state_params_out,
+                                uncertainties, states) -> Nothing
+
+Write MOI parameter values into a deterministic-equivalent JuMP model
+across all ``T`` stages before solving.
+
+For each stage ``t = 1, \\ldots, T``:
+
+- **Initial state** (``t = 1`` only): `state_params_in[1]` receives
+  `states[1]` (the initial state ``x_0``).
+- **Uncertainty** ``w_t``: each `(parameter, value)` pair in
+  `uncertainties[t]` is written.
+- **Target** ``\\hat{x}_t``: the target parameters in
+  `state_params_out[t]` receive `states[t + 1]`.
+
+Note that `state_params_in[t]` for ``t > 1`` is NOT set here because in the
+deterministic equivalent the incoming state is an internal variable linked
+by constraints, not a parameter.
+
+# Arguments
+- `state_params_in`: per-stage vectors of incoming-state parameters.
+- `state_params_out`: per-stage vectors of `(target_parameter, state_variable)`.
+- `uncertainties`: per-stage `(parameter, value)` pairs for ``w_t``.
+- `states`: length-``(T+1)`` target trajectory ``[x_0, \\hat{x}_1, \\ldots, \\hat{x}_T]``.
+"""
 function _set_multistage_parameters!(
     state_params_in,
     state_params_out,
@@ -475,19 +668,20 @@ function _set_multistage_parameters!(
 )
     for t in 1:length(state_params_in)
         state = states[t]
-        # Update state parameters in
+        # Only the initial state (t=1) is set as a parameter; later incoming
+        # states are internal variables in the deterministic equivalent.
         if t == 1
             for (i, state_var) in enumerate(state_params_in[t])
                 set_parameter_value(state_var, state[i])
             end
         end
 
-        # Update uncertainty
+        # Write sampled exogenous values into this stage's uncertainty parameters.
         for (uncertainty_param, uncertainty_value) in uncertainties[t]
             set_parameter_value(uncertainty_param, uncertainty_value)
         end
 
-        # Update state parameters out
+        # Write policy targets into this stage's output-state target parameters.
         for i in 1:length(state_params_out[t])
             state_var = state_params_out[t][i][1]
             set_parameter_value(state_var, states[t + 1][i])
@@ -496,6 +690,26 @@ function _set_multistage_parameters!(
     return nothing
 end
 
+"""
+    _simulate_multistage_det(det_equivalent, state_params_in, state_params_out,
+                             uncertainties, states, integer_strategy) -> Float64
+
+Solve the deterministic-equivalent model for a single uncertainty trajectory
+and return the optimal objective.
+
+Sets all parameters via [`_set_multistage_parameters!`](@ref), solves the
+coupled full-horizon problem ``Q(w; \\theta)`` through
+[`with_sensitivity_solution`](@ref), and caches both the full objective and
+the deficit-free operational cost in `det_equivalent.ext` for logging.
+
+# Arguments
+- `det_equivalent::JuMP.Model`: full-horizon coupled JuMP model.
+- `state_params_in`: per-stage incoming-state parameters.
+- `state_params_out`: per-stage `(target_parameter, state_variable)` pairs.
+- `uncertainties`: per-stage `(parameter, value)` pairs for ``w_t``.
+- `states`: length-``(T+1)`` target trajectory from the policy.
+- `integer_strategy::AbstractIntegerStrategy`: discrete-variable strategy.
+"""
 function _simulate_multistage_det(
     det_equivalent::JuMP.Model,
     state_params_in,
@@ -504,10 +718,13 @@ function _simulate_multistage_det(
     states,
     integer_strategy::AbstractIntegerStrategy,
 )
+    # Write the full target trajectory and uncertainty into the DE model.
     _set_multistage_parameters!(state_params_in, state_params_out, uncertainties, states)
 
     return with_sensitivity_solution(det_equivalent, integer_strategy) do sensitivity_model
+        # Read the optimal objective value after solving.
         obj = objective_value(sensitivity_model)
+        # Cache both the full and deficit-free objectives for logging.
         sensitivity_model.ext[:_last_obj] = obj
         sensitivity_model.ext[:_last_obj_no_deficit] =
             get_objective_no_target_deficit(sensitivity_model)
@@ -515,6 +732,42 @@ function _simulate_multistage_det(
     end
 end
 
+"""
+    _simulate_multistage_det_with_parameter_duals(det_equivalent, state_params_in,
+                                                   state_params_out, uncertainties,
+                                                   states, integer_strategy)
+        -> (objective, Δ_states)
+
+Solve the deterministic equivalent and extract parameter duals for the
+rrule pullback.
+
+Like [`_simulate_multistage_det`](@ref), this sets parameters and solves the
+full-horizon problem. In addition it reads the dual sensitivities via
+[`pdual`](@ref) for each stage:
+
+```math
+\\Delta_{\\text{states}}[1] = \\frac{\\partial Q}{\\partial x_0}, \\qquad
+\\Delta_{\\text{states}}[t+1] = \\lambda_t = \\frac{\\partial Q}{\\partial \\hat{x}_t},
+\\quad t = 1, \\ldots, T.
+```
+
+These ``\\lambda_t`` duals are the envelope-theorem gradient used in the
+TS-DDR training objective (arXiv:2405.14973, Eq. 1.2).
+
+# Arguments
+- `det_equivalent`: full-horizon coupled JuMP model.
+- `state_params_in`: per-stage incoming-state parameters.
+- `state_params_out`: per-stage `(target_parameter, state_variable)` pairs.
+- `uncertainties`: per-stage `(parameter, value)` pairs for ``w_t``.
+- `states`: length-``(T+1)`` target trajectory from the policy.
+- `integer_strategy::AbstractIntegerStrategy`: discrete-variable strategy.
+
+# Returns
+- `objective::Float64`: optimal coupled objective ``Q(w; \\theta)``.
+- `Δ_states::Vector{Vector{Float64}}`: length-``(T+1)`` vector of parameter
+  duals; `Δ_states[1]` holds ``\\partial Q / \\partial x_0`` and
+  `Δ_states[t+1]` holds ``\\lambda_t``.
+"""
 function _simulate_multistage_det_with_parameter_duals(
     det_equivalent,
     state_params_in,
@@ -523,13 +776,18 @@ function _simulate_multistage_det_with_parameter_duals(
     states,
     integer_strategy::AbstractIntegerStrategy,
 )
+    # Write the full target trajectory and uncertainty into the DE model.
     _set_multistage_parameters!(state_params_in, state_params_out, uncertainties, states)
 
     return with_sensitivity_solution(det_equivalent, integer_strategy) do sensitivity_model
+        # Read the optimal objective value after solving.
         objective = objective_value(sensitivity_model)
+        # Cache both the full and deficit-free objectives for logging.
         sensitivity_model.ext[:_last_obj] = objective
         sensitivity_model.ext[:_last_obj_no_deficit] =
             get_objective_no_target_deficit(sensitivity_model)
+        # Build the per-stage dual vector: initial-state duals at index 1,
+        # target-constraint duals lambda_t at index t+1.
         Δ_states = similar(states)
         Δ_states[1] = pdual.(state_params_in[1])
         for t in 1:length(state_params_out)
@@ -1248,15 +1506,42 @@ function train_multistage(
     return model
 end
 
+"""
+    sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states) -> Vector{Float32}
+
+Compute the target state at position `t` in the trajectory.
+
+For ``t = 1`` returns `Float32.(initial_state)` (the fixed initial condition
+``x_0``). For ``t > 1`` evaluates the policy on the concatenated input:
+
+```math
+\\hat{x}_t = \\pi_\\theta\\bigl([w_{t-1},\\; \\hat{x}_{t-1}]\\bigr),
+```
+
+where ``w_{t-1}`` = `uncertainty_sample_vec[t-1]` and
+``\\hat{x}_{t-1}`` = `prev_states[t-1]`.
+
+This helper is used inside the DE training loop to build the target
+trajectory incrementally (via `accumulate`-style recursion).
+
+# Arguments
+- `t::Int`: one-based position in the trajectory (1 = initial state).
+- `m`: differentiable Flux policy ``\\pi_\\theta``.
+- `initial_state`: fixed initial state ``x_0``.
+- `uncertainty_sample_vec`: per-stage uncertainty value vectors
+  (length ``T``; each entry is a plain `Vector` of numeric values).
+- `prev_states`: previously computed target states ``[\\hat{x}_0, \\ldots, \\hat{x}_{t-1}]``.
+"""
 function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
-    # Input: [uncertainty, previous_predicted_state]
-    # For t=1: return initial_state (no prediction needed)
-    # For t>1: policy receives [uncertainty[t-1], prev_states[t-1]]
+    # t=1 is the fixed initial condition; no policy evaluation needed.
     if t == 1
         return Float32.(initial_state)
     else
+        # Extract the uncertainty values for stage t-1.
         uncertainties_t = uncertainty_sample_vec[t - 1]
+        # Use the previous target state as the recurrent input.
         prev_state = prev_states[t - 1]
+        # Evaluate the policy on [uncertainty, previous_state].
         return m(vcat(uncertainties_t, prev_state))
     end
 end

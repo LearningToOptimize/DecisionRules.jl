@@ -113,11 +113,53 @@ tests to ensure that controlled problems never silently produce zero gradients.
 """
 struct ErrorGradientFallback <: AbstractGradientFallback end
 
+"""
+    _zero_cotangents(n_in, n_out)
+
+Create a tuple of zero/no tangents compatible with the `get_next_state` rrule pullback signature.
+
+Used by [`handle_gradient_error`](@ref) to produce a safe, neutral gradient when the
+solver or DiffOpt differentiation fails. The returned tuple matches the cotangent
+layout expected by `ChainRulesCore.rrule` for `get_next_state`:
+four `NoTangent()` entries (for the function itself and non-differentiable arguments),
+followed by dense zero vectors for the state-in and state-out dimensions, and a
+trailing `NoTangent()`.
+
+# Arguments
+- `n_in::Int`: dimension of the incoming state vector.
+- `n_out::Int`: dimension of the outgoing state vector.
+
+# Returns
+A `Tuple` of `NoTangent` and `Vector{Float64}` elements that Zygote can propagate
+without error.
+"""
 _zero_cotangents(n_in, n_out) = (
     NoTangent(), NoTangent(), NoTangent(), NoTangent(),
     zeros(n_in), zeros(n_out), NoTangent(),
 )
 
+"""
+    handle_gradient_error(fallback::AbstractGradientFallback, e, n_state_in, n_state_out)
+
+Handle an exception raised inside the `get_next_state` rrule pullback.
+
+This is the **rrule-level** extension point: it is called when the backward pass
+through a single stage fails (e.g., the solver returned an infeasible status and
+DiffOpt cannot differentiate). Concrete methods decide whether to absorb the
+error or propagate it.
+
+# Arguments
+- `fallback::AbstractGradientFallback`: dispatch tag controlling recovery behavior.
+- `e`: the caught exception.
+- `n_state_in::Int`: dimension of the incoming state vector (needed to build zero cotangents).
+- `n_state_out::Int`: dimension of the outgoing state vector.
+
+# Returns
+A cotangent tuple (same layout as [`_zero_cotangents`](@ref)) when the error is
+absorbed, or does not return (re-throws) when the error is propagated.
+
+See [`AbstractGradientFallback`](@ref) for how to implement custom subtypes.
+"""
 function handle_gradient_error(::ZeroGradientFallback, e, n_state_in, n_state_out)
     @warn "get_next_state pullback failed — returning zero gradients" exception=(e, catch_backtrace())
     return _zero_cotangents(n_state_in, n_state_out)
@@ -127,6 +169,27 @@ function handle_gradient_error(::ErrorGradientFallback, e, n_state_in, n_state_o
     rethrow(e)
 end
 
+"""
+    handle_training_error(fallback::AbstractGradientFallback, e, iter)
+
+Handle an exception raised during a full training iteration (gradient computation
+and parameter update).
+
+This is the **training-loop-level** extension point: it is called when
+`Zygote.gradient` or the subsequent optimizer update throws (e.g., a DiffOpt
+assertion error or a numerical issue in the loss computation). Unlike
+[`handle_gradient_error`](@ref), which operates inside a single-stage rrule,
+this handler wraps the entire forward-backward pass for one iteration.
+
+# Arguments
+- `fallback::AbstractGradientFallback`: dispatch tag controlling recovery behavior.
+- `e`: the caught exception.
+- `iter::Int`: current training iteration index (used in log messages).
+
+# Returns
+- `true` to skip this iteration and continue training.
+- Does not return (re-throws) when the error should propagate.
+"""
 function handle_training_error(::ZeroGradientFallback, e, iter)
     @warn "Gradient computation failed at iter $iter — skipping update" exception=(e, catch_backtrace())
     return true
@@ -136,6 +199,25 @@ function handle_training_error(::ErrorGradientFallback, e, iter)
     rethrow(e)
 end
 
+"""
+    handle_rollout_error(fallback::AbstractGradientFallback, e, iter)
+
+Handle an exception raised during a rollout evaluation scenario.
+
+This is the **rollout-level** extension point: it is called when a single
+out-of-sample scenario fails during [`RolloutEvaluation`](@ref) (e.g., solver
+infeasibility on an unseen uncertainty sample). Absorbing the error skips that
+scenario and lets the evaluation continue with the remaining samples.
+
+# Arguments
+- `fallback::AbstractGradientFallback`: dispatch tag controlling recovery behavior.
+- `e`: the caught exception.
+- `iter::Int`: scenario index within the rollout batch.
+
+# Returns
+- `true` to skip this scenario and continue the rollout.
+- Does not return (re-throws) when the error should propagate.
+"""
 function handle_rollout_error(::ZeroGradientFallback, e, iter)
     @warn "Rollout scenario failed at iter $iter — skipping" exception=(e, catch_backtrace())
     return true

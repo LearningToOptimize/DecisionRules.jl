@@ -18,13 +18,20 @@ dynamics and constraints. Lagrange duals and implicit differentiation (via
 [DiffOpt.jl](https://github.com/jump-dev/DiffOpt.jl)) provide the gradient signal to
 update the policy end-to-end.
 
-Three training formulations are supported:
+Four training formulations are supported:
 
 | Formulation | Horizon coupling | Gradient source |
 |:---|:---|:---|
 | **Deterministic Equivalent** | Full horizon, one large NLP | Duals on the coupled problem |
 | **Stage-wise (single shooting)** | Sequential rollout | Duals + DiffOpt per stage |
 | **Multiple Shooting** | Windowed sub-horizons | DiffOpt per window, continuity penalties |
+| **Strict subproblems** | Sequential rollout, no slack | Pure shadow-price duals |
+
+The **strict subproblems** formulation eliminates the target-slack penalty entirely by
+enforcing hard equality constraints between the policy's targets and the realized state.
+Combined with a feasibility-guaranteeing policy (e.g., `HydroReachablePolicy` for hydro
+scheduling), this produces clean gradient signals with no penalty tuning — the dual
+``\lambda_t`` is the pure shadow price, uncontaminated by any regularization term.
 
 ## Installation
 

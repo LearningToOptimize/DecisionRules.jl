@@ -203,6 +203,76 @@ Phase 4 (lock):    λ × 30.0  — final precision
 
 This is the `default_annealed` schedule, activated with `penalty_schedule=:default_annealed`.
 
+## Strict mode: penalty-free gradient signal
+
+The standard TS-DDR formulation uses a penalty ``C_\delta \|\delta_t\|`` to
+penalize deviations from the policy's targets. While effective, the penalty
+introduces a trade-off: the dual ``\lambda_t`` conflates the **economic shadow
+price** with a **penalty-correction term**. At high penalty, the gradient
+signal tells the policy "reduce ``\delta``" rather than "be economically
+optimal."
+
+**Strict mode** eliminates this coupling entirely by replacing the slack
+constraint ``x_t + \delta_t = \hat{x}_t`` with a **hard equality**:
+
+```math
+x_t = \hat{x}_t \quad :\lambda_t
+```
+
+There are no deficit variables, no penalty term, and no penalty to tune. The
+dual ``\lambda_t`` is the **pure shadow price** ``\partial Q_t / \partial
+\hat{x}_t`` — the marginal value of changing the target, uncontaminated by
+any regularization.
+
+### Feasibility-guaranteeing policies
+
+Strict mode requires that the policy always produce feasible targets — if the
+target is outside the feasible set, the subproblem has no slack to absorb the
+violation and becomes infeasible. This is guaranteed by construction through a
+**reachable-set policy** that bounds its output to the one-stage reachable set.
+
+For hydro scheduling with reservoir ``r``, the one-stage reachable set from
+current volume ``v_r`` under inflow ``w_r`` is:
+
+```math
+\hat{v}_r \in
+\Bigl[
+  \max\bigl(\underline{v}_r,\; v_r + K w_r - K \overline{q}_r - \overline{s}_r
+        + \sum_{u \in U_r^{\text{turn}}} K \underline{q}_u\bigr),\;
+  \min\bigl(\overline{v}_r,\; v_r + K w_r - K \underline{q}_r
+        + \sum_{u \in U_r^{\text{turn}}} K \overline{q}_u\bigr)
+\Bigr],
+```
+
+where ``K`` is the water-balance conversion factor, ``\underline{q}_r,
+\overline{q}_r`` are turbine bounds, ``\overline{s}_r`` is the spill bound,
+and ``U_r^{\text{turn}}`` is the set of upstream units feeding into ``r``.
+
+The [`HydroReachablePolicy`] implements this by passing the LSTM encoder output
+through a sigmoid activation and scaling the result to ``[\ell_r, u_r]``:
+
+```math
+\hat{v}_r = \ell_r + (u_r - \ell_r) \cdot \sigma(z_r).
+```
+
+The bounds ``\ell_r, u_r`` are computed from physics (no gradient flows through
+them); the gradient path is solely through ``\sigma(z_r)``, exactly as in the
+standard TS-DDR pipeline.
+
+### When to use strict mode
+
+Strict mode is the preferred approach when:
+
+1. The problem has **absolute recourse** — any state within the physical bounds
+   is feasible for the subproblem solver.
+2. The reachable set is **easy to compute** — e.g., reservoir water balance with
+   known turbine/spill bounds.
+3. You want to avoid **penalty tuning** — strict mode has no penalty hyperparameter.
+
+In the [Hydropower Scheduling](@ref) example, strict mode with a
+`HydroReachablePolicy` achieves competitive simulation costs out of the box,
+with no penalty schedule, no annealing, and no hyperparameter search.
+
 ## Evaluation semantics
 
 A policy trained on the deterministic equivalent generates targets using **target-state

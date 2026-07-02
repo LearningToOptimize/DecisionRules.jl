@@ -3,7 +3,7 @@
 This directory contains the primary application from the paper: training
 Two-Stage Deep Decision Rules (TS-DDR) for the Bolivia Long-Term
 Hydrothermal Dispatching problem with 10 hydro units, 96 monthly stages,
-and AC/SOC/DC power-flow formulations.
+and AC power-flow constraints.
 
 ## Problem overview
 
@@ -13,32 +13,53 @@ drive reservoir levels; the decision rule maps (inflow history, current
 state) to reservoir-level targets, and an NLP optimizer dispatches
 generation to meet those targets at minimum cost.
 
+## Quick start: strict mode (recommended)
+
+Strict mode eliminates the target-penalty hyperparameter by enforcing
+hard equality constraints between targets and realized states.  A
+`HydroReachablePolicy` guarantees that every target is physically
+achievable.
+
+```bash
+# Train with stage-wise decomposition, strict mode, 126 stages
+julia --project -t auto train_dr_hydropowermodels_subproblems.jl \
+    --strict --stages 126
+
+# Evaluate on 100 held-out scenarios, 96 stages
+julia --project -t auto eval_strict_rollout.jl \
+    bolivia/ACPPowerModel/models/<checkpoint>.jld2
+```
+
+The training script logs to Weights & Biases and saves model checkpoints.
+The evaluation script writes per-scenario costs, mean reservoir volumes,
+and mean thermal generation to CSV files for comparison against SDDP.
+
 ## Training scripts
 
-### TS-DDR (Deep Decision Rules — LSTM policy)
+### Strict subproblems (no penalty tuning)
 
-| Script | Decomposition | Reference |
-|--------|--------------|-----------|
-| `train_dr_hydropowermodels.jl` | Deterministic equivalent (GPU-enabled) | Extension §1 |
-| `train_dr_hydropowermodels_subproblems.jl` | Stage-wise (single shooting) | Extension §2 |
-| `train_dr_hydropowermodels_multipleshooting.jl` | Windowed (multiple shooting) | Extension §3 |
+| Script | Description |
+|--------|-------------|
+| `train_dr_hydropowermodels_subproblems.jl` | Stage-wise decomposition with `--strict` flag; uses `HydroReachablePolicy` for feasibility-guaranteed targets |
 
-These use a `StateConditionedPolicy` (LSTM encoder + state-conditioned dense
-layers, `[128, 128]`, sigmoid activation).
+### Non-strict formulations (require penalty tuning)
 
-### TS-LDR (Linear Decision Rules — linear policy)
-
-| Script | Decomposition | Reference |
-|--------|--------------|-----------|
-| `train_ldr_hydropowermodels.jl` | Deterministic equivalent (GPU-enabled) | §3 |
-
-TS-LDR uses `dense_multilayer_nn` with identity activation — a composition
-of linear layers that is equivalent to a single linear map from
-(uncertainties, state) to targets.  Same training pipeline as TS-DDR; the
-only difference is the policy architecture.
+| Script | Decomposition |
+|--------|--------------|
+| `train_dr_hydropowermodels.jl` | Deterministic equivalent (full-horizon coupled NLP) |
+| `train_dr_hydropowermodels_subproblems.jl` | Stage-wise (single shooting) |
+| `train_dr_hydropowermodels_multipleshooting.jl` | Windowed (multiple shooting, `W=12`) |
+| `train_ldr_hydropowermodels.jl` | Linear decision rules (identity activation) |
 
 All training scripts share the data loader (`load_hydropowermodels.jl`),
 log to Weights & Biases, and save the best model to JLD2.
+
+### Key files
+
+| File | Description |
+|------|-------------|
+| `load_hydropowermodels.jl` | Builds JuMP stage subproblems from MOF + hydro JSON + inflow CSV; supports `strict=true` for penalty-free targets |
+| `hydro_reachable_policy.jl` | `HydroReachablePolicy` — bounds LSTM output to the one-stage reachable set via sigmoid; `load_policy_weights!` for checkpoint loading |
 
 ### GPU training
 
@@ -51,98 +72,52 @@ mkdir -p logs
 sbatch run_train_deteq_gpu.sbatch
 ```
 
-### Penalty schedule
+For GPU-accelerated training using ExaModels (recommended for large NLPs),
+see the companion package
+[DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl).
 
-All training scripts support `:default_annealed` penalty schedules that
-gradually increase target-violation penalties during training, improving
-convergence on the nonconvex AC formulation.
-
-### Rollout metrics
-
-For deterministic-equivalent training, `metrics/loss` is computed on the same
-target-state history produced by the policy. The matching held-out metric is
-`metrics/rollout_objective_no_deficit`, which now uses `RolloutEvaluation(...;
-policy_state=:target)` in `train_dr_hydropowermodels.jl`.
-
-The same script also logs
-`metrics/rollout_realized_objective_no_deficit` with `policy_state=:realized`.
-That is the closed-loop deployment diagnostic: each stage passes the optimizer's
-realized reservoir state back to the policy. It can be harder than the target-state
-metric, especially while the policy is trained through the deterministic equivalent.
-
-All rollout objective metrics exclude the target-slack/deficit penalty term. Track
-the paired target-violation share and `metrics/target_penalty_multiplier` to see
-whether a low operational objective is coming from feasible targets or from the
-policy relying on slack.
-
-## Evaluation and baselines
+## Evaluation
 
 | Script | Purpose |
 |--------|---------|
-| `evaluate_hydro_policies.jl` | Load all trained TS-DDR and TS-LDR models and evaluate on a common out-of-sample scenario set using stage-wise ACP rollout; writes `eval_costs.csv` |
+| `eval_strict_rollout.jl` | 100-scenario stage-wise rollout of a strict-mode policy; writes costs, mean volumes, and mean thermal generation to CSVs |
+| `evaluate_hydro_policies.jl` | Auto-discovers all saved checkpoints and evaluates them on a common scenario set; writes `eval_costs.csv` |
 | `eval_jump_de.jl` | Solve the DE with a constant policy and save a reference solution (JLD2) for cross-validation with ExaModels |
-| `check_consistent_state_paths.jl` | Verify that stage-wise, deterministic equivalent, and multiple-shooting decompositions produce identical state trajectories under the same policy and inflows |
+| `check_consistent_state_paths.jl` | Verify that stage-wise, DE, and multiple-shooting decompositions produce identical state trajectories |
 
 ## SDDP baselines
 
-These scripts use a dedicated Julia environment in `sddp/`. The inconsistent
-SOC-backward/AC-forward baseline uses
-[HydroPowerModels.jl](https://github.com/LAMPSPUC/HydroPowerModels.jl), SDDP.jl,
-Clarabel for the SOC backward pass, and MadNLP for the AC forward pass. Training
-runs log iteration and final simulation metrics to Weights & Biases using the
-same keys as the DR runs: `metrics/loss` is the SDDP bound, and
-`metrics/rollout_realized_objective_no_deficit` is the SDDP forward-pass
-objective. SDDP iterations are logged as `batch` so W&B plots can share the same
-x-axis as the DR training runs. Because SDDP solves the forward policy
-stage-wise, that forward-pass objective is already the no-target-penalty
-objective.
+The SDDP baseline uses an **inconsistent formulation**: SOC-WR relaxation
+for the backward pass (cut generation) and ACP for the forward pass
+(simulation).  Scripts are in `sddp/` with a dedicated Julia environment.
 
 | Script | Description |
 |--------|-------------|
 | `sddp/run_sddp.jl` | Train SDDP with a consistent convex (SOCWRConic) formulation |
-| `sddp/run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward pass and ACP forward pass |
-| `sddp/run_sddp_inconsistent.sbatch` | Submit the SOC-backward/AC-forward run with a 12-hour wall time |
-| `sddp/simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP and produce comparison plots |
+| `sddp/run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward / ACP forward |
+| `sddp/simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP (100 scenarios, 96 stages); writes costs, mean volumes, mean thermal generation to CSVs |
 
-## Learning-to-Optimize (L2O) pipeline
-
-| Script | Description |
-|--------|-------------|
-| `gen_inputs_l2O_hydropowermodels.jl` | Generate input datasets for the L2O supervised pipeline (requires [L2O.jl](https://github.com/andrewrosemberg/L2O.jl)) |
-| `train_dr_l2O_supervised.jl` | Supervised pre-training of a decision rule from L2O-generated optimal solutions |
-
-## Subproblem export (generating `.mof.json` files)
-
-The training pipeline (`load_hydropowermodels.jl`) reads pre-exported `.mof.json`
-subproblem templates rather than depending on HydroPowerModels.jl at training time.
-These files already ship with the repository:
-
-```
-bolivia/ACPPowerModel.mof.json
-bolivia/SOCWRConicPowerModel.mof.json
-bolivia/DCPPowerModel.mof.json
-case3/ACPPowerModel.mof.json
-```
-
-To regenerate them (e.g. after updating HydroPowerModels data or adding a new
-formulation), use `export_subproblem_mof.jl`:
-
-```bash
-julia export_subproblem_mof.jl bolivia ACPPowerModel
-julia export_subproblem_mof.jl bolivia SOCWRConicPowerModel
-```
-
-This builds the full SDDP model via HydroPowerModels.jl, extracts one stage's
-subproblem from the policy graph, removes the unnamed slack variable that
-HydroPowerModels adds, and writes a clean JuMP `.mof.json` to disk.  Requires
-HydroPowerModels.jl and a solver (Mosek by default).
+**SDDP 96-stage simulation cost**: 303 684 (mean, 100 scenarios, std 5 453).
+**SDDP 126-stage lower bound**: 378 207 (SOC-WR relaxation — not beatable).
 
 ## Data
 
-- `bolivia/` — Bolivia case: `hydro.json` (10 hydro units), `inflows.csv` (historical scenarios), `ACPPowerModel.mof.json` / `SOCWRConicPowerModel.mof.json` / `DCPPowerModel.mof.json` (subproblem templates)
+- `bolivia/` — Bolivia case: `hydro.json` (11 hydro units), `inflows.csv`
+  (historical scenarios), `ACPPowerModel.mof.json` / `SOCWRConicPowerModel.mof.json` /
+  `DCPPowerModel.mof.json` (subproblem templates), `PowerModels.json` (39 buses,
+  55 branches, 34 generators)
 - `case3/` — Small 3-bus test case for development
+
+## Subproblem export
+
+The training pipeline reads pre-exported `.mof.json` subproblem templates.
+To regenerate (e.g., after updating data or adding a formulation):
+
+```bash
+julia export_subproblem_mof.jl bolivia ACPPowerModel
+```
 
 ## Dependencies
 
 See `Project.toml` in this directory.  Key packages: DecisionRules, DiffOpt,
-Ipopt+HSL, MadNLP+MadNLPGPU+CUDA (GPU), Flux, JuMP, Wandb.
+Ipopt, Flux, JuMP, Wandb.
