@@ -11,6 +11,15 @@
 using Functors
 using ChainRulesCore
 
+# ── Cascade link: upstream→downstream water-balance coupling ──────────────────
+
+struct CascadeLink
+    downstream::Int      # array position of downstream unit
+    upstream::Int        # array position of upstream unit
+    turn_only::Bool      # true if only turbine outflow (not spill) reaches downstream
+    K_max_turn::Float32  # K × max_turn of the upstream unit
+end
+
 """
     HydroReachablePolicy{E,C,S,V,SM}
 
@@ -49,18 +58,37 @@ When `spill_max === nothing` (unlimited spillage), `lower_r = min_vol_r` since t
 reservoir can always be emptied to its physical minimum.
 
 The bounds are marked `@non_differentiable` — gradients flow only through the sigmoid
-path `σ(z_r)`, not through the bounds themselves. This matches the reference
-implementation in DecisionRulesExa.jl.
+path `σ(z_r)`, not through the bounds themselves.
+
+# Cascade-aware target clamping
+
+For downstream units receiving water from upstream cascade connections, the initial
+upper bound uses `upstream_max_r = Σ K × max_turn_u`, which can overestimate the
+actual upstream contribution when the upstream unit stores water (target increases).
+
+After computing initial targets for all units, a **cascade clamping** step adjusts
+downstream targets using the actual upstream release implied by the upstream target:
+
+```math
+R_u = K \\cdot w_u + x_u - \\hat{x}_u
+```
+
+- **Turn + spill connection**: max upstream contribution = ``\\max(0, R_u)``
+- **Turn-only connection**: max contribution = ``\\min(K \\cdot max\\_turn_u, \\max(0, R_u))``
+
+The downstream target is clamped: ``\\hat{x}_r ← \\min(\\hat{x}_r, true\\_upper_r)``.
+This clamping is `@non_differentiable` — gradient flows through when not active,
+zero when clamped (correct projected-gradient signal).
 
 # Strict-mode guarantee
 
 If `x₀` is a feasible initial reservoir state and each policy call returns
-``\hat{x}_t ∈ R(x_{t-1}, w_t)``, then the strict equality
-``x_t = \hat{x}_t`` is feasible for every stage solved in sequence. The proof is
-by induction: stage 1 is feasible because ``\hat{x}_1`` is reachable from
-``x_0``; if stage ``t`` is feasible and realizes ``x_t = \hat{x}_t``, then the
-policy computes ``\hat{x}_{t+1}`` from a feasible previous state, so stage
-``t+1`` is feasible.
+``\\hat{x}_t ∈ R(x_{t-1}, w_t)`` (including cascade-consistent bounds), then the
+strict equality ``x_t = \\hat{x}_t`` is feasible for every stage solved in sequence.
+The proof is by induction: stage 1 is feasible because ``\\hat{x}_1`` is reachable from
+``x_0``; if stage ``t`` is feasible and realizes ``x_t = \\hat{x}_t``, then the
+policy computes ``\\hat{x}_{t+1}`` from a feasible previous state with cascade-clamped
+bounds, so stage ``t+1`` is feasible.
 
 # Fields
 - `encoder::E`:          Recurrent cell or Chain of cells (processes inflow only)
@@ -91,6 +119,7 @@ mutable struct HydroReachablePolicy{E,C,S,V,SM}
     upstream_max::V      # Pre-computed K × Σ(upstream max_turn) per unit [nHyd]
     spill_max::SM        # Per-unit max spill, or nothing for unlimited
     K::Float64           # Stage duration in hours
+    cascade::Vector{CascadeLink}  # Upstream→downstream connections for target clamping
 end
 
 # Only encoder and combiner are trainable. Bounds, state, dimensions are frozen.
@@ -155,6 +184,36 @@ end
 ChainRulesCore.@non_differentiable _hydro_reachable_bounds(::Any, ::Any, ::Any)
 
 """
+    _cascade_upper_bounds(policy, target, inflow, x_prev)
+
+Compute the true reachable upper bound for downstream units given the actual
+upstream targets. Returns a vector of upper bounds (Inf for units with no
+upstream connections). Marked `@non_differentiable`.
+"""
+function _cascade_upper_bounds(policy::HydroReachablePolicy, target, inflow, x_prev)
+    cascade = policy.cascade
+    T = eltype(target)
+    K = T(policy.K)
+    n = length(target)
+    upper = fill(T(Inf), n)
+    for conn in cascade
+        u = conn.upstream
+        d = conn.downstream
+        R_u = K * inflow[u] + x_prev[u] - target[u]
+        if conn.turn_only
+            max_contrib = min(T(conn.K_max_turn), max(zero(T), R_u))
+        else
+            max_contrib = max(zero(T), R_u)
+        end
+        true_upper = x_prev[d] + K * inflow[d] - K * T(policy.min_turn[d]) + max_contrib
+        true_upper = min(T(policy.max_vol[d]), true_upper)
+        upper[d] = min(upper[d], true_upper)
+    end
+    return upper
+end
+ChainRulesCore.@non_differentiable _cascade_upper_bounds(::Any, ::Any, ::Any, ::Any)
+
+"""
     (m::HydroReachablePolicy)(x)
 
 Forward pass: given input `x = [inflow₁..nHyd; x_prev₁..nHyd]`, produce
@@ -165,6 +224,7 @@ one-stage reachable reservoir targets.
 3. Combine encoder output with previous state via a sigmoid head → y_norm ∈ [0,1]
 4. Compute reachable bounds [lower, upper] from physics (no gradient)
 5. Scale: target = lower + (upper - lower) × y_norm
+6. Clamp downstream targets to cascade-aware upper bounds (no gradient through bounds)
 
 # Arguments
 - `x`: concatenated input vector `[inflow..., previous_state...]`
@@ -191,7 +251,14 @@ function (m::HydroReachablePolicy)(x)
     lower, upper = _hydro_reachable_bounds(m, inflow, x_prev)
 
     # Scale normalized output to the reachable interval [lower, upper]
-    return lower .+ (upper .- lower) .* y_norm
+    raw_target = lower .+ (upper .- lower) .* y_norm
+
+    # Clamp downstream targets to cascade-aware reachable bounds
+    if !isempty(m.cascade)
+        cascade_upper = _cascade_upper_bounds(m, raw_target, inflow, x_prev)
+        return min.(raw_target, cascade_upper)
+    end
+    return raw_target
 end
 
 """
@@ -293,8 +360,28 @@ function hydro_reachable_policy(
     upstream_max = zeros(Float32, nHyd)
     for (r, upstream_list) in enumerate(hydro_meta.upstream_turn)
         for (u_pos, u_max_turn) in upstream_list
-            # Each upstream unit's turbine outflow contributes at most K × max_turn
             upstream_max[r] += Float32(K * u_max_turn)
+        end
+    end
+
+    # Build cascade connections for target clamping
+    spill_dests = Dict{Int,Set{Int}}()
+    for (r, upstream_list) in enumerate(hydro_meta.upstream_spill)
+        for (u_pos, _) in upstream_list
+            push!(get!(spill_dests, u_pos, Set{Int}()), r)
+        end
+    end
+    cascade = CascadeLink[]
+    for (r, upstream_list) in enumerate(hydro_meta.upstream_turn)
+        for (u_pos, u_max_turn) in upstream_list
+            has_spill = haskey(spill_dests, u_pos) && r in spill_dests[u_pos]
+            push!(cascade, CascadeLink(r, u_pos, !has_spill, Float32(K * u_max_turn)))
+        end
+    end
+    for (r, upstream_list) in enumerate(hydro_meta.upstream_spill)
+        for (u_pos, _) in upstream_list
+            already = any(c -> c.downstream == r && c.upstream == u_pos, cascade)
+            already || push!(cascade, CascadeLink(r, u_pos, false, Float32(K * hydro_meta.max_turn[u_pos])))
         end
     end
 
@@ -316,6 +403,7 @@ function hydro_reachable_policy(
         upstream_max,                      # pre-computed upstream contribution
         spill_max === nothing ? nothing : Float32.(collect(spill_max)),  # spill bounds
         K,                                 # stage duration in hours
+        cascade,                           # cascade connections for target clamping
     )
 end
 

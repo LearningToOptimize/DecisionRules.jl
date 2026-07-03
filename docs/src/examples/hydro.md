@@ -458,6 +458,74 @@ where ``\ell_{r,t}`` and ``u_{r,t}`` are the lower and upper reachable bounds
 computed from the water balance at the current state and inflow.  The bounds
 are `@non_differentiable` — gradients flow only through the sigmoid path.
 
+#### Per-unit reachable bounds
+
+The upper reachable bound for unit ``r`` assumes minimum own outflow and
+maximum possible upstream inflow from cascade connections:
+
+```math
+u_{r,t} = \min\!\bigl(\bar{v}_r,\;
+  v_{r,t-1} + K \cdot w_{r,t} - K \cdot \underline{q}_r + U_{r,t}\bigr),
+```
+
+where ``\bar{v}_r`` is the maximum reservoir volume, ``\underline{q}_r``
+is the minimum turbine outflow, and ``U_{r,t}`` is the maximum upstream
+contribution (see below).
+
+The lower reachable bound assumes maximum outflow (full turbine + max spill):
+
+```math
+\ell_{r,t} = \max\!\bigl(\underline{v}_r,\;
+  v_{r,t-1} + K \cdot w_{r,t} - K \cdot \bar{q}_r - \bar{s}_r\bigr).
+```
+
+When spillage is unlimited (``\bar{s}_r = \infty``), the lower bound reduces
+to ``\underline{v}_r``.
+
+#### Cascade-aware upstream contribution
+
+Hydro systems have **cascade connections**: the turbine outflow and/or spillage
+of an upstream unit flows into a downstream unit's reservoir.  The reachable
+upper bound of a downstream unit depends on how much water it receives from
+upstream.
+
+For an isolated unit (no upstream), ``U_{r,t} = 0``.
+
+For a unit with upstream connections, the initial upper bound uses a
+**worst-case approximation**: ``U_{r,t} = \sum_{u \to r} K \cdot \bar{q}_u``
+(maximum turbine outflow of each upstream unit).  However, this can
+**overestimate** the actual upstream contribution when the upstream unit's
+target requires it to store water (reducing its outflow below ``\bar{q}_u``).
+
+To guarantee feasibility, the policy applies a **cascade clamping** step
+after computing the initial targets.  For each cascade connection
+``u \to r``, the total release from the upstream unit is determined by its
+own water balance and the target that was just computed:
+
+```math
+R_u = K \cdot w_{u,t} + v_{u,t-1} - \hat{v}_{u,t}.
+```
+
+The actual maximum upstream contribution depends on the connection type:
+
+- **Turn + spill** (both flows go to ``r``): the full release ``\max(0, R_u)``
+  reaches the downstream unit.
+- **Turn only** (spill goes elsewhere): at most
+  ``\min(K \cdot \bar{q}_u,\, \max(0, R_u))`` of the release reaches ``r``.
+
+The downstream target is then clamped to the true reachable upper bound:
+
+```math
+\hat{v}_{r,t} \leftarrow \min\!\bigl(\hat{v}_{r,t},\;
+  v_{r,t-1} + K \cdot w_{r,t} - K \cdot \underline{q}_r + U_{r,t}^{\text{actual}}\bigr).
+```
+
+This clamping is `@non_differentiable` — when the clamp is inactive (target
+already within bounds), the gradient flows through the sigmoid path as usual;
+when active (target exceeds the true reachable bound), the gradient is zero,
+providing the correct projected-gradient signal for the policy to learn
+feasible cascade-consistent targets.
+
 ### Setup
 
 Building strict subproblems requires only the `strict=true` flag:

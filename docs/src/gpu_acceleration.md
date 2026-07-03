@@ -317,9 +317,22 @@ from the known initial state:
 If the policy returns ``\hat{x}_t \in R(\hat{x}_{t-1}, w_t)`` at every stage,
 then the entire strict DE target trajectory is feasible by induction. The solve
 then enforces ``x_t = \hat{x}_t`` for every stage, so the realized state path is
-exactly the reachable target path. This is why strict regular DE is valid for
-the hydro reachable policy even though a generic regular DE target generator is
-open-loop after ``x_0``.
+exactly the reachable target path.
+
+For cascaded hydro systems (upstream→downstream water flows), the per-unit
+reachable set depends on the upstream unit's target at the same stage.  The
+`HydroReachablePolicy` handles this by computing initial targets for all units
+using worst-case upstream bounds (``K \times \bar{q}_u``), then applying a
+**cascade clamping** step that adjusts downstream targets based on the actual
+upstream release implied by the upstream target.  For turn+spill connections
+the full release is available; for turn-only connections only
+``\min(K \bar{q}_u, R_u)`` reaches the downstream unit.  This clamping is
+`@non_differentiable` — gradient flows through for non-clamped targets, and
+is zero for clamped ones (correct projected-gradient signal).
+
+The ExaModels strict DE also applies cascade clamping in `prepare_solve!` as a
+safety net: before each NLP solve, the reservoir parameter values are checked
+and clamped stage-by-stage to ensure cascade feasibility.
 
 The Exa hydro script exposing this path is:
 
