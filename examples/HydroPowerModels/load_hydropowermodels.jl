@@ -80,7 +80,7 @@ initial_state, max_volume, hydro_meta)` where:
 - `upstream_turn`: `Vector{Vector{Tuple{Int,Float64}}}` — for each unit, list of
   `(upstream_array_pos, upstream_max_turn)` pairs feeding into it
 - `upstream_spill`: same structure for spill connections
-- `K::Float64`: stage duration in hours
+- `K::Float64`: water-balance conversion factor from flow units to volume units
 - `production_factor`: per-unit production factors
 
 See also: [`create_deficit!`](@ref), [`variable_to_parameter`](@ref)

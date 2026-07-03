@@ -144,8 +144,9 @@ pattern for a full AC-OPF problem with reservoir dynamics:
 ```julia
 # In examples/HydroPowerModels/hydro_power_exa.jl
 prob = build_hydro_de(
-    data;
-    num_stages     = 96,
+    power_data,
+    hydro_data,
+    96;
     backend        = CUDABackend(),
     formulation    = :ac_polar,
     deficit_cost   = 1e5,

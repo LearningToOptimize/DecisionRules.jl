@@ -102,7 +102,7 @@ bounds, so stage ``t+1`` is feasible.
 - `max_turn::V`:         Per-unit maximum turbine outflow
 - `upstream_max::V`:     Pre-computed maximum upstream inflow contribution per unit
 - `spill_max::SM`:       Per-unit max spillage (`nothing` = unlimited)
-- `K::Float64`:          Stage duration (hours), used in water balance
+- `K::Float64`:          Water-balance conversion factor from flow to volume
 
 See also: [`hydro_reachable_policy`](@ref), [`StateConditionedPolicy`](@ref)
 """
@@ -118,7 +118,7 @@ mutable struct HydroReachablePolicy{E,C,S,V,SM}
     max_turn::V          # Per-unit maximum turbine outflow [nHyd]
     upstream_max::V      # Pre-computed K × Σ(upstream max_turn) per unit [nHyd]
     spill_max::SM        # Per-unit max spill, or nothing for unlimited
-    K::Float64           # Stage duration in hours
+    K::Float64           # Water-balance conversion factor from flow to volume
     cascade::Vector{CascadeLink}  # Upstream→downstream connections for target clamping
 end
 
@@ -402,7 +402,7 @@ function hydro_reachable_policy(
         Float32.(hydro_meta.max_turn),     # per-unit max turbine outflow
         upstream_max,                      # pre-computed upstream contribution
         spill_max === nothing ? nothing : Float32.(collect(spill_max)),  # spill bounds
-        K,                                 # stage duration in hours
+        K,                                 # water-balance conversion factor
         cascade,                           # cascade connections for target clamping
     )
 end

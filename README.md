@@ -149,10 +149,7 @@ DecisionRules.train_multiple_shooting(
     policy,
     initial_state,
     windows,
-    state_params_in,
-    state_params_out,
     uncertainty_sampler;
-    window_size=24,  # e.g., 6, 24, ...
     num_batches=100,
     num_train_per_batch=32,
     optimizer=Flux.Adam(1e-3),

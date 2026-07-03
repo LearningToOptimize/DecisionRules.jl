@@ -116,7 +116,8 @@ diff_optimizer = () -> DiffOpt.diff_optimizer(
     optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0, "linear_solver" => "mumps")
 )
 
-subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state, max_volume =
+subproblems, state_params_in, state_params_out, uncertainty_samples,
+    initial_state, max_volume, hydro_meta =
     build_hydropowermodels(
         "bolivia", "ACPPowerModel.mof.json";
         num_stages=96,
@@ -429,7 +430,8 @@ v_{r,t} = v_{r,t-1} + K\, w_{r,t} - K\, q_{r,t} - K\, s_{r,t}
           + \sum_{u \in \mathcal{S}_r} K\, s_{u,t},
 ```
 
-where ``K`` is the time-step conversion factor, ``w_{r,t}`` is the inflow,
+where ``K`` is the water-balance conversion factor extracted from the model,
+``w_{r,t}`` is the inflow,
 ``q_{r,t}`` is the turbined flow, ``s_{r,t}`` is the spillage,
 ``\mathcal{U}_r`` is the set of upstream units connected by turbine flow,
 and ``\mathcal{S}_r`` is the set connected by spillage.
@@ -657,4 +659,3 @@ standard Adam optimizer converges without annealing, schedule exploration,
 or hyperparameter search.  The other formulations (DE, stage-wise,
 multiple shooting) require careful penalty scheduling to achieve
 competitive results.
-

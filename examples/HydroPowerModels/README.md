@@ -21,9 +21,9 @@ equality constraints between targets and realized states. A
 from the state used as policy input.
 
 ```bash
-# Train with stage-wise decomposition, strict mode, 126 stages
-julia --project -t auto train_dr_hydropowermodels_subproblems.jl \
-    --strict --stages 126
+# Train with the dedicated strict stage-wise entrypoint.
+# Configure horizon with DR_NUM_STAGES, for example:
+DR_NUM_STAGES=126 julia --project -t auto train_dr_hydropowermodels_strict.jl
 
 # Evaluate on 100 held-out scenarios, 96 stages
 julia --project -t auto eval_strict_rollout.jl \
@@ -58,8 +58,7 @@ states to equal the reachable target trajectory.
 
 | Script | Description |
 |--------|-------------|
-| `train_dr_hydropowermodels_subproblems.jl` | Stage-wise decomposition with `--strict` flag; uses `HydroReachablePolicy` for feasibility-guaranteed targets |
-| `train_dr_hydropowermodels_strict.jl` | Dedicated strict stage-wise training entrypoint with `DR_ENCODER_LAYERS` and `DR_HEAD_LAYERS` environment knobs |
+| `train_dr_hydropowermodels_strict.jl` | Dedicated strict stage-wise training entrypoint with `DR_NUM_STAGES`, `DR_ENCODER_LAYERS`, and `DR_HEAD_LAYERS` environment knobs |
 
 ### Non-strict formulations (require penalty tuning)
 
