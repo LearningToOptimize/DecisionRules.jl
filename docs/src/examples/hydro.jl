@@ -237,33 +237,6 @@ using Statistics, Random
 # **Disadvantage**: the NLP has ``96 \times (\text{AC-OPF variables})``
 # decision variables; the policy generates targets without seeing realized
 # states (open-loop target generation).
-#
-# ### Strict regular DE with reachable targets
-#
-# Regular DE target generation is usually open-loop after ``x_0``: all targets
-# are computed before the coupled NLP solve, so later policy calls cannot see
-# realized states chosen by the optimizer. For a generic policy this makes
-# strict target equality unsafe.
-#
-# Hydro reachable policies create a special safe case. If targets are rolled out
-# as
-#
-# ```math
-# \hat{x}_0 = x_0,\qquad
-# \hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}),
-# ```
-#
-# and the policy guarantees
-#
-# ```math
-# \hat{x}_t \in R(\hat{x}_{t-1}, w_t),
-# ```
-#
-# then the target trajectory is feasible by induction. Stage 1 is reachable from
-# the feasible initial state. If strict equalities have realized
-# ``x_t = \hat{x}_t``, then stage ``t+1`` is reachable because the policy
-# computed ``\hat{x}_{t+1}`` from that same state. This is the reason the Exa
-# companion can run strict regular DE with `train_hydro_exa_strict.jl`.
 
 # ```julia
 # det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent!(
@@ -440,17 +413,78 @@ using Statistics, Random
 # from the current state ``v_{r,t-1}`` by choosing turbine flow ``q_r`` and
 # spillage ``s_r`` within their physical bounds.
 #
-# The [`HydroReachablePolicy`] wraps the same LSTM uncertainty encoder plus
-# feed-forward state-conditioned target head as [`StateConditionedPolicy`](@ref)
-# but uses a **sigmoid** activation to bound the output to the reachable interval:
+# #### Per-unit reachable bounds
+#
+# The water balance for reservoir ``r`` at stage ``t`` is
 #
 # ```math
-# \hat{v}_{r,t} = \ell_{r,t} + (u_{r,t} - \ell_{r,t}) \cdot \sigma(z_{r,t}),
+# v_{r,t} = v_{r,t-1} + K\, w_{r,t} - K\, q_{r,t} - K\, s_{r,t}
+#           + \sum_{u \in \mathcal{U}_r} K\, q_{u,t}
+#           + \sum_{u \in \mathcal{S}_r} K\, s_{u,t},
 # ```
 #
-# where ``\ell_{r,t}`` and ``u_{r,t}`` are the lower and upper reachable bounds
-# computed from the water balance at the current state and inflow.  The bounds
-# are `@non_differentiable` — gradients flow only through the sigmoid path.
+# where ``K`` is the time-step conversion factor, ``w_{r,t}`` is the inflow,
+# ``q_{r,t}`` is the turbined flow, ``s_{r,t}`` is the spillage,
+# ``\mathcal{U}_r`` is the set of upstream units connected by turbine flow,
+# and ``\mathcal{S}_r`` is the set connected by spillage.
+#
+# The reachable bounds for unit ``r`` (ignoring cascade interactions) are:
+#
+# ```math
+# \ell_{r,t} = \max\bigl(\underline{v}_r,\;
+#     v_{r,t-1} + K\, w_{r,t} - K\,\bar{q}_r - K\,\bar{s}_r
+#     + K \sum_{u \in \mathcal{U}_r} \underline{q}_u\bigr),
+# ```
+#
+# ```math
+# u_{r,t} = \min\bigl(\bar{v}_r,\;
+#     v_{r,t-1} + K\, w_{r,t} - K\,\underline{q}_r
+#     + K \sum_{u \in \mathcal{U}_r} \bar{q}_u
+#     + K \sum_{u \in \mathcal{S}_r} \bar{s}_u\bigr).
+# ```
+#
+# These bounds assume worst-case upstream contributions (maximum turbine/spill
+# capacity). The [`HydroReachablePolicy`] wraps the same LSTM uncertainty
+# encoder plus feed-forward state-conditioned target head as
+# [`StateConditionedPolicy`](@ref) but uses a **sigmoid** activation to bound
+# the output to this reachable interval:
+#
+# ```math
+# \hat{v}_{r,t} = \ell_{r,t} + (u_{r,t} - \ell_{r,t}) \cdot \sigma(z_{r,t}).
+# ```
+#
+# #### Cascade-aware clamping
+#
+# The per-unit upper bound ``u_{r,t}`` uses worst-case upstream contributions
+# (``K \bar{q}_u``, ``K \bar{s}_u``).  When an upstream unit ``u`` stores water
+# (its target ``\hat{v}_{u,t}`` is high), the actual upstream release
+#
+# ```math
+# R_u = K\, w_{u,t} + v_{u,t-1} - \hat{v}_{u,t}
+# ```
+#
+# can be much less than the assumed maximum.  For cascaded systems, this means
+# the downstream target may exceed the true reachable set, causing infeasibility
+# in strict mode (no slack to absorb the gap).
+#
+# After computing the initial sigmoid targets for all units, the policy applies
+# a **cascade clamping** step.  For each upstream→downstream connection:
+#
+# - **Turn + spill** connection: the full release reaches downstream,
+#   so ``\text{max\_contrib} = \max(0,\, R_u)``.
+# - **Turn-only** connection: only turbined flow reaches downstream,
+#   so ``\text{max\_contrib} = \min(K\,\bar{q}_u,\, \max(0,\, R_u))``.
+#
+# The downstream target is then clamped:
+#
+# ```math
+# \hat{v}_{d,t} \;\le\; v_{d,t-1} + K\, w_{d,t}
+#   - K\,\underline{q}_d + \text{max\_contrib}.
+# ```
+#
+# This clamping is `@non_differentiable` — gradient flows through ``\sigma``
+# for unclamped targets, and is zero for clamped ones (correct projected-gradient
+# signal).
 #
 # ### Setup
 #
