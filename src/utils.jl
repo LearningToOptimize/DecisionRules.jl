@@ -868,7 +868,8 @@ end
 
 """
     add_child_model_vars!(model, subproblem, t, state_params_in, state_params_out,
-                          initial_state, var_src_to_dest) -> Dict{VariableRef,VariableRef}
+                          initial_state, var_src_to_dest, skip_parameter_refs)
+                          -> Dict{VariableRef,VariableRef}
 
 Copy decision variables from stage-`t` `subproblem` into the deterministic-
 equivalent `model`, populating the source-to-destination mapping
@@ -877,7 +878,8 @@ realized-state/target pairs) are handled specially: at `t == 1` they become
 fresh parameters in `model`; at `t > 1` incoming state parameters are linked to
 the previous stage's realized state variables. Each copied variable is renamed
 via [`var_set_name!`](@ref) with a `#t` suffix. Mutates `state_params_in`,
-`state_params_out`, and `var_src_to_dest` in place; returns `var_src_to_dest`.
+`state_params_out`, `var_src_to_dest`, and `skip_parameter_refs` in place;
+returns `var_src_to_dest`.
 """
 function add_child_model_vars!(
     model::JuMP.Model,
@@ -887,6 +889,7 @@ function add_child_model_vars!(
     state_params_out::Vector{Vector{Tuple{Any,VariableRef}}},
     initial_state::Vector{Float64},
     var_src_to_dest::Dict{VariableRef,VariableRef},
+    skip_parameter_refs::Set{VariableRef},
 )
     allvars = all_variables(subproblem)
     allvars = setdiff(allvars, state_params_in[t])
@@ -927,18 +930,9 @@ function add_child_model_vars!(
         for (i, src) in enumerate(state_params_in[t])
             if src isa VariableRef
                 var_src_to_dest[src] = state_params_out[t - 1][i][2]
+                push!(skip_parameter_refs, src)
             end
             state_params_in[t][i] = state_params_out[t - 1][i][2]
-            # delete parameter constraint associated with src
-            if src isa VariableRef
-                for con in
-                    JuMP.all_constraints(subproblem, VariableRef, MOI.Parameter{Float64})
-                    obj = JuMP.constraint_object(con)
-                    if obj.func == src
-                        JuMP.delete(subproblem, con)
-                    end
-                end
-            end
         end
     end
     return var_src_to_dest
@@ -1058,22 +1052,25 @@ function create_constraint(
 end
 
 """
-    add_child_model_exps!(model, subproblem, var_src_to_dest, state_params_out,
-                          state_params_in, t) -> Dict
+    add_child_model_exps!(model, subproblem, var_src_to_dest, skip_parameter_refs,
+                          state_params_out, state_params_in, t) -> Dict
 
 Copy all constraints and the objective contribution from stage-`t` `subproblem`
 into the deterministic-equivalent `model`, remapping variables through
 `var_src_to_dest` via [`create_constraint`](@ref) and
 [`copy_and_replace_variables`](@ref). Constraint-based state parameters and
 input parameters at `t == 1` are updated to point to the new model's
-constraint refs. The subproblem objective is added to `model`'s existing
-objective. Returns a `Dict` mapping source `ConstraintRef` to destination
-`ConstraintRef`.
+constraint refs. Parameter constraints for incoming states that are linked to
+the previous realized state are skipped via `skip_parameter_refs`; all other
+parameter constraints are copied. The subproblem objective is added to
+`model`'s existing objective. Returns a `Dict` mapping source `ConstraintRef`
+to destination `ConstraintRef`.
 """
 function add_child_model_exps!(
     model::JuMP.Model,
     subproblem::JuMP.Model,
     var_src_to_dest::Dict{VariableRef,VariableRef},
+    skip_parameter_refs::Set{VariableRef},
     state_params_out,
     state_params_in,
     t,
@@ -1083,6 +1080,11 @@ function add_child_model_exps!(
     cons_to_cons = Dict()
     for con in JuMP.all_constraints(subproblem; include_variable_in_set_constraints=true) #, F, S)
         obj = JuMP.constraint_object(con)
+        if obj.func isa VariableRef &&
+           obj.set isa MOI.Parameter &&
+           obj.func in skip_parameter_refs
+            continue
+        end
         c = create_constraint(model, obj, var_src_to_dest)
         cons_to_cons[con] = c
         if (state_params_out[t][1][1] isa ConstraintRef)
@@ -1130,6 +1132,9 @@ stage `t` with the incoming state parameter of stage `t+1`.
 
 Returns `(model, uncertainties_new)` where `uncertainties_new` has the same format as
 the input but with variable refs remapped to the deterministic-equivalent model.
+This function also remaps `state_params_in` and `state_params_out` in place.
+Copy those arrays before calling if you need to keep the original stage-wise
+references for rollout evaluation or later model construction.
 """
 function deterministic_equivalent!(
     model::JuMP.Model,
@@ -1141,6 +1146,7 @@ function deterministic_equivalent!(
 )
     set_objective_sense(model, objective_sense(subproblems[1]))
     var_src_to_dest = Dict{VariableRef,VariableRef}()
+    skip_parameter_refs = Set{VariableRef}()
     for t in 1:length(subproblems)
         DecisionRules.add_child_model_vars!(
             model,
@@ -1150,13 +1156,20 @@ function deterministic_equivalent!(
             state_params_out,
             initial_state,
             var_src_to_dest,
+            skip_parameter_refs,
         )
     end
 
     cons_to_cons = Vector{Dict}(undef, length(subproblems))
     for t in 1:length(subproblems)
         cons_to_cons[t] = DecisionRules.add_child_model_exps!(
-            model, subproblems[t], var_src_to_dest, state_params_out, state_params_in, t
+            model,
+            subproblems[t],
+            var_src_to_dest,
+            skip_parameter_refs,
+            state_params_out,
+            state_params_in,
+            t,
         )
     end
 

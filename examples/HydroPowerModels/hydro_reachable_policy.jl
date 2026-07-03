@@ -189,6 +189,15 @@ ChainRulesCore.@non_differentiable _hydro_reachable_bounds(::Any, ::Any, ::Any)
 Compute the true reachable upper bound for downstream units given the actual
 upstream targets. Returns a vector of upper bounds (Inf for units with no
 upstream connections). Marked `@non_differentiable`.
+
+# Documented assumptions
+- **Single-level cascades**: the implied upstream release
+  ``R_u = K w_u + x_u - \\hat{x}_u`` omits the upstream unit's own incoming
+  cascade contribution, which is conservative (underestimates the release)
+  for multi-level chains.
+- **No gradient through binding clamps**: this function is
+  `@non_differentiable`, so when the resulting clamp binds, the dependence of
+  the downstream target on the upstream target is not differentiated.
 """
 function _cascade_upper_bounds(policy::HydroReachablePolicy, target, inflow, x_prev)
     cascade = policy.cascade
@@ -225,6 +234,18 @@ one-stage reachable reservoir targets.
 4. Compute reachable bounds [lower, upper] from physics (no gradient)
 5. Scale: target = lower + (upper - lower) × y_norm
 6. Clamp downstream targets to cascade-aware upper bounds (no gradient through bounds)
+
+# Documented assumptions
+- **Single-level cascades**: the cascade clamp uses the implied upstream release
+  ``R_u = K w_u + x_u - \\hat{x}_u``, which omits the upstream unit's own
+  incoming cascade contribution — conservative for multi-level chains.
+- **No gradient through binding clamps**: reachable bounds and cascade clamps
+  are `@non_differentiable`; when a clamp binds, the downstream target's
+  dependence on the upstream target is not differentiated.
+- **Physically-infeasible edge case**: if the cascade upper bound falls below
+  the reachable lower bound, the clamped target may fall below `lower`. No
+  policy-level remedy exists in that case — the underlying problem is
+  infeasible.
 
 # Arguments
 - `x`: concatenated input vector `[inflow..., previous_state...]`

@@ -94,13 +94,15 @@ without adding recurrence over the reservoir state.
 ### GPU training
 
 `train_dr_hydropowermodels.jl` auto-detects CUDA and switches to
-MadNLP+CUDSS on GPU when available.  Submit via:
+MadNLP+CUDSS on GPU when available. From this example environment, run:
 
 ```bash
 cd examples/HydroPowerModels
-mkdir -p logs
-sbatch run_train_deteq_gpu.sbatch
+julia --project train_dr_hydropowermodels.jl
 ```
+
+If you want to submit through Slurm, use a site-local batch script that loads
+Julia and requests the GPU resources required by MadNLP+CUDSS.
 
 For GPU-accelerated training using ExaModels (recommended for large NLPs),
 see the companion package

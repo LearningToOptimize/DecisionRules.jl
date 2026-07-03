@@ -253,7 +253,7 @@ det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent
 
 train_multistage(
     models, initial_state, det_equivalent,
-    state_params_in, state_params_out, uncertainty_samples;
+    state_params_in, state_params_out, uncertainty_samples_det;
     num_batches=4000, optimizer=Flux.Adam(),
     penalty_schedule=[(1,100,0.1), (101,210,1.0), (211,300,10.0), (301,4000,30.0)],
 )

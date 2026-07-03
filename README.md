@@ -54,22 +54,25 @@ using DecisionRules, JuMP, DiffOpt, Flux
 using SCS
 
 # 1) Build per-stage subproblems (DiffOpt-enabled) and collect:
-#    subproblems, state_params_in, state_params_out, uncertainty_sampler, uncertainties_structure
+#    subproblems, state_params_in, state_params_out, uncertainty_samples
 
 # 2) Build the deterministic equivalent over the full horizon
 det = DiffOpt.diff_model(() -> DiffOpt.diff_optimizer(SCS.Optimizer))
 
-det, uncertainties_structure_det = DecisionRules.deterministic_equivalent!(
+det, uncertainty_samples_det = DecisionRules.deterministic_equivalent!(
     det,
     subproblems,
     state_params_in,
     state_params_out,
     Float64.(initial_state),
-    uncertainties_structure,
+    uncertainty_samples,
 )
 
+# deterministic_equivalent! remaps state_params_in/state_params_out in place.
+# Copy those arrays first if you also need the original stage-wise refs later.
+
 # 3) Train a TS-DDR policy end-to-end
-num_uncertainties = length(uncertainty_sampler()[1])  # number of uncertainty components per stage
+num_uncertainties = length(uncertainty_samples[1])  # number of uncertainty components per stage
 policy = Chain(
     Dense(DecisionRules.policy_input_dim(num_uncertainties, length(initial_state)), 64, relu),
     Dense(64, length(initial_state)),
@@ -79,9 +82,9 @@ DecisionRules.train_multistage(
     policy,
     initial_state,
     det,
-    state_in_det,
-    state_out_det,
-    uncertainty_sampler;
+    state_params_in,
+    state_params_out,
+    uncertainty_samples_det;
     num_batches=100,
     num_train_per_batch=32,
     optimizer=Flux.Adam(1e-3),
@@ -97,7 +100,7 @@ Single shooting solves one optimization per stage and rolls forward using the re
 ```julia
 using DecisionRules, Flux
 
-num_uncertainties = length(uncertainty_sampler()[1])
+num_uncertainties = length(uncertainty_samples[1])
 policy = Chain(
     Dense(DecisionRules.policy_input_dim(num_uncertainties, length(initial_state)), 64, relu),
     Dense(64, length(initial_state)),
@@ -109,7 +112,7 @@ DecisionRules.train_multistage(
     subproblems,
     state_params_in,
     state_params_out,
-    uncertainty_sampler;
+    uncertainty_samples;
     num_batches=100,
     num_train_per_batch=32,
     optimizer=Flux.Adam(1e-3),
@@ -126,7 +129,7 @@ Multiple shooting partitions the horizon into windows of length `window_size`. E
 using DecisionRules, Flux, DiffOpt
 using SCS
 
-num_uncertainties = length(uncertainty_sampler()[1])
+num_uncertainties = length(uncertainty_samples[1])
 policy = Chain(
     Dense(DecisionRules.policy_input_dim(num_uncertainties, length(initial_state)), 64, relu),
     Dense(64, length(initial_state)),
@@ -149,7 +152,7 @@ DecisionRules.train_multiple_shooting(
     policy,
     initial_state,
     windows,
-    uncertainty_sampler;
+    uncertainty_samples;
     num_batches=100,
     num_train_per_batch=32,
     optimizer=Flux.Adam(1e-3),
@@ -165,7 +168,8 @@ The training loops record metrics through a per-sample `SampleLog` cache and a p
 ```julia
 using DecisionRules, Random
 
-# Materialize a FIXED held-out evaluation set once, before training
+# Materialize a FIXED held-out evaluation set once, before training.
+# Use stage-wise subproblems and parameter refs, not DE-remapped refs.
 Random.seed!(1234)
 eval_scenarios = [DecisionRules.sample(uncertainty_samples) for _ in 1:8]
 
@@ -175,7 +179,7 @@ rollout_eval = RolloutEvaluation(
     policy_state=:realized,
 )
 
-train_multistage(policy, initial_state, det, state_in_det, state_out_det, uncertainty_sampler;
+train_multistage(policy, initial_state, det, state_params_in, state_params_out, uncertainty_samples_det;
     num_batches=100,
     record=(sample_log, iter, model) -> begin
         rollout_eval(iter, model)

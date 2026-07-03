@@ -27,8 +27,12 @@ Instead of mapping observations directly to actions, the policy outputs **target
 states**:
 
 ```math
-\hat{x}_{1:T} = \pi_\theta(w_{1:T})
+\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}), \qquad \hat{x}_0 = x_0,
 ```
+
+evaluated stage-wise with state feedback: each target is conditioned on the
+previous target state during deterministic-equivalent training (or on the
+realized state ``x_{t-1}`` in closed-loop rollouts).
 
 A projection subproblem enforces feasibility by solving:
 
@@ -105,8 +109,11 @@ for k = 1, ..., ⌈T/W⌉:
     pass realized end-state to window k+1
 ```
 
-**Pros**: balances coupling (within windows) with tractability; parallelizable windows.
-**Cons**: continuity gaps between windows require penalty tuning.
+**Pros**: balances coupling (within windows) with tractability; cheaper inner
+solves than a full-horizon deterministic equivalent.
+**Cons**: windows are chained sequentially during rollout/training because each
+window needs the previous realized end-state; cross-window coupling is weaker
+than in the full deterministic equivalent.
 
 ## Mixed gradient: score-function (REINFORCE) correction
 
@@ -129,8 +136,11 @@ rollouts under perturbed targets.
    rollouts solve the models exactly as built (MIPs stay MIPs), so the costs
    reflect true integer-feasible decisions.
 
-3. **Advantage**: center the costs ``A_m = R_m - \bar{R}`` (mean baseline
-   reduces variance without changing the expected gradient).
+3. **Advantage**: center the costs ``A_m = R_m - \bar{R}``. Because the mean
+   baseline ``\bar{R}`` is computed from the same ``M`` rollouts, mean-centering
+   reduces variance but introduces a small ``O(1/M)`` bias (effectively scaling
+   the estimator by ``(M-1)/M``) that vanishes as `num_rollouts` grows; a
+   leave-one-out baseline would be exactly unbiased.
 
 4. **Surrogate loss**: the differentiable scalar whose gradient recovers the
    REINFORCE estimate:
@@ -247,6 +257,37 @@ current volume ``v_r`` under inflow ``w_r`` is:
 where ``K`` is the water-balance conversion factor, ``\underline{q}_r,
 \overline{q}_r`` are turbine bounds, ``\overline{s}_r`` is the spill bound,
 and ``U_r^{\text{turn}}`` is the set of upstream units feeding into ``r``.
+
+#### Cascade-aware clamping
+
+The fixed upstream term ``\sum_{u} K \overline{q}_u`` in the displayed upper
+bound is an **overestimate** whenever an upstream unit stores water: its actual
+release is then smaller than ``K \overline{q}_u``, so the fixed bound can exceed
+the true reachable set and make strict subproblems infeasible. The policy
+therefore applies a clamping step after computing all raw targets. For each
+cascade link ``u \to d``, the release implied by the upstream target is
+
+```math
+R_u = K w_u + v_u - \hat{v}_u ,
+```
+
+and the maximum contribution to the downstream unit is ``\max(0, R_u)`` for
+turbine-plus-spill links and ``\min(K \overline{q}_u, \max(0, R_u))`` for
+turbine-only links. The downstream target is then clamped to
+
+```math
+\hat{v}_d \le \min\bigl(\overline{v}_d,\;
+    v_d + K w_d - K \underline{q}_d + \text{max\_contrib}\bigr).
+```
+
+Two assumptions are documented for this scheme:
+
+- **Single-level cascades**: the release formula ``R_u`` omits the upstream
+  unit's own incoming cascade contribution, which is conservative
+  (underestimates the release) for multi-level chains.
+- **No gradient through binding clamps**: the bounds and the clamping step carry
+  no gradient (`@non_differentiable`), so when a clamp binds, the dependence of
+  the downstream target on the upstream target is not differentiated.
 
 The [`HydroReachablePolicy`] implements this by passing the LSTM encoder output
 through a sigmoid activation and scaling the result to ``[\ell_r, u_r]``:

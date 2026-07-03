@@ -440,10 +440,10 @@ strips those terms so that logged costs reflect true operational cost:
 where ``\\mathcal{D}`` is the set of variables whose names contain
 `norm_deficit`.
 
-If the model is dirty (parameters changed since last solve) or the
-objective cannot be parsed, returns the cached value from a previous
-successful call (stored in `subproblem.ext[:_last_obj_no_deficit]`),
-defaulting to `0.0`.
+If the model is dirty (parameters changed since last solve), returns the
+cached value from a previous successful call (stored in
+`subproblem.ext[:_last_obj_no_deficit]`). If no such value exists, or if the
+objective shape is unsupported, throws instead of inventing a cost.
 
 # Arguments
 - `subproblem::JuMP.Model`: a solved JuMP model.
@@ -457,23 +457,75 @@ function get_objective_no_target_deficit(
 )
     # If parameters were changed after the last solve, return the cached value.
     if subproblem.is_model_dirty
-        return get(subproblem.ext, :_last_obj_no_deficit, 0.0)
-    end
-    try
-        # Parse the symbolic objective to identify deficit-penalty terms.
-        obj = JuMP.objective_function(subproblem)
-        objective_val = objective_value(subproblem)
-        # Subtract each term whose variable name contains the deficit marker.
-        for term in obj.terms
-            if occursin(norm_deficit, JuMP.name(term[1]))
-                objective_val -= term[2] * value(term[1])
-            end
+        if haskey(subproblem.ext, :_last_obj_no_deficit)
+            return subproblem.ext[:_last_obj_no_deficit]
         end
-        return objective_val
-    catch
-        # Fallback: return cached value if objective parsing fails.
-        return get(subproblem.ext, :_last_obj_no_deficit, 0.0)
+        error(
+            "Cannot read objective without target deficit: " *
+            "model is dirty and no cached value exists",
+        )
     end
+
+    obj = JuMP.objective_function(subproblem)
+    objective_val =
+        objective_value(subproblem) - _target_deficit_penalty_value(obj, norm_deficit)
+    subproblem.ext[:_last_obj_no_deficit] = objective_val
+    return objective_val
+end
+
+"""
+    _target_deficit_penalty_value(obj, norm_deficit) -> Float64
+
+Return the part of a JuMP objective expression that is attributed to target
+deficit variables. A variable is treated as a target-deficit variable when its
+JuMP name contains `norm_deficit`.
+
+Proof sketch for the affine case: if the solved objective is
+`q(x) + sum_i c_i d_i`, and `d_i` are exactly the matched target-deficit
+variables, then the operational cost is the solved objective value minus
+`sum_i c_i value(d_i)`.
+
+Quadratic terms involving target-deficit variables are deliberately rejected.
+For such an objective, subtracting only the affine coefficient would not remove
+the whole penalty and would produce a silently biased operational cost.
+"""
+function _target_deficit_penalty_value(
+    obj::JuMP.GenericAffExpr, norm_deficit::AbstractString
+)
+    penalty = 0.0
+    for (variable, coefficient) in obj.terms
+        if occursin(norm_deficit, JuMP.name(variable))
+            penalty += coefficient * JuMP.value(variable)
+        end
+    end
+    return penalty
+end
+
+# Quadratic objectives are allowed only when target-deficit variables appear in
+# the affine part; otherwise the penalty shape is ambiguous to this helper.
+function _target_deficit_penalty_value(
+    obj::JuMP.GenericQuadExpr, norm_deficit::AbstractString
+)
+    for (pair, _) in obj.terms
+        if occursin(norm_deficit, JuMP.name(pair.a)) ||
+           occursin(norm_deficit, JuMP.name(pair.b))
+            error("Quadratic target-deficit penalty terms are unsupported")
+        end
+    end
+    return _target_deficit_penalty_value(obj.aff, norm_deficit)
+end
+
+# A bare deficit variable has implicit coefficient one.
+function _target_deficit_penalty_value(
+    obj::JuMP.VariableRef, norm_deficit::AbstractString
+)
+    return occursin(norm_deficit, JuMP.name(obj)) ? JuMP.value(obj) : 0.0
+end
+
+_target_deficit_penalty_value(::Real, ::AbstractString) = 0.0
+
+function _target_deficit_penalty_value(obj, ::AbstractString)
+    error("Unsupported objective type for target-deficit stripping: $(typeof(obj))")
 end
 
 """
@@ -505,7 +557,11 @@ function get_objective_no_target_deficit(
     return total_objective
 end
 
-# define ChainRulesCore.rrule of get_objective_no_target_deficit
+# NOTE: get_objective_no_target_deficit is intentionally NON-DIFFERENTIABLE.
+# This rrule returns NoTangent() for every input, i.e. a hard-zero gradient. The
+# value is a logging/metric quantity only (deficit-free operational cost read from
+# an already-solved model), and it MUST NOT appear in a loss whose gradient matters:
+# any dependence of the loss on the policy through this function is silently dropped.
 function ChainRulesCore.rrule(
     ::typeof(get_objective_no_target_deficit), subproblem; norm_deficit="norm_deficit"
 )
@@ -899,7 +955,9 @@ function ChainRulesCore.rrule(
             integer_strategy,
         )
         pdual_available = true
-    catch
+    catch err
+        # Surface the reason the fast path was skipped without altering the fallback.
+        @debug "pdual path failed; falling back to DiffOpt reverse differentiation" exception = (err, catch_backtrace())
         y = _simulate_stage(
             subproblem,
             state_param_in,
@@ -1049,7 +1107,9 @@ function ChainRulesCore.rrule(
             integer_strategy,
         )
         pdual_available = true
-    catch
+    catch err
+        # Surface the reason the fast path was skipped without altering the fallback.
+        @debug "pdual path failed; falling back to DiffOpt reverse differentiation" exception = (err, catch_backtrace())
         y = _simulate_multistage_det(
             det_equivalent,
             state_params_in,
@@ -1342,30 +1402,52 @@ Q(\theta; w) =
     \sum_{t=1}^{T} q_t(x_{t-1}, w_t; \hat{x}_t),
 ```
 
-where each realized ``x_t`` is read from the previous stage solve. The gradient
-therefore contains both the target duals ``\lambda_t`` and the sensitivity of
-later realized states with respect to earlier targets. In the notation of the
-extension note,
+where each realized ``x_t`` is read from the previous stage solve. In this
+single-shooting rollout ``\theta`` influences later stage costs through two
+couplings: the realized-state chain (the solver map
+``x_t = X_t(x_{t-1}, \hat{x}_t; w_t)`` propagates earlier targets forward),
+and the **policy-feedback path** (the policy input at stage ``t`` is the
+realized state ``x_{t-1}``, which itself depends on earlier targets). The exact
+gradient is the total-derivative recursion
 
 ```math
-\nabla_\theta Q(\theta; w)
+\frac{d Q}{d \theta}
 =
 \sum_{t=1}^{T}
 \left[
-    \frac{\partial q_t}{\partial \hat{x}_t}
+    \frac{\partial q_t}{\partial \hat{x}_t} \frac{d \hat{x}_t}{d \theta}
     +
-    \sum_{k=t+1}^{T}
-    \frac{\partial q_k}{\partial x_{k-1}}
-    \prod_{j=t+1}^{k-1}
-    \frac{\partial x_j}{\partial x_{j-1}}
-    \frac{\partial x_t}{\partial \hat{x}_t}
-\right]
-\nabla_\theta \pi_\theta(w_t, x_{t-1}).
+    \frac{\partial q_t}{\partial x_{t-1}} \frac{d x_{t-1}}{d \theta}
+\right],
 ```
 
-The dual terms come from target and transition constraints; the state
-sensitivities are computed through DiffOpt in the rrules for
-[`simulate_stage`](@ref) and [`get_next_state`](@ref).
+with the coupled state and target recursions (and ``d x_0 / d\theta = 0``)
+
+```math
+\frac{d x_t}{d \theta}
+=
+\frac{\partial X_t}{\partial x_{t-1}} \frac{d x_{t-1}}{d \theta}
++
+\frac{\partial X_t}{\partial \hat{x}_t} \frac{d \hat{x}_t}{d \theta},
+\qquad
+\frac{d \hat{x}_t}{d \theta}
+=
+\nabla_\theta \pi_\theta(w_t, x_{t-1})
++
+\frac{\partial \pi_\theta}{\partial x_{t-1}} \frac{d x_{t-1}}{d \theta}.
+```
+
+All derivative products must be read as **total** derivatives that include the
+policy-feedback composition: a term such as
+``\partial \pi_\theta / \partial x_{k-1} \cdot d x_{k-1} / d\theta`` is present
+at every stage, so ``\theta`` reaches stage ``k`` not only through the
+realized-state chain ``\partial x_j / \partial x_{j-1}`` but also through the
+policy input ``x_{k-1}``. Reverse-mode AD (Zygote through the stage rrules)
+computes exactly this full chain: the dual terms from target and transition
+constraints supply ``\partial q_t / \partial \hat{x}_t`` and
+``\partial q_t / \partial x_{t-1}``, while the state sensitivities are computed
+through DiffOpt in the rrules for [`simulate_stage`](@ref) and
+[`get_next_state`](@ref).
 
 # Arguments
 - `model`: differentiable Flux-compatible policy. It receives
@@ -1489,9 +1571,11 @@ function train_multistage(
                 return objective
             end
         catch e
-            if handle_training_error(gradient_fallback, e, iter)
-                nothing
-            end
+            # handle_training_error rethrows for ErrorGradientFallback and logs a
+            # warning + returns true (skip this iteration) for ZeroGradientFallback;
+            # either way no gradient is available, so the try-expression is nothing.
+            handle_training_error(gradient_fallback, e, iter)
+            nothing
         end
         record(sample_log, iter, model) && break
 
@@ -1504,46 +1588,6 @@ function train_multistage(
     end
 
     return model
-end
-
-"""
-    sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states) -> Vector{Float32}
-
-Compute the target state at position `t` in the trajectory.
-
-For ``t = 1`` returns `Float32.(initial_state)` (the fixed initial condition
-``x_0``). For ``t > 1`` evaluates the policy on the concatenated input:
-
-```math
-\\hat{x}_t = \\pi_\\theta\\bigl([w_{t-1},\\; \\hat{x}_{t-1}]\\bigr),
-```
-
-where ``w_{t-1}`` = `uncertainty_sample_vec[t-1]` and
-``\\hat{x}_{t-1}`` = `prev_states[t-1]`.
-
-This helper is used inside the DE training loop to build the target
-trajectory incrementally (via `accumulate`-style recursion).
-
-# Arguments
-- `t::Int`: one-based position in the trajectory (1 = initial state).
-- `m`: differentiable Flux policy ``\\pi_\\theta``.
-- `initial_state`: fixed initial state ``x_0``.
-- `uncertainty_sample_vec`: per-stage uncertainty value vectors
-  (length ``T``; each entry is a plain `Vector` of numeric values).
-- `prev_states`: previously computed target states ``[\\hat{x}_0, \\ldots, \\hat{x}_{t-1}]``.
-"""
-function sim_states(t, m, initial_state, uncertainty_sample_vec, prev_states)
-    # t=1 is the fixed initial condition; no policy evaluation needed.
-    if t == 1
-        return Float32.(initial_state)
-    else
-        # Extract the uncertainty values for stage t-1.
-        uncertainties_t = uncertainty_sample_vec[t - 1]
-        # Use the previous target state as the recurrent input.
-        prev_state = prev_states[t - 1]
-        # Evaluate the policy on [uncertainty, previous_state].
-        return m(vcat(uncertainties_t, prev_state))
-    end
 end
 
 @doc raw"""
@@ -1772,9 +1816,11 @@ function train_multistage(
                 return objective
             end
         catch e
-            if handle_training_error(gradient_fallback, e, iter)
-                nothing
-            end
+            # handle_training_error rethrows for ErrorGradientFallback and logs a
+            # warning + returns true (skip this iteration) for ZeroGradientFallback;
+            # either way no gradient is available, so the try-expression is nothing.
+            handle_training_error(gradient_fallback, e, iter)
+            nothing
         end
         record(sample_log, iter, model) && break
 

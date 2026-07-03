@@ -317,6 +317,13 @@ include("test_score_function.jl")
         uncertainty_samples = [[(uncertainty_1, [2.0])], [(uncertainty_2, [1.0])]]
         initial_state = [5.0]
 
+        n_param_cons_before = length(
+            JuMP.all_constraints(subproblem2, VariableRef, MOI.Parameter{Float64})
+        )
+        has_state_in_param_before = any(
+            con -> JuMP.constraint_object(con).func == state_in_2,
+            JuMP.all_constraints(subproblem2, VariableRef, MOI.Parameter{Float64}),
+        )
         det_equivalent, uncertainty_samples = DecisionRules.deterministic_equivalent!(
             quiet_nonlinear_ipopt_model(),
             subproblems,
@@ -324,6 +331,14 @@ include("test_score_function.jl")
             state_params_out,
             initial_state,
             uncertainty_samples,
+        )
+        @test length(
+            JuMP.all_constraints(subproblem2, VariableRef, MOI.Parameter{Float64})
+        ) == n_param_cons_before
+        @test has_state_in_param_before
+        @test any(
+            con -> JuMP.constraint_object(con).func == state_in_2,
+            JuMP.all_constraints(subproblem2, VariableRef, MOI.Parameter{Float64}),
         )
 
         obj_val = DecisionRules.simulate_multistage(
@@ -448,6 +463,26 @@ include("test_score_function.jl")
         optimize!(model5)
         @test compute_parameter_dual(model5, state_in5) ≈ -30.0 rtol=1.0e-1
         @test compute_parameter_dual(model5, state_out5) ≈ 30.0 rtol=1.0e-1
+
+        model6 = Model()
+        @variable(model6, x6)
+        @variable(model6, p6 in MOI.Parameter(1.0))
+        @constraint(model6, x6 - p6 >= 0)
+        @objective(model6, Min, x6)
+        @test_throws Exception compute_parameter_dual(model6, p6)
+
+        # Test 7: documented docstring example (MIN sense)
+        # min 3x + p  s.t. x >= 2*p, x >= 0
+        # At optimality x* = 2p, so the objective is 7p and ∂obj/∂p = 7.
+        # The constraint normalizes to x - 2p >= 0 (coef of p is -2), dual = 3:
+        # contribution -(-2) * 3 = 6, plus the objective coefficient 1 → 7.
+        model7 = quiet_ipopt_model()
+        @variable(model7, x7 >= 0)
+        @variable(model7, p7 in MOI.Parameter(1.0))
+        @constraint(model7, con7, x7 >= 2 * p7)
+        @objective(model7, Min, 3 * x7 + p7)
+        optimize!(model7)
+        @test compute_parameter_dual(model7, p7) ≈ 7.0 rtol=1.0e-2
     end
 
     @testset "create_deficit!" begin
@@ -2141,6 +2176,9 @@ include("test_score_function.jl")
         # Empty layers (single layer)
         m_empty = dense_multilayer_nn(3, 2, Int[]; activation=relu, dense=Dense)
         @test size(m_empty(rand(Float32, 3))) == (2,)
+        m_empty.weight .= -1
+        m_empty.bias .= 0
+        @test all(m_empty(ones(Float32, 3)) .== 0)
 
         # Empty layers LSTM
         m_empty_lstm = dense_multilayer_nn(3, 2, Int[]; dense=LSTM)
@@ -2284,6 +2322,24 @@ include("test_score_function.jl")
             DecisionRules.get_objective_no_target_deficit(sp1) +
             DecisionRules.get_objective_no_target_deficit(sp2)
         @test total ≈ indiv
+
+        quad_model = quiet_ipopt_model()
+        @variable(quad_model, x)
+        @variable(quad_model, norm_deficit >= 0)
+        @constraint(quad_model, x == 2)
+        @constraint(quad_model, norm_deficit == 3)
+        @objective(quad_model, Min, x^2 + 10 * norm_deficit)
+        optimize!(quad_model)
+        @test DecisionRules.get_objective_no_target_deficit(quad_model) ≈ 4.0 atol=1.0e-4
+
+        bad_quad = quiet_ipopt_model()
+        @variable(bad_quad, z)
+        @variable(bad_quad, norm_deficit_bad >= 0)
+        @constraint(bad_quad, z == 1)
+        @constraint(bad_quad, norm_deficit_bad == 2)
+        @objective(bad_quad, Min, z^2 + norm_deficit_bad^2)
+        optimize!(bad_quad)
+        @test_throws ErrorException DecisionRules.get_objective_no_target_deficit(bad_quad)
     end
 
     @testset "materialize_tangent edge cases" begin

@@ -69,7 +69,9 @@ f(x) = W_{L+1} \\, \\sigma\\bigl(W_L \\cdots \\sigma(W_1 x + b_1) \\cdots + b_L\
 
 where ``W_k \\in \\mathbb{R}^{h_k \\times h_{k-1}}``, ``h_0 = \\text{num\\_inputs}``,
 and the final layer ``W_{L+1} \\in \\mathbb{R}^{\\text{num\\_outputs} \\times h_L}``
-has no activation. When `layers` is empty a single linear layer is returned.
+has no activation. When `layers` is empty, there is no hidden/output
+distinction: the returned single dense layer uses `activation`, preserving the
+same constructor semantics as `Dense(num_inputs, num_outputs, activation)`.
 
 If `dense` is a recurrent type (`LSTM`, `GRU`, `RNN`), pair notation
 `in => out` is used instead of `(in, out, σ)`, and the last layer omits the
@@ -105,7 +107,7 @@ function dense_multilayer_nn(
     _make_layer(in_dim, out_dim) =
         is_recurrent ? dense(in_dim => out_dim) : dense(in_dim, out_dim, activation)
 
-    # No hidden layers: return a single linear projection.
+    # No hidden layers: preserve Dense(input, output, activation) semantics.
     if length(layers) == 0
         return if is_recurrent
             dense(num_inputs => num_outputs)
