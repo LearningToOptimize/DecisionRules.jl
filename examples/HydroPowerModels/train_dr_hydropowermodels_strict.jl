@@ -19,6 +19,7 @@
 #   DR_ENCODER_LAYERS=128,128  recurrent inflow encoder sizes
 #   DR_HEAD_LAYERS=            nonrecurrent state-conditioned target head sizes
 #   DR_GRAD_CLIP=0             gradient clipping (0 = disabled)
+#   DR_NUM_TRAIN_PER_BATCH=1   sampled trajectories per gradient step (variance reduction)
 #   DR_PRETRAINED_MODEL=path   warmstart from a StateConditionedPolicy checkpoint
 using DecisionRules
 using Statistics
@@ -45,7 +46,9 @@ mkpath(model_dir)
 formulation_file = formulation * ".mof.json"
 num_epochs = parse(Int, get(ENV, "DR_NUM_EPOCHS", "80"))
 num_batches = 100
-_num_train_per_batch = 1
+# Trajectories sampled per gradient step; >1 averages the per-sample dual
+# gradients, reducing estimator variance at proportionally higher solve cost.
+_num_train_per_batch = parse(Int, get(ENV, "DR_NUM_TRAIN_PER_BATCH", "1"))
 """
     parse_layers(s::AbstractString) -> Vector{Int64}
 
@@ -82,7 +85,9 @@ pre_trained_model = get(ENV, "DR_PRETRAINED_MODEL", nothing)
 clip_tag = grad_clip > 0 ? "-clip$(Int(grad_clip))" : ""
 head_tag = isempty(head_layers) ? "-Hlinear" : "-H$(join(head_layers, "_"))"
 _rollout_tag = num_rollout_stages != num_stages ? "-r$(num_rollout_stages)" : ""
-save_file = "$(case_name)-$(formulation)-h$(num_stages)$(_rollout_tag)-subproblems-strict$(clip_tag)$(head_tag)-$(now())"
+# Tag runs with a non-default batch size so checkpoints are distinguishable.
+nt_tag = _num_train_per_batch > 1 ? "-nt$(_num_train_per_batch)" : ""
+save_file = "$(case_name)-$(formulation)-h$(num_stages)$(_rollout_tag)-subproblems-strict$(clip_tag)$(head_tag)$(nt_tag)-$(now())"
 num_eval_scenarios = 4                   # fixed held-out scenarios for rollout evaluation
 eval_every = 25                          # rollout-evaluate every eval_every batches
 
