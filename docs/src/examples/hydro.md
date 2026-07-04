@@ -618,8 +618,8 @@ scheduling and careful tuning.  Strict mode eliminates this entirely.
 - **Simulation cost** (96 stages): the operational cost obtained by
   rolling out a policy under AC power flow on 100 held-out inflow
   scenarios.  This is the primary metric for policy quality.  SDDP's
-  96-stage simulation cost is **303 684** (mean over 100 scenarios,
-  std 5 453).
+  96-stage simulation cost is **302 674** (mean over 100 paired scenarios,
+  std 5 572; re-evaluated 2026-07-03).
 
 During TS-DDR training, the logged loss is a *training-batch average*
 over a small number of sampled scenarios (typically 1–4 per batch).
@@ -646,10 +646,15 @@ total dispatch cost under AC power flow on 100 held-out inflow scenarios.
 
 | Method | Policy | Mean Cost | Std | Target violations |
 |:-------|:------:|----------:|----:|:-----------------:|
-| SDDP (SOC-WR / ACP) | cuts | 303 684 | 5 453 | — |
-| **TS-DDR strict subproblems** | LSTM + reachable | 304 294 | 5 847 | 0.0% |
+| SDDP (SOC-WR / ACP) | cuts | 302 674 | 5 572 | — |
+| **TS-DDR strict subproblems** | LSTM + reachable | 303 635 | 5 708 | 0.0% |
 
-The strict policy achieves a mean cost within **0.2%** of SDDP —
+Both rows use the *same* 100 pre-sampled inflow trajectories
+(`paired_scenario_indices.csv`, via `eval_paired_tsddr.jl` and
+`sddp/eval_paired_sddp.jl`; re-evaluated 2026-07-03), so the comparison is
+paired: the per-scenario cost difference is 961 ± 499 in SDDP's favor.
+
+The strict policy achieves a mean cost within **0.32%** of SDDP —
 essentially matching the SDDP benchmark while guaranteeing zero target
 violations by construction.
 
