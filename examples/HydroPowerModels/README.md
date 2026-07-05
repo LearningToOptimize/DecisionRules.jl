@@ -34,6 +34,49 @@ The training script logs to Weights & Biases and saves model checkpoints.
 The evaluation script writes per-scenario costs, mean reservoir volumes,
 and mean thermal generation to CSV files for comparison against SDDP.
 
+## Reproducing the paper results (strict, Bolivia ACP)
+
+Both stages below are ordinary configurations of the same entrypoint — no
+side scripts. All knobs are environment variables documented in the header of
+`train_dr_hydropowermodels_strict.jl`; defaults reproduce stage 1 exactly.
+
+**Stage 1 — train from scratch** (h126 training horizon, r96 rollout
+evaluation, LSTM(128,128) encoder, linear sigmoid head):
+
+```bash
+DR_NUM_STAGES=126 DR_NUM_ROLLOUT_STAGES=96 \
+julia --project -t auto train_dr_hydropowermodels_strict.jl
+```
+
+**Stage 2 — fine-tune the best stage-1 checkpoint** (variance-reduced
+gradients, warmup + cosine-decayed learning rate, checkpoints selected by the
+held-out 96-stage rollout objective rather than the noisy training loss):
+
+```bash
+DR_PRETRAINED_MODEL=bolivia/ACPPowerModel/models/<stage1-best>.jld2 \
+DR_NUM_STAGES=126 DR_NUM_ROLLOUT_STAGES=96 DR_NUM_EPOCHS=15 \
+DR_NUM_TRAIN_PER_BATCH=16 DR_LR=1e-4 DR_LR_FINAL=1e-5 DR_LR_WARMUP=50 \
+DR_SAVE_METRIC=rollout DR_NUM_EVAL_SCENARIOS=24 \
+julia --project -t auto train_dr_hydropowermodels_strict.jl
+```
+
+Why stage 2 is configured this way: near convergence the single-sample
+training loss (per-scenario std ≈ 5–7k) cannot rank checkpoints that differ by
+a few hundred cost units, so selection switches to the deployment metric
+(`DR_SAVE_METRIC=rollout`) over 24 fixed scenarios; a fresh Adam takes
+full-size steps while its second-moment estimates are still zero, so the
+warmup protects the loaded optimum; and the decayed learning rate lets the
+policy re-anneal instead of random-walking at a fixed step size.
+
+**Paired evaluation against SDDP** (same 100 pre-sampled scenarios for both
+methods, via `bolivia/paired_scenario_indices.csv`):
+
+```bash
+julia --project -t auto eval_paired_tsddr.jl \
+    bolivia/ACPPowerModel/models/<best>.jld2
+cd sddp && julia --project -t auto eval_paired_sddp.jl
+```
+
 ## Strict Reachability Logic
 
 Strict mode is normally safe only when the policy can see the current state:

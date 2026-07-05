@@ -21,6 +21,32 @@
 #   DR_GRAD_CLIP=0             gradient clipping (0 = disabled)
 #   DR_NUM_TRAIN_PER_BATCH=1   sampled trajectories per gradient step (variance reduction)
 #   DR_PRETRAINED_MODEL=path   warmstart from a StateConditionedPolicy checkpoint
+#   DR_NUM_EVAL_SCENARIOS=4    fixed held-out scenarios for rollout evaluation
+#   DR_EVAL_EVERY=25           rollout-evaluate every this many batches
+#   DR_SAVE_METRIC=training    checkpoint-selection metric:
+#                              "training" — per-batch training loss (historical
+#                              behavior; noisy for small DR_NUM_TRAIN_PER_BATCH)
+#                              "rollout" — mean deficit-free objective of the
+#                              fixed held-out rollout evaluation (the metric
+#                              policies are ultimately judged on; evaluated
+#                              every DR_EVAL_EVERY batches)
+#   DR_LR=0.001                Adam learning rate
+#   DR_LR_FINAL=DR_LR          final learning rate of a cosine decay across the
+#                              full run (equal to DR_LR → constant, historical)
+#   DR_LR_WARMUP=0             linear warmup iterations from DR_LR/100 to DR_LR.
+#                              Protects a warmstarted policy from the initial
+#                              full-size Adam steps taken while its second-moment
+#                              estimates are still zero.
+#
+# Reproducible recipes (also listed in this folder's README):
+#   From scratch (paper configuration — all defaults):
+#     julia --project -t auto train_dr_hydropowermodels_strict.jl
+#   Fine-tune from a converged checkpoint (variance-reduced, decayed LR,
+#   rollout-selected checkpoints):
+#     DR_PRETRAINED_MODEL=<best.jld2> DR_NUM_TRAIN_PER_BATCH=16 \
+#     DR_LR=1e-4 DR_LR_FINAL=1e-5 DR_LR_WARMUP=50 \
+#     DR_SAVE_METRIC=rollout DR_NUM_EVAL_SCENARIOS=24 DR_NUM_EPOCHS=15 \
+#     julia --project -t auto train_dr_hydropowermodels_strict.jl
 using DecisionRules
 using Statistics
 using Random
@@ -76,10 +102,47 @@ parse_layers(s::AbstractString) =
 layers = parse_layers(get(ENV, "DR_ENCODER_LAYERS", get(ENV, "DR_LAYERS", "128,128")))
 head_layers = parse_layers(get(ENV, "DR_HEAD_LAYERS", ""))
 grad_clip = parse(Float32, get(ENV, "DR_GRAD_CLIP", "0"))
+
+# ── Learning-rate schedule ───────────────────────────────────────────────────
+# lr(iter) = linear warmup from lr_init/100 over `lr_warmup` iterations, then
+# cosine decay from lr_init to lr_final across the remaining budget. With the
+# defaults (warmup = 0, lr_final = lr_init) this is a constant lr_init,
+# reproducing the historical behavior exactly.
+lr_init = parse(Float64, get(ENV, "DR_LR", "0.001"))
+lr_final = parse(Float64, get(ENV, "DR_LR_FINAL", string(lr_init)))
+lr_warmup = parse(Int, get(ENV, "DR_LR_WARMUP", "0"))
+
+"""
+    lr_schedule(iter, total_iters) -> Float64
+
+Learning rate at one-based training iteration `iter`.
+
+Linear warmup from `lr_init / 100` to `lr_init` over the first `lr_warmup`
+iterations, then cosine decay from `lr_init` to `lr_final`:
+
+```math
+\\eta(k) = \\eta_f + \\tfrac{1}{2} (\\eta_0 - \\eta_f)
+           \\bigl(1 + \\cos(\\pi \\rho_k)\\bigr),
+```
+
+where ``\\rho_k`` is the post-warmup progress fraction. Constant when
+`lr_warmup == 0` and `lr_final == lr_init` (the defaults).
+"""
+function lr_schedule(iter, total_iters)
+    if iter <= lr_warmup
+        # Warmup guards a warmstarted policy against full-size Adam steps
+        # taken while the optimizer's second-moment estimates are near zero.
+        return lr_init * (0.01 + 0.99 * iter / max(lr_warmup, 1))
+    end
+    # Post-warmup progress in [0, 1] over the remaining iteration budget.
+    ρ = clamp((iter - lr_warmup) / max(total_iters - lr_warmup, 1), 0.0, 1.0)
+    return lr_final + 0.5 * (lr_init - lr_final) * (1 + cos(π * ρ))
+end
+
 optimizers = if grad_clip > 0
-    [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam())]
+    [Flux.Optimisers.OptimiserChain(Flux.Optimisers.ClipGrad(grad_clip), Flux.Adam(lr_init))]
 else
-    [Flux.Adam()]
+    [Flux.Adam(lr_init)]
 end
 pre_trained_model = get(ENV, "DR_PRETRAINED_MODEL", nothing)
 clip_tag = grad_clip > 0 ? "-clip$(Int(grad_clip))" : ""
@@ -87,9 +150,18 @@ head_tag = isempty(head_layers) ? "-Hlinear" : "-H$(join(head_layers, "_"))"
 _rollout_tag = num_rollout_stages != num_stages ? "-r$(num_rollout_stages)" : ""
 # Tag runs with a non-default batch size so checkpoints are distinguishable.
 nt_tag = _num_train_per_batch > 1 ? "-nt$(_num_train_per_batch)" : ""
-save_file = "$(case_name)-$(formulation)-h$(num_stages)$(_rollout_tag)-subproblems-strict$(clip_tag)$(head_tag)$(nt_tag)-$(now())"
-num_eval_scenarios = 4                   # fixed held-out scenarios for rollout evaluation
-eval_every = 25                          # rollout-evaluate every eval_every batches
+# Tag warmstarted runs: their result is a fine-tune of another checkpoint, not
+# a from-scratch training (the parent checkpoint is recorded in wandb config).
+warm_tag = (isnothing(pre_trained_model) || pre_trained_model == "nothing") ? "" : "-warm"
+save_file = "$(case_name)-$(formulation)-h$(num_stages)$(_rollout_tag)-subproblems-strict$(clip_tag)$(head_tag)$(nt_tag)$(warm_tag)-$(now())"
+num_eval_scenarios = parse(Int, get(ENV, "DR_NUM_EVAL_SCENARIOS", "4"))
+eval_every = parse(Int, get(ENV, "DR_EVAL_EVERY", "25"))
+# Checkpoint-selection metric: "training" (historical; noisy at small batch
+# sizes because a lucky scenario can look like a better policy) or "rollout"
+# (deficit-free mean over the fixed held-out scenarios — the deployment metric).
+save_metric = lowercase(get(ENV, "DR_SAVE_METRIC", "training"))
+save_metric in ("training", "rollout") ||
+    error("DR_SAVE_METRIC must be \"training\" or \"rollout\", got $save_metric")
 
 # ── Build strict subproblems (no deficit, no penalty) ────────────────────────
 
@@ -134,6 +206,12 @@ lg = WandbLogger(;
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),
         "pre_trained_model" => string(pre_trained_model),
+        "num_eval_scenarios" => num_eval_scenarios,
+        "eval_every" => eval_every,
+        "save_metric" => save_metric,
+        "lr" => lr_init,
+        "lr_final" => lr_final,
+        "lr_warmup" => lr_warmup,
     ),
 )
 
@@ -166,11 +244,8 @@ objective_values = [
         models;
     ) for _ in 1:2
 ]
-best_obj = mean(objective_values)
-
-model_path = joinpath(model_dir, save_file * ".jld2")
-save_control = SaveBest(best_obj, model_path)
-convergence_criterium = StallingCriterium(num_epochs * num_batches, best_obj, 0)
+initial_training_obj = mean(objective_values)
+convergence_criterium = StallingCriterium(num_epochs * num_batches, initial_training_obj, 0)
 
 # Fixed held-out scenarios, materialized once so every evaluation uses the same set.
 # Use num_rollout_stages for evaluation (may differ from training num_stages).
@@ -187,7 +262,24 @@ rollout_evaluation = RolloutEvaluation(
     policy_state=:realized,
 )
 
+# Checkpoint-selection baseline. With save_metric == "rollout" the incumbent
+# is the current model's held-out rollout cost, so a warmstarted run only saves
+# checkpoints that genuinely improve on the loaded policy under the metric it
+# is ultimately judged on. iter = eval_every satisfies the stride gate.
+best_obj = if save_metric == "rollout"
+    rollout_evaluation(eval_every, models)
+    @info "Initial rollout evaluation (checkpoint baseline)" rollout_evaluation.last_objective_no_deficit rollout_evaluation.last_violation_share
+    rollout_evaluation.last_objective_no_deficit
+else
+    initial_training_obj
+end
+model_path = joinpath(model_dir, save_file * ".jld2")
+save_control = SaveBest(best_obj, model_path)
+
 # ── Train ────────────────────────────────────────────────────────────────────
+
+# Total iteration budget, used by the learning-rate schedule.
+total_iters = num_epochs * num_batches
 
 # No penalty schedule needed — strict mode has no deficit to penalize.
 train_multistage(
@@ -197,15 +289,22 @@ train_multistage(
     state_params_in,
     state_params_out,
     uncertainty_samples;
-    num_batches=num_epochs * num_batches,
+    num_batches=total_iters,
     num_train_per_batch=_num_train_per_batch,
     optimizer=first(optimizers),
+    # Apply the learning-rate schedule through the optimizer state. With the
+    # default constant schedule adjust! is a no-op-equivalent every iteration.
+    adjust_hyperparameters=(iter, opt_state, ntpb) -> begin
+        Flux.Optimisers.adjust!(opt_state, lr_schedule(iter, total_iters))
+        ntpb
+    end,
     record=(sample_log, iter, model) -> begin
         # In strict mode: objectives == objectives_no_deficit (no penalty term)
         training_loss = mean(sample_log.objectives)
         metrics = Dict(
             "metrics/loss" => training_loss,
             "metrics/training_loss" => training_loss,
+            "metrics/lr" => lr_schedule(iter, total_iters),
         )
         rollout_evaluation(iter, model)
         if iter % eval_every == 0
@@ -215,7 +314,14 @@ train_multistage(
                 rollout_evaluation.last_violation_share
         end
         Wandb.log(lg, metrics)
-        save_control(iter, model, training_loss)
+        # Checkpoint selection: historical per-batch training loss, or the
+        # held-out rollout objective (only refreshed at eval iterations).
+        if save_metric == "rollout"
+            iter % eval_every == 0 &&
+                save_control(iter, model, rollout_evaluation.last_objective_no_deficit)
+        else
+            save_control(iter, model, training_loss)
+        end
         return convergence_criterium(iter, model, training_loss)
     end,
     penalty_schedule=nothing,

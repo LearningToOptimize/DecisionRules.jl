@@ -10,6 +10,10 @@
 # Environment overrides:
 #   DR_NUM_EVAL_STAGES=96
 #   DR_NUM_SCENARIOS=100
+#   DR_OUTPUT_TAG=""   (when set, ALL output filenames are suffixed with
+#                       "_<tag>" — paired_costs_<tag>.csv, etc. — so evaluating
+#                       a new checkpoint never clobbers the untagged
+#                       ground-truth results; unset → historical filenames)
 using DecisionRules
 using Flux
 using Statistics
@@ -27,6 +31,10 @@ include(joinpath(HydroPowerModels_dir, "hydro_reachable_policy.jl"))
 model_path = ARGS[1]
 num_eval_stages = parse(Int, get(ENV, "DR_NUM_EVAL_STAGES", "96"))
 num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "100"))
+# Optional output tag: suffixes every output filename with "_<tag>" so a new
+# checkpoint's evaluation cannot overwrite the untagged ground-truth files.
+output_tag = strip(get(ENV, "DR_OUTPUT_TAG", ""))
+tag_suffix = isempty(output_tag) ? "" : "_" * output_tag
 layers = Int64[128, 128]
 
 println("=" ^ 60)
@@ -34,6 +42,7 @@ println("Paired TS-DDR Strict Rollout Evaluation")
 println("  Model:      $model_path")
 println("  Stages:     $num_eval_stages")
 println("  Scenarios:  $num_scenarios")
+isempty(output_tag) || println("  Output tag: $output_tag")
 println("=" ^ 60)
 
 # ── Load pre-sampled scenario indices ──────────────────────────────────────
@@ -168,26 +177,26 @@ println("=" ^ 60)
 out_dir = joinpath(HydroPowerModels_dir, case_name, formulation)
 
 const COL_NAME = "TS-DDR (strict, paired)"
-costs_file = joinpath(out_dir, "paired_costs.csv")
+costs_file = joinpath(out_dir, "paired_costs$(tag_suffix).csv")
 df = DataFrame(Symbol(COL_NAME) => costs)
 CSV.write(costs_file, df)
 println("Saved: $costs_file")
 
 mean_vol = vec(mean(vol_trajectories; dims=2))
-vol_file = joinpath(out_dir, "paired_MeanVolume.csv")
+vol_file = joinpath(out_dir, "paired_MeanVolume$(tag_suffix).csv")
 df_vol = DataFrame(Symbol(COL_NAME) => mean_vol)
 CSV.write(vol_file, df_vol)
 println("Saved: $vol_file")
 
 mean_gen = vec(mean(gen_trajectories; dims=2))
-gen_file = joinpath(out_dir, "paired_MeanGeneration.csv")
+gen_file = joinpath(out_dir, "paired_MeanGeneration$(tag_suffix).csv")
 df_gen = DataFrame(Symbol(COL_NAME) => mean_gen)
 CSV.write(gen_file, df_gen)
 println("Saved: $gen_file")
 
 results_dir = joinpath(out_dir, "results")
 mkpath(results_dir)
-results_file = joinpath(results_dir, "paired_strict_rollout.jld2")
+results_file = joinpath(results_dir, "paired_strict_rollout$(tag_suffix).jld2")
 jldsave(results_file;
     costs=costs,
     vol_trajectories=vol_trajectories,
