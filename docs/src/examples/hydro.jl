@@ -691,9 +691,13 @@ using Statistics, Random
 # ### Paired evaluation protocol
 #
 # All headline numbers in the Results section come from a **paired**
-# protocol: a fixed 126×100 matrix of scenario indices
-# (`bolivia/paired_scenario_indices.csv`) selects the *same* joint inflow
-# realization at every stage for every method.  The SDDP policy is simulated
+# protocol: a fixed 126×500 index matrix, generated deterministically from a
+# documented seed (`paired_scenario_indices` in the example's
+# `load_hydropowermodels.jl`, using `StableRNGs` so the stream is identical
+# on every Julia version), selects the *same* joint inflow realization at
+# every stage for every method.  The protocol is therefore reproducible from
+# code alone — there is no scenario data artifact to distribute.  The SDDP
+# policy is simulated
 # with `SDDP.Historical` on those indices (`sddp/eval_paired_sddp.jl`); every
 # decision-rule checkpoint is rolled out stage-wise on the identical
 # trajectories (`eval_paired_tsddr.jl` here; `eval_paired_exa_strict.jl` in
@@ -770,15 +774,17 @@ using Statistics, Random
 #   pass.  This is the 126-stage operational cost of the SDDP policy.
 #
 # - **Simulation cost** (96 stages): the operational cost obtained by
-#   rolling out a policy under AC power flow on 100 held-out inflow
+#   rolling out a policy under AC power flow on the 500 seeded paired inflow
 #   scenarios.  This is the primary metric for policy quality.  SDDP's
-#   96-stage simulation cost is **302 674** (mean over 100 paired scenarios,
-#   std 5 572; re-evaluated 2026-07-03).
+#   96-stage simulation cost is **303 665** (mean over the 500 paired
+#   scenarios, std 5 921).
 #
 # During TS-DDR training, the logged loss is a *training-batch average*
-# over a small number of sampled scenarios (typically 1–4 per batch).
-# This number is noisy and not directly comparable to the 100-scenario
-# simulation cost.
+# over a small number of sampled scenarios, and periodic rollout
+# evaluations use small fixed held-out sets.  Neither is comparable to the
+# 500-scenario paired protocol: small evaluation sets carry offsets of
+# several hundred cost units, so cross-method claims are made only on the
+# paired protocol.
 #
 # ### Training convergence against wall-clock time (126 stages)
 #
@@ -829,26 +835,35 @@ using Statistics, Random
 #
 # The plotted wall-clock time is cumulative across both phases.
 #
-# ### 96-stage out-of-sample rollout cost (paired, 100 scenarios)
+# ### 96-stage out-of-sample rollout cost (paired, 500 seeded scenarios)
 #
 # The primary evaluation metric is the **96-stage simulation cost** —
-# total dispatch cost under AC power flow on the 100 paired inflow
-# trajectories.
+# total dispatch cost under AC power flow on the 500 paired inflow
+# trajectories of the seeded protocol.
 #
-# | Method | Policy | Mean Cost | Std | Target violations | Training hardware |
-# |:-------|:------:|----------:|----:|:-----------------:|:------------------|
-# | SDDP (SOC-WR / ACP) | cuts | 302 674 | 5 572 | — | CPU, ≈ 12 h |
-# | **TS-DDR strict DE** | LSTM + reachable | 302 910 | 5 771 | 0.0% | H200 GPU, ≈ 24 h |
-# | **TS-DDR strict subproblems** | LSTM + reachable | 303 010 | 5 738 | 0.0% | CPU (Ipopt), ≈ 21 h |
+# | Method | Policy | Mean Cost | Std | Target violations | Training |
+# |:-------|:------:|----------:|----:|:-----------------:|:---------|
+# | SDDP (SOC-WR / ACP) | cuts | 303 665 | 5 921 | — | CPU, ≈ 12 h |
+# | **TS-DDR strict DE (warm-continued)** | LSTM + reachable | 303 936 | 6 119 | 0.0% | H200 GPU, 22 h + 11 h |
+# | **TS-DDR strict subproblems (two-stage)** | LSTM + reachable | 304 027 | 6 114 | 0.0% | CPU (Ipopt), ≈ 2 d + 21 h |
+# | **TS-DDR strict DE (from scratch, SDDP-matched budget)** | LSTM + reachable | 304 460 | 6 052 | 0.0% | H200 GPU, 12.3 h |
 #
-# The strict DE policy is the best TS-DDR policy in this run: it is within
-# **237 cost units** of SDDP on the paired mean (0.08%) and slightly improves
-# on the stage-wise subproblem policy.  The strict subproblem policy is within
-# **337 cost units** of SDDP (0.11%); its paired SDDP − TS-DDR difference is
-# **−337 ± 396** across scenarios (standard error ≈ 40).  These are small
-# operational gaps, but they are still gaps: on this benchmark the current
-# TS-DDR schedules match the SDDP cost envelope closely but do not yet beat
-# the SDDP policy.
+# Because the protocol is paired, differences are measured per scenario and
+# their standard errors are two orders of magnitude below the cost std:
+#
+# - Best TS-DDR (warm-continued GPU DE) − SDDP: **+270 ± 19**
+#   (``t \\approx 14.5``); TS-DDR dispatches cheaper than SDDP on **17.4%**
+#   of scenarios.
+# - From-scratch GPU DE at SDDP's own ≈ 12 h training budget − SDDP:
+#   **+794 ± 19** (win rate 4.2%).
+#
+# The verdict on this benchmark is symmetric and honest: SDDP retains a
+# statistically significant but operationally tiny advantage — **0.09%**
+# against the best TS-DDR policy — while TS-DDR guarantees zero target
+# violations by construction, requires no penalty tuning, and reaches
+# within 0.26% of SDDP from scratch in the same wall-clock budget on one
+# GPU.  (On the inventory-control example, the same strict construction
+# beats its SDDP baseline outright; see that example's page.)
 #
 # ### Cost distributions on the paired scenario set
 #
@@ -910,7 +925,7 @@ using Statistics, Random
 # | Deficit cost | 6,000 per pu (= 60 $/MWh × baseMVA 100) |
 # | Inflow record | 47 monthly joint scenarios, tiled cyclically beyond month 47 |
 # | Training horizon | 126 stages |
-# | Evaluation horizon | 96 stages, 100 paired scenarios |
+# | Evaluation horizon | 96 stages, 500 seeded paired scenarios |
 # | Water-balance factor | K = 0.0036 (flow → volume) |
 #
 # The 126/96 split is deliberate for **both** SDDP and TS-DDR: training on a

@@ -68,14 +68,91 @@ full-size steps while its second-moment estimates are still zero, so the
 warmup protects the loaded optimum; and the decayed learning rate lets the
 policy re-anneal instead of random-walking at a fixed step size.
 
-**Paired evaluation against SDDP** (same 100 pre-sampled scenarios for both
-methods, via `bolivia/paired_scenario_indices.csv`):
+**Paired evaluation against SDDP** — both methods realize the same 500
+inflow trajectories, generated from a documented seed
+(`paired_scenario_indices` in `load_hydropowermodels.jl`, StableRNG, so the
+protocol is reproducible from code alone):
 
 ```bash
 julia --project -t auto eval_paired_tsddr.jl \
     bolivia/ACPPowerModel/models/<best>.jld2
 cd sddp && julia --project -t auto eval_paired_sddp.jl
 ```
+
+## Files in this folder
+
+Every script, what it does, and when to use it. All commands run from this
+folder with `julia --project`; configuration is via the env vars documented
+in each script's header.
+
+### Problem construction (used by everything else)
+
+| File | Purpose |
+|------|---------|
+| `load_hydropowermodels.jl` | Case loader: builds the stage subproblems from the MOF file + hydro data, reads inflows (tiled cyclically beyond the 47-month record), returns hydro metadata; `strict=true` for hard target equalities. Also defines `paired_scenario_indices`, the seeded paired-evaluation protocol. |
+| `hydro_reachable_policy.jl` | `HydroReachablePolicy`: reachable-set targets (sigmoid scaled to physics bounds), cascade-aware clamping, explicit LSTM state threading, optional stage-context inputs; plus checkpoint loaders. |
+
+### Training
+
+| File | Purpose |
+|------|---------|
+| `train_dr_hydropowermodels_strict.jl` | **The strict trainer** (stage-wise, Ipopt). Header documents the two-stage recipe that produces the paper policies (stage-1 from scratch, stage-2 fine-tune) and all env knobs incl. `DR_CONTEXT`. |
+| `train_dr_hydropowermodels.jl` | Non-strict deterministic-equivalent training (penalty formulation). |
+| `train_dr_hydropowermodels_subproblems.jl` | Non-strict stage-wise (single-shooting) training. |
+| `train_dr_hydropowermodels_multipleshooting.jl` | Non-strict multiple-shooting training. |
+| `train_ldr_hydropowermodels.jl` | TS-LDR (linear decision rule) baseline training. |
+| `train_dr_l2O_supervised.jl` | Supervised learning-to-optimize baseline (needs `gen_inputs_l2O_hydropowermodels.jl` outputs). |
+
+### Paired evaluation (produces the results tables)
+
+| File | Purpose |
+|------|---------|
+| `eval_paired_tsddr.jl` | Paired rollout evaluation of a checkpoint (`ARGS[1]`) on the seeded 500-scenario protocol; writes `paired_costs[_<policy-tag>].csv` and trajectory CSVs. |
+| `sddp/eval_paired_sddp.jl` | Paired SDDP simulation (`SDDP.Historical`) on the identical seeded scenarios; merges its column into the costs CSV. |
+| `dump_paired_policy_reference.jl` | Dumps policy outputs + inflow values (JLD2) consumed by DecisionRulesExa.jl's cross-package equivalence evaluation. |
+
+### Other evaluation & validation
+
+| File | Purpose |
+|------|---------|
+| `eval_strict_rollout.jl` | Standalone 96-stage rollout evaluation of a strict checkpoint (unpaired scenario set). |
+| `evaluate_hydro_policies.jl` | Batch evaluation of pre-trained TS-DDR/TS-LDR checkpoints on a fixed scenario set. |
+| `eval_jump_de.jl` | Evaluates a policy through the full-horizon JuMP deterministic equivalent. |
+| `check_consistent_state_paths.jl` | Consistency check: state paths agree across training formulations. |
+| `test_strict_mode.jl` | Strict-mode construction checks (hard equalities, reachable targets). |
+| `test_sampling_consistency.jl` | Verifies scenario sampling consistency across code paths. |
+| `validate_sddp_vs_jump.jl` | Validates that the JuMP subproblems match SDDP's formulation (the audit that keeps the SDDP comparison fair). |
+
+### Figures (regenerate the docs assets)
+
+| File | Purpose |
+|------|---------|
+| `plot_hydro_strict_convergence.jl` | Wall-clock training-convergence figure (parses `sddp/SDDP.log`, pulls W&B histories). |
+| `plot_hydro_paired_distributions.jl` | Paired cost-distribution figure (absolute densities + paired differences vs SDDP). |
+| `compare_hydro_results.jl` | W&B comparison plots across training formulations. |
+
+### SDDP baseline
+
+| File | Purpose |
+|------|---------|
+| `sddp/run_sddp.jl` | Trains the SDDP baseline (SOC-WR cuts, ACP forward pass); writes cuts JSON + `SDDP.log`. |
+| `sddp/run_sddp_inconsistent.jl` | SDDP with inconsistent backward/forward formulations (the published baseline configuration). |
+| `sddp/simulate_sddp_policy.jl` | Simulates a trained SDDP policy from its cuts file. |
+| `sddp/extract_sddp_trajectories.jl` | Extracts state/generation trajectories from SDDP simulations. |
+
+### Utilities
+
+| File | Purpose |
+|------|---------|
+| `export_subproblem_mof.jl` | Exports the single-stage OPF as `.mof.json` (how `bolivia/*.mof.json` was produced). |
+| `gen_inputs_l2O_hydropowermodels.jl` | Generates supervised-learning inputs for the L2O baseline. |
+
+### Data (`bolivia/`)
+
+`PowerModels.json` + `hydro.json` (network and hydro data), `inflows.csv`
+(47 monthly joint inflow scenarios), `ACPPowerModel.mof.json` etc. (exported
+stage subproblems), `ACPPowerModel/models/` (trained checkpoints) and
+`ACPPowerModel/results/` (evaluation outputs — data, not tracked).
 
 ## Strict Reachability Logic
 

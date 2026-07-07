@@ -41,9 +41,16 @@ const N_HYDRO = 11
 @assert NUM_STAGES == PAIRED_NUM_STAGES "SDDP horizon must equal the paired protocol shape"
 num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "500"))
 nCen = div(size(readdlm(joinpath(HYDRO_DIR, CASE, "inflows.csv"), ','), 2), N_HYDRO)
+# ALWAYS generate the full protocol matrix (fixed shape — see the note above),
+# then optionally simulate only a shard of its columns so the 500 scenarios
+# can run in parallel across nodes (DR_SCENARIO_FIRST/LAST, 1-based inclusive).
 all_indices = rand(StableRNG(PAIRED_SCENARIO_SEED), 1:nCen, PAIRED_NUM_STAGES, num_scenarios)
+scen_first = parse(Int, get(ENV, "DR_SCENARIO_FIRST", "1"))
+scen_last = parse(Int, get(ENV, "DR_SCENARIO_LAST", string(num_scenarios)))
+@assert 1 <= scen_first <= scen_last <= num_scenarios
+scen_range = scen_first:scen_last
 println("Paired protocol: seed=$PAIRED_SCENARIO_SEED, $(PAIRED_NUM_STAGES)×$(num_scenarios), nCen=$nCen")
-println("Evaluating $num_scenarios scenarios, $REPORT_STAGES reported stages (of $NUM_STAGES total)")
+println("Evaluating scenarios $scen_first:$scen_last, $REPORT_STAGES reported stages (of $NUM_STAGES total)")
 
 # ── Build SDDP model and load cuts ────────────────────────────────────────
 alldata = HydroPowerModels.parse_folder(CASE_DIR)
@@ -56,7 +63,16 @@ params = create_param(;
     stages=NUM_STAGES,
     model_constructor_grid=FORMULATION,
     post_method=PowerModels.build_opf,
-    optimizer=() -> MadNLP.Optimizer(; print_level=0),
+    # Hardened solver settings for the 500-scenario simulation: with bare
+    # defaults one nonconvex ACP node failed to converge on one seeded draw
+    # (SDDP aborts the whole simulation on any node failure). Larger
+    # iteration budget + explicit tolerance make every node solvable; the
+    # cuts themselves are unaffected (they were trained separately).
+    optimizer=() -> MadNLP.Optimizer(;
+        print_level=0,
+        max_iter=9000,
+        tol=1e-6,
+    ),
 )
 
 m = hydro_thermal_operation(alldata, params)
@@ -74,21 +90,22 @@ println("Loaded cuts: $cuts_file")
 # node = stage index, noise_term = scenario column ω ∈ 1:nCen
 historical_scenarios = [
     [(t, all_indices[t, s]) for t in 1:NUM_STAGES]
-    for s in 1:num_scenarios
+    for s in scen_range
 ]
+n_sim = length(scen_range)
 
 sampling_scheme = SDDP.Historical(historical_scenarios)
 
 # ── Simulate ───────────────────────────────────────────────────────────────
-println("\nSimulating $num_scenarios scenarios with SDDP.Historical...")
+println("\nSimulating $n_sim scenarios with SDDP.Historical...")
 results = HydroPowerModels.simulate(
-    m, num_scenarios;
+    m, n_sim;
     sampling_scheme=sampling_scheme,
 )
 
 # Verify noise terms match our indices
-for s in 1:min(3, num_scenarios), t in 1:min(5, REPORT_STAGES)
-    recorded_ω = results[:simulations][s][t][:noise_term]
+for (si, s) in enumerate(first(scen_range, min(3, n_sim))), t in 1:min(5, REPORT_STAGES)
+    recorded_ω = results[:simulations][si][t][:noise_term]
     expected_ω = all_indices[t, s]
     if recorded_ω != expected_ω
         error("Mismatch at scenario $s, stage $t: got ω=$recorded_ω, expected $expected_ω")
@@ -102,7 +119,7 @@ volume_to_mw(volume; k=0.0036) = volume / k
 
 objective_values = [
     sum(results[:simulations][i][t][:stage_objective] for t in 1:REPORT_STAGES)
-    for i in 1:num_scenarios
+    for i in 1:n_sim
 ]
 
 hydro_vol = [
@@ -110,7 +127,7 @@ hydro_vol = [
         sum(
             volume_to_mw(results[:simulations][i][t][:reservoirs][:reservoir][j].out) for
             j in 1:nhyd
-        ) for i in 1:num_scenarios
+        ) for i in 1:n_sim
     ) for t in 1:REPORT_STAGES
 ]
 
@@ -122,7 +139,7 @@ thermal_gen = [
             results[:simulations][i][t][:powersystem]["solution"]["gen"]["$j"]["pg"] *
             results[:data][1]["powersystem"]["baseMVA"] for
             j in 1:num_gen if !(j in hydro_idx)
-        ) for i in 1:num_scenarios
+        ) for i in 1:n_sim
     ) for t in 1:REPORT_STAGES
 ]
 
@@ -139,6 +156,15 @@ println("=" ^ 60)
 
 # ── Save results ───────────────────────────────────────────────────────────
 out_dir = joinpath(CASE_DIR, string(FORMULATION))
+
+# Shard mode: emit only this shard's per-scenario costs (merged afterwards by
+# merge_sddp_shards.jl); the full-run outputs below are skipped.
+if n_sim != num_scenarios
+    shard_file = joinpath(out_dir, "sddp_shard_$(scen_first)_$(scen_last).csv")
+    CSV.write(shard_file, DataFrame(scenario = collect(scen_range), cost = objective_values))
+    println("Shard written: $shard_file")
+    exit(0)
+end
 
 # Optional output tag (mirrors eval_paired_tsddr.jl): when DR_OUTPUT_TAG is
 # set, every output filename gets an _<tag> suffix so re-evaluations at a
