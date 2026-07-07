@@ -14,6 +14,10 @@
 #   DR_NUM_EVAL_STAGES=96   number of rollout stages
 #   DR_NUM_SCENARIOS=100    number of evaluation scenarios
 #   DR_EVAL_SEED=1221       random seed (matches SDDP evaluation)
+#   DR_ENCODER_LAYERS=128,128
+#   DR_HEAD_LAYERS=
+#   DR_CONTEXT=             ""/"none", "phase", or "phase+progress"
+#   DR_CONTEXT_HORIZON=126  denominator/horizon used for progress context
 using DecisionRules
 using Flux
 using Statistics
@@ -33,7 +37,36 @@ model_path = ARGS[1]
 num_eval_stages = parse(Int, get(ENV, "DR_NUM_EVAL_STAGES", "96"))
 num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "100"))
 seed = parse(Int, get(ENV, "DR_EVAL_SEED", "1221"))
-layers = Int64[128, 128]
+
+parse_layers(s::AbstractString) =
+    isempty(strip(s)) ? Int64[] : [parse(Int64, strip(x)) for x in split(s, ",") if !isempty(strip(x))]
+
+function canonical_context_mode(raw_mode::AbstractString)
+    mode = lowercase(strip(raw_mode))
+    mode in ("", "none", "off", "false") && return ""
+    mode in ("phase", "phase+progress") && return mode
+    error("DR_CONTEXT must be \"\", \"phase\", or \"phase+progress\"; got \"$raw_mode\"")
+end
+
+function build_stage_context(mode::AbstractString, horizon::Int, period::Int)
+    isempty(mode) && return nothing
+    include_progress = mode == "phase+progress"
+    return DecisionRules.stage_phase_context(
+        horizon;
+        period=period,
+        include_progress=include_progress,
+    )
+end
+
+layers = parse_layers(get(ENV, "DR_ENCODER_LAYERS", get(ENV, "DR_LAYERS", "128,128")))
+head_layers = parse_layers(get(ENV, "DR_HEAD_LAYERS", ""))
+context_mode = canonical_context_mode(get(ENV, "DR_CONTEXT", ""))
+context_horizon = parse(Int, get(ENV, "DR_CONTEXT_HORIZON", "126"))
+context_period = countlines(joinpath(HydroPowerModels_dir, "bolivia", "inflows.csv"))
+context_horizon >= num_eval_stages ||
+    error("DR_CONTEXT_HORIZON=$context_horizon must cover DR_NUM_EVAL_STAGES=$num_eval_stages")
+stage_context = build_stage_context(context_mode, context_horizon, context_period)
+n_context = isnothing(stage_context) ? 0 : size(stage_context, 1)
 
 println("=" ^ 60)
 println("Strict Rollout Evaluation")
@@ -41,6 +74,9 @@ println("  Model:      $model_path")
 println("  Stages:     $num_eval_stages")
 println("  Scenarios:  $num_scenarios")
 println("  Seed:       $seed")
+println("  Layers:     $layers")
+println("  Head:       $head_layers")
+println("  Context:    $(isempty(context_mode) ? "none" : context_mode)")
 println("=" ^ 60)
 
 # ── Build strict subproblems for evaluation ─────────────────────────────────
@@ -85,7 +121,13 @@ pg_vars_per_stage = [DecisionRules.find_variables(subproblems[t], ["pg"]) for t 
 
 # ── Build policy and load trained weights ───────────────────────────────────
 
-models = hydro_reachable_policy(hydro_meta, layers)
+base_model = hydro_reachable_policy(
+    hydro_meta,
+    layers;
+    combiner_layers=head_layers,
+    n_context=n_context,
+)
+models = isnothing(stage_context) ? base_model : ContextualPolicy(base_model, stage_context)
 
 model_save = JLD2.load(model_path)
 model_state = model_save["model_state"]

@@ -1,12 +1,13 @@
-# Paired SDDP simulation using pre-sampled scenario indices via SDDP.Historical.
+# Paired SDDP simulation on the seeded paired protocol via SDDP.Historical.
 #
-# Reads scenario indices from paired_scenario_indices.csv (the same file used by
-# eval_paired_tsddr.jl) and simulates the trained SDDP policy under those exact
-# inflow realizations using the Historical sampling scheme.
+# Scenario indices are generated from PAIRED_SCENARIO_SEED (identical to
+# eval_paired_tsddr.jl's protocol), so the SDDP policy is simulated under the
+# exact inflow realizations every TS-DDR evaluation uses.
 #
 # Usage:
 #   julia --project -t auto eval_paired_sddp.jl
 using MadNLP
+using StableRNGs
 using HydroPowerModels
 using JuMP
 using PowerModels
@@ -25,12 +26,23 @@ const NUM_STAGES = REPORT_STAGES + RM_STAGES
 const FORMULATION = ACPPowerModel
 const FORMULATION_B = SOCWRConicPowerModel
 
-# ── Load pre-sampled scenario indices ──────────────────────────────────────
-indices_file = joinpath(HYDRO_DIR, CASE, "paired_scenario_indices.csv")
-all_indices = Int.(readdlm(indices_file, ','))
-num_scenarios = size(all_indices, 2)
-@assert size(all_indices, 1) >= NUM_STAGES "Need $NUM_STAGES rows, got $(size(all_indices, 1))"
-println("Loaded scenario indices: $(size(all_indices))")
+# ── Paired scenario indices (seeded protocol) ──────────────────────────────
+# Identical generation to load_hydropowermodels.jl's paired_scenario_indices:
+# entry [t, s] is uniform on 1:nCen from StableRNG(PAIRED_SCENARIO_SEED), so
+# this script and every TS-DDR evaluation realize the same inflow at the same
+# stage of the same paired scenario — with no shared data file. nCen is
+# derived from the inflow data (columns ÷ hydro units), never hardcoded.
+const PAIRED_SCENARIO_SEED = 20260706
+# Fixed generated shape shared by ALL consumers (see load_hydropowermodels.jl:
+# arrays of different shapes consume the RNG stream differently, so every
+# script must generate exactly this shape and slice what it needs).
+const PAIRED_NUM_STAGES = 126
+const N_HYDRO = 11
+@assert NUM_STAGES == PAIRED_NUM_STAGES "SDDP horizon must equal the paired protocol shape"
+num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "500"))
+nCen = div(size(readdlm(joinpath(HYDRO_DIR, CASE, "inflows.csv"), ','), 2), N_HYDRO)
+all_indices = rand(StableRNG(PAIRED_SCENARIO_SEED), 1:nCen, PAIRED_NUM_STAGES, num_scenarios)
+println("Paired protocol: seed=$PAIRED_SCENARIO_SEED, $(PAIRED_NUM_STAGES)×$(num_scenarios), nCen=$nCen")
 println("Evaluating $num_scenarios scenarios, $REPORT_STAGES reported stages (of $NUM_STAGES total)")
 
 # ── Build SDDP model and load cuts ────────────────────────────────────────
@@ -128,8 +140,18 @@ println("=" ^ 60)
 # ── Save results ───────────────────────────────────────────────────────────
 out_dir = joinpath(CASE_DIR, string(FORMULATION))
 
+# Optional output tag (mirrors eval_paired_tsddr.jl): when DR_OUTPUT_TAG is
+# set, every output filename gets an _<tag> suffix so re-evaluations at a
+# different scenario count never overwrite existing result files. Note that a
+# tagged run starts fresh tagged files; the merge-with-existing-columns logic
+# only applies within the same tag.
+tag_suffix = let tag = get(ENV, "DR_OUTPUT_TAG", "")
+    isempty(tag) ? "" : "_$(tag)"
+end
+isempty(tag_suffix) || println("Output tag suffix: $tag_suffix")
+
 const COL_NAME = "SDDP-SOC (paired)"
-costs_file = joinpath(out_dir, "paired_costs.csv")
+costs_file = joinpath(out_dir, "paired_costs$(tag_suffix).csv")
 if isfile(costs_file)
     df = CSV.read(costs_file, DataFrame)
     df[!, COL_NAME] = objective_values
@@ -139,7 +161,7 @@ end
 CSV.write(costs_file, df)
 println("Updated: $costs_file")
 
-vol_file = joinpath(out_dir, "paired_MeanVolume.csv")
+vol_file = joinpath(out_dir, "paired_MeanVolume$(tag_suffix).csv")
 if isfile(vol_file)
     df_vol = CSV.read(vol_file, DataFrame; header=true)
     df_vol[!, COL_NAME] = hydro_vol
@@ -149,7 +171,7 @@ end
 CSV.write(vol_file, df_vol)
 println("Updated: $vol_file")
 
-gen_file = joinpath(out_dir, "paired_MeanGeneration.csv")
+gen_file = joinpath(out_dir, "paired_MeanGeneration$(tag_suffix).csv")
 if isfile(gen_file)
     df_gen = CSV.read(gen_file, DataFrame; header=true)
     df_gen[!, COL_NAME] = thermal_gen

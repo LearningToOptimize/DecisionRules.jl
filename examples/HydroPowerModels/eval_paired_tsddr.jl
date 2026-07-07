@@ -1,15 +1,20 @@
-# Paired TS-DDR strict rollout evaluation using pre-sampled scenario indices.
+# Paired TS-DDR strict rollout evaluation on the seeded paired protocol.
 #
-# Reads scenario indices from paired_scenario_indices.csv (126×100 matrix of
-# integers in 1:nCen) so that the exact same inflow realizations can be fed to
-# both this script and the SDDP Historical simulation.
+# Scenario indices are a pure function of PAIRED_SCENARIO_SEED (see
+# paired_scenario_indices in load_hydropowermodels.jl), so this script and the
+# SDDP Historical simulation realize the exact same inflows with no shared
+# data file.
 #
 # Usage:
 #   julia --project -t auto eval_paired_tsddr.jl MODEL_PATH
 #
 # Environment overrides:
 #   DR_NUM_EVAL_STAGES=96
-#   DR_NUM_SCENARIOS=100
+#   DR_NUM_SCENARIOS=500
+#   DR_ENCODER_LAYERS=128,128
+#   DR_HEAD_LAYERS=
+#   DR_CONTEXT=                ""/"none", "phase", or "phase+progress"
+#   DR_CONTEXT_HORIZON=126     denominator/horizon used for progress context
 #   DR_OUTPUT_TAG=""   (when set, ALL output filenames are suffixed with
 #                       "_<tag>" — paired_costs_<tag>.csv, etc. — so evaluating
 #                       a new checkpoint never clobbers the untagged
@@ -30,27 +35,52 @@ include(joinpath(HydroPowerModels_dir, "hydro_reachable_policy.jl"))
 
 model_path = ARGS[1]
 num_eval_stages = parse(Int, get(ENV, "DR_NUM_EVAL_STAGES", "96"))
-num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "100"))
+num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "500"))
 # Optional output tag: suffixes every output filename with "_<tag>" so a new
 # checkpoint's evaluation cannot overwrite the untagged ground-truth files.
 output_tag = strip(get(ENV, "DR_OUTPUT_TAG", ""))
 tag_suffix = isempty(output_tag) ? "" : "_" * output_tag
-layers = Int64[128, 128]
+
+parse_layers(s::AbstractString) =
+    isempty(strip(s)) ? Int64[] : [parse(Int64, strip(x)) for x in split(s, ",") if !isempty(strip(x))]
+
+function canonical_context_mode(raw_mode::AbstractString)
+    mode = lowercase(strip(raw_mode))
+    mode in ("", "none", "off", "false") && return ""
+    mode in ("phase", "phase+progress") && return mode
+    error("DR_CONTEXT must be \"\", \"phase\", or \"phase+progress\"; got \"$raw_mode\"")
+end
+
+function build_stage_context(mode::AbstractString, horizon::Int, period::Int)
+    isempty(mode) && return nothing
+    include_progress = mode == "phase+progress"
+    return DecisionRules.stage_phase_context(
+        horizon;
+        period=period,
+        include_progress=include_progress,
+    )
+end
+
+layers = parse_layers(get(ENV, "DR_ENCODER_LAYERS", get(ENV, "DR_LAYERS", "128,128")))
+head_layers = parse_layers(get(ENV, "DR_HEAD_LAYERS", ""))
+context_mode = canonical_context_mode(get(ENV, "DR_CONTEXT", ""))
+context_horizon = parse(Int, get(ENV, "DR_CONTEXT_HORIZON", "126"))
+context_period = countlines(joinpath(HydroPowerModels_dir, "bolivia", "inflows.csv"))
+context_horizon >= num_eval_stages ||
+    error("DR_CONTEXT_HORIZON=$context_horizon must cover DR_NUM_EVAL_STAGES=$num_eval_stages")
+stage_context = build_stage_context(context_mode, context_horizon, context_period)
+n_context = isnothing(stage_context) ? 0 : size(stage_context, 1)
 
 println("=" ^ 60)
 println("Paired TS-DDR Strict Rollout Evaluation")
 println("  Model:      $model_path")
 println("  Stages:     $num_eval_stages")
 println("  Scenarios:  $num_scenarios")
+println("  Layers:     $layers")
+println("  Head:       $head_layers")
+println("  Context:    $(isempty(context_mode) ? "none" : context_mode)")
 isempty(output_tag) || println("  Output tag: $output_tag")
 println("=" ^ 60)
-
-# ── Load pre-sampled scenario indices ──────────────────────────────────────
-indices_file = joinpath(HydroPowerModels_dir, "bolivia", "paired_scenario_indices.csv")
-all_indices = Int.(readdlm(indices_file, ','))
-@assert size(all_indices, 1) >= num_eval_stages
-@assert size(all_indices, 2) >= num_scenarios
-println("Loaded scenario indices: $(size(all_indices))")
 
 # ── Build strict subproblems ───────────────────────────────────────────────
 case_name = "bolivia"
@@ -78,7 +108,13 @@ subproblems, state_params_in, state_params_out, uncertainty_samples,
 num_hydro = length(initial_state)
 nCen = length(uncertainty_samples[1])
 println("nHyd=$num_hydro, nCen=$nCen")
-@assert all(1 .<= all_indices[1:num_eval_stages, 1:num_scenarios] .<= nCen) "Scenario indices out of range [1, $nCen]"
+
+# Paired scenario indices: a pure function of the protocol seed (see
+# paired_scenario_indices in load_hydropowermodels.jl). Fixed 126-row shape;
+# this evaluation uses rows 1:num_eval_stages.
+@assert num_eval_stages <= PAIRED_NUM_STAGES
+all_indices = paired_scenario_indices(num_scenarios, nCen)
+println("Paired protocol: seed=$(PAIRED_SCENARIO_SEED), rows 1:$(num_eval_stages) of $(PAIRED_NUM_STAGES)×$(num_scenarios), nCen=$nCen")
 
 # ── Identify thermal generators ────────────────────────────────────────────
 hydro_data = JSON.parsefile(joinpath(HydroPowerModels_dir, case_name, "hydro.json"))
@@ -93,7 +129,13 @@ volume_to_mw(volume; k=0.0036) = volume / k
 pg_vars_per_stage = [DecisionRules.find_variables(subproblems[t], ["pg"]) for t in 1:num_eval_stages]
 
 # ── Build policy and load weights ──────────────────────────────────────────
-models = hydro_reachable_policy(hydro_meta, layers)
+base_model = hydro_reachable_policy(
+    hydro_meta,
+    layers;
+    combiner_layers=head_layers,
+    n_context=n_context,
+)
+models = isnothing(stage_context) ? base_model : ContextualPolicy(base_model, stage_context)
 model_save = JLD2.load(model_path)
 model_state = model_save["model_state"]
 load_policy_weights!(models, model_state)

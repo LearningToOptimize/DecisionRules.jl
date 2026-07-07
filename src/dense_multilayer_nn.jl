@@ -162,6 +162,11 @@ function policy_input_dim(num_uncertainties::Int, num_states::Int)
     return num_uncertainties + num_states
 end
 
+function policy_input_dim(num_uncertainties::Int, num_states::Int, num_context::Int)
+    # Input is the concatenation [context_t; w_t; x_{t-1}].
+    return num_context + num_uncertainties + num_states
+end
+
 """
     policy_input_dim(uncertainty_samples, initial_state)
 
@@ -190,6 +195,97 @@ function policy_input_dim(uncertainty_samples::Vector, initial_state::Vector)
     num_uncertainties = length(uncertainty_samples[1])
     num_states = length(initial_state)
     return policy_input_dim(num_uncertainties, num_states)
+end
+
+"""
+    ContextualPolicy(policy, context)
+
+Wrap a stage policy so each call receives known exogenous context before the
+usual policy input. The wrapped policy is called as
+`policy(vcat(context_at(context, t), input))`, where `t` is advanced once per
+call and reset by `Flux.reset!`.
+
+This keeps training and rollout loops unchanged: context is data attached to
+the trajectory, while the inner policy remains the only trainable component.
+Matrix contexts are interpreted as `d_context x T`; function contexts are
+called as `context(t)`.
+"""
+mutable struct ContextualPolicy{P,C}
+    policy::P
+    context::C
+    t::Int
+end
+
+ContextualPolicy(policy, context) = ContextualPolicy(policy, context, 0)
+
+Functors.@functor ContextualPolicy (policy,)
+
+"""
+    context_at(context, t)
+
+Return the context vector for one-based stage `t`.
+"""
+function context_at(context::AbstractMatrix, t::Integer)
+    1 <= t <= size(context, 2) ||
+        throw(BoundsError(context, (:, t)))
+    return view(context, :, t)
+end
+
+context_at(context::Function, t::Integer) = context(t)
+
+function (m::ContextualPolicy)(input)
+    m.t += 1
+    return m.policy(vcat(context_at(m.context, m.t), input))
+end
+
+function Flux.reset!(m::ContextualPolicy)
+    m.t = 0
+    Flux.reset!(m.policy)
+    return nothing
+end
+
+"""
+    stage_phase_context(T; period, include_progress=true)
+
+Build a `d x T` context matrix encoding known calendar/stage information.
+Rows are `sin(2*pi*t/period)`, `cos(2*pi*t/period)`, and, when
+`include_progress=true`, `t/T`.
+
+The sine/cosine pair represents a cyclic process without a discontinuity
+between the final and first period positions. A raw index would put those
+neighbors far apart; one-hot period features would be exact but high
+dimensional and would not encode adjacency. The optional progress feature has
+a different purpose: it tells the policy how close it is to the optimization
+horizon endpoint.
+"""
+function stage_phase_context(T::Integer; period::Integer, include_progress::Bool=true)
+    T >= 1 || throw(ArgumentError("T must be positive"))
+    period >= 1 || throw(ArgumentError("period must be positive"))
+    nrows = include_progress ? 3 : 2
+    ctx = Matrix{Float32}(undef, nrows, T)
+    for t in 1:T
+        θ = 2f0 * Float32(pi) * Float32(t) / Float32(period)
+        ctx[1, t] = sin(θ)
+        ctx[2, t] = cos(θ)
+        if include_progress
+            ctx[3, t] = Float32(t) / Float32(T)
+        end
+    end
+    return ctx
+end
+
+"""
+    vcat_contexts(a, b, ...)
+
+Vertically concatenate context matrices after checking that they cover the
+same number of stages.
+"""
+function vcat_contexts(contexts::AbstractMatrix...)
+    isempty(contexts) && return Matrix{Float32}(undef, 0, 0)
+    T = size(first(contexts), 2)
+    all(size(c, 2) == T for c in contexts) ||
+        throw(ArgumentError("all contexts must have the same number of columns"))
+    return vcat(contexts...)
 end
 
 """

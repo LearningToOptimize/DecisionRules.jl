@@ -21,6 +21,9 @@
 #   DR_GRAD_CLIP=0             gradient clipping (0 = disabled)
 #   DR_NUM_TRAIN_PER_BATCH=1   sampled trajectories per gradient step (variance reduction)
 #   DR_PRETRAINED_MODEL=path   warmstart from a StateConditionedPolicy checkpoint
+#   DR_CONTEXT=                optional known context prepended to the policy input:
+#                              ""/"none" = off, "phase" = seasonal sin/cos,
+#                              "phase+progress" = seasonal sin/cos plus t/T
 #   DR_NUM_EVAL_SCENARIOS=4    fixed held-out scenarios for rollout evaluation
 #   DR_EVAL_EVERY=25           rollout-evaluate every this many batches
 #   DR_SAVE_METRIC=training    checkpoint-selection metric:
@@ -103,6 +106,33 @@ layers = parse_layers(get(ENV, "DR_ENCODER_LAYERS", get(ENV, "DR_LAYERS", "128,1
 head_layers = parse_layers(get(ENV, "DR_HEAD_LAYERS", ""))
 grad_clip = parse(Float32, get(ENV, "DR_GRAD_CLIP", "0"))
 
+function canonical_context_mode(raw_mode::AbstractString)
+    mode = lowercase(strip(raw_mode))
+    mode in ("", "none", "off", "false") && return ""
+    mode in ("phase", "phase+progress") && return mode
+    error("DR_CONTEXT must be \"\", \"phase\", or \"phase+progress\"; got \"$raw_mode\"")
+end
+
+function build_stage_context(mode::AbstractString, horizon::Int, period::Int)
+    isempty(mode) && return nothing
+    include_progress = mode == "phase+progress"
+    return DecisionRules.stage_phase_context(
+        horizon;
+        period=period,
+        include_progress=include_progress,
+    )
+end
+
+function context_run_tag(mode::AbstractString)
+    isempty(mode) && return ""
+    return "-ctx" * replace(mode, "+" => "p")
+end
+
+context_mode = canonical_context_mode(get(ENV, "DR_CONTEXT", ""))
+context_period = countlines(joinpath(HydroPowerModels_dir, case_name, "inflows.csv"))
+stage_context = build_stage_context(context_mode, num_stages, context_period)
+n_context = isnothing(stage_context) ? 0 : size(stage_context, 1)
+
 # ── Learning-rate schedule ───────────────────────────────────────────────────
 # lr(iter) = linear warmup from lr_init/100 over `lr_warmup` iterations, then
 # cosine decay from lr_init to lr_final across the remaining budget. With the
@@ -153,7 +183,7 @@ nt_tag = _num_train_per_batch > 1 ? "-nt$(_num_train_per_batch)" : ""
 # Tag warmstarted runs: their result is a fine-tune of another checkpoint, not
 # a from-scratch training (the parent checkpoint is recorded in wandb config).
 warm_tag = (isnothing(pre_trained_model) || pre_trained_model == "nothing") ? "" : "-warm"
-save_file = "$(case_name)-$(formulation)-h$(num_stages)$(_rollout_tag)-subproblems-strict$(clip_tag)$(head_tag)$(nt_tag)$(warm_tag)-$(now())"
+save_file = "$(case_name)-$(formulation)-h$(num_stages)$(_rollout_tag)-subproblems-strict$(clip_tag)$(head_tag)$(nt_tag)$(context_run_tag(context_mode))$(warm_tag)-$(now())"
 num_eval_scenarios = parse(Int, get(ENV, "DR_NUM_EVAL_SCENARIOS", "4"))
 eval_every = parse(Int, get(ENV, "DR_EVAL_EVERY", "25"))
 # Checkpoint-selection metric: "training" (historical; noisy at small batch
@@ -206,6 +236,10 @@ lg = WandbLogger(;
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),
         "pre_trained_model" => string(pre_trained_model),
+        "context_mode" => isempty(context_mode) ? "none" : context_mode,
+        "context_period" => context_period,
+        "context_horizon" => num_stages,
+        "n_context" => n_context,
         "num_eval_scenarios" => num_eval_scenarios,
         "eval_every" => eval_every,
         "save_metric" => save_metric,
@@ -219,7 +253,14 @@ lg = WandbLogger(;
 
 # HydroReachablePolicy: LSTM encoder over inflows + sigmoid feed-forward head
 # over [encoded_inflow; reservoir_state], bounded to the one-stage reachable set.
-models = hydro_reachable_policy(hydro_meta, layers; combiner_layers=head_layers)
+base_model = hydro_reachable_policy(
+    hydro_meta,
+    layers;
+    combiner_layers=head_layers,
+    n_context=n_context,
+)
+models = isnothing(stage_context) ? base_model : ContextualPolicy(base_model, stage_context)
+@info "Strict hydro policy context" context_mode=(isempty(context_mode) ? "none" : context_mode) context_period context_horizon=num_stages n_context
 
 # ── Load pretrained model (warmstart from non-strict training) ───────────────
 

@@ -1,7 +1,7 @@
 # plot_hydro_strict_convergence.jl
 #
-# Regenerate the docs convergence figures for the 126-stage Bolivia hydro case,
-# comparing three method families against WALL-CLOCK TIME (GPU-vs-CPU tradeoff):
+# Regenerate the docs convergence figure for the 126-stage Bolivia hydro case,
+# comparing the final training schedules against WALL-CLOCK TIME:
 #
 #   1. SDDP (SOC-WR relaxation of the AC OPF), CPU:
 #        - forward-pass simulation cost per iteration (statistical upper estimate)
@@ -9,15 +9,13 @@
 #          value ("SDDP lower bound (SOC-WR)") — no policy can go below it.
 #      Source: OFFLINE parse of sddp/SDDP.log (SDDP.jl iteration table).
 #   2. TS-DDR strict, stage-wise subproblems (CPU, Ipopt):
-#        per-batch `metrics/training_loss` from W&B, timestamped by the W&B
-#        per-row `_runtime` field (seconds since run start).
-#      Default run: bolivia-ACPPowerModel-h126-r96-subproblems-strict-2026-07-01T09:41:53.026
+#        phase 1 uses single-sample gradients and training-loss checkpointing;
+#        phase 2 switches to 16-sample gradients, decayed LR, and held-out
+#        rollout checkpointing. Phase-2 runtime is offset by phase-1 runtime.
 #   3. TS-DDR strict, full-horizon deterministic equivalent (GPU, ExaModels+MadNLP):
-#        per-batch `metrics/training_loss` (+ `_runtime`) for the four
-#        architecture-sweep runs launched 2026-07-04 (head sizes H64, H128_128,
-#        H128_128_128, H256_256). The best-final run is drawn bold and labeled
-#        with its head size; the other three are thin/faded with a single shared
-#        legend entry.
+#        phase 1 uses the strict GPU DE trainer; phase 2 switches to
+#        hard-reactive physics, larger mini-batches, decayed LR, and held-out
+#        rollout checkpointing. Phase-2 runtime is offset by phase-1 runtime.
 #
 # Outputs (both saved into docs/src/assets/, path relative to this script):
 #   - hydro_training_convergence_by_time.png  (x = wall-clock hours, log10)
@@ -35,9 +33,8 @@
 #
 # Environment knobs:
 #   DR_PLOT_RUNS  Override the W&B run-name substrings, format:
-#                     "main=<substr>;exa=<substr1>,<substr2>,..."
-#                 Either part may be omitted to keep its default, e.g.
-#                     DR_PLOT_RUNS="exa=deteq-strict-gpu-H64-20260704"
+#                     "main=<substr1>,<substr2>;exa=<substr1>,<substr2>,..."
+#                 Either part may be omitted to keep its default.
 #   DR_PLOT_SMOOTH  Rolling-mean window for the noisy single-sample losses
 #                   (default 25).
 #
@@ -68,30 +65,30 @@ const SDDP_LOG = joinpath(@__DIR__, "sddp", "SDDP.log")
 
 # ── Run-name configuration (overridable via DR_PLOT_RUNS) ─────────────────────
 
-# Series 2: the from-scratch strict stage-wise subproblems run (CPU, Ipopt).
-DEFAULT_MAIN_RUN = "bolivia-ACPPowerModel-h126-r96-subproblems-strict-2026-07-01T09:41:53.026"
+# Series 2: strict stage-wise subproblems (CPU, Ipopt), represented as a
+# two-phase schedule. Runtime is cumulative across phases.
+DEFAULT_MAIN_RUNS = [
+    "bolivia-ACPPowerModel-h126-r96-subproblems-strict-2026-07-01T09:41:53.026",
+    "bolivia-ACPPowerModel-h126-r96-subproblems-strict-Hlinear-nt16-warm-2026-07-04T21:13:01.712",
+]
 
-# Series 3: the four strict full-horizon DE GPU runs launched 2026-07-04.
-# Substrings include the `20260704-13` launch timestamp so that e.g.
-# "H128_128-20260704-13" cannot accidentally match the H128_128_128 run,
-# and so earlier (2026-07-02/03) runs of the same architectures are excluded.
+# Series 3: strict full-horizon DE (GPU), represented as a two-phase schedule.
+# Runtime is cumulative across phases.
 DEFAULT_EXA_RUNS = [
-    "deteq-strict-gpu-H64-20260704-13",
-    "deteq-strict-gpu-H128_128-20260704-13",
-    "deteq-strict-gpu-H128_128_128-20260704-13",
-    "deteq-strict-gpu-H256_256-20260704-13",
+    "bolivia-ACPPowerModel-h126-r96-deteq-strict-gpu-H256_256-20260704-131003",
+    "bolivia-ACPPowerModel-h126-r96-deteq-strict-gpu-H256_256-nt4-rollout-warm-rqhard-20260705-121353",
 ]
 
 """
-    parse_run_overrides(spec) -> (main::String, exa::Vector{String})
+    parse_run_overrides(spec) -> (main::Vector{String}, exa::Vector{String})
 
 Parse the `DR_PLOT_RUNS` override string of the form
-`"main=<substr>;exa=<substr1>,<substr2>,..."`. Each `key=value` segment is
-optional; omitted keys keep the defaults above. Unknown keys raise an error so
-typos fail loudly instead of silently plotting the default runs.
+`"main=<substr1>,<substr2>;exa=<substr1>,<substr2>,..."`. Each `key=value`
+segment is optional; omitted keys keep the defaults above. Unknown keys raise
+an error so typos fail loudly instead of silently plotting the default runs.
 """
 function parse_run_overrides(spec::AbstractString)
-    main = DEFAULT_MAIN_RUN                       # start from defaults …
+    main = copy(DEFAULT_MAIN_RUNS)                # start from defaults …
     exa  = copy(DEFAULT_EXA_RUNS)
     isempty(strip(spec)) && return main, exa      # empty knob → defaults
     for part in split(spec, ';'; keepempty=false) # each "key=value" segment
@@ -99,7 +96,7 @@ function parse_run_overrides(spec::AbstractString)
         length(kv) == 2 || error("DR_PLOT_RUNS segment '$part' is not key=value")
         key, val = strip(kv[1]), strip(kv[2])
         if key == "main"
-            main = String(val)                    # single substring
+            main = String.(strip.(split(val, ','; keepempty=false)))
         elseif key == "exa"
             exa = String.(strip.(split(val, ','; keepempty=false)))  # comma list
         else
@@ -109,7 +106,7 @@ function parse_run_overrides(spec::AbstractString)
     return main, exa
 end
 
-const MAIN_RUN_SUBSTR, EXA_RUN_SUBSTRS = parse_run_overrides(get(ENV, "DR_PLOT_RUNS", ""))
+const MAIN_RUN_SUBSTRS, EXA_RUN_SUBSTRS = parse_run_overrides(get(ENV, "DR_PLOT_RUNS", ""))
 
 # Rolling-mean window for the single-sample (batch size 1) training losses.
 const SMOOTH_WINDOW = parse(Int, get(ENV, "DR_PLOT_SMOOTH", "25"))
@@ -183,10 +180,8 @@ end
 
 Scan the project's runs in `-created_at` order (most recent first) and return a
 `Dict(substring => run)` mapping each requested name-substring to the MOST
-RECENT run whose name contains it. Runs in any state (running / finished /
-crashed / failed) are accepted — partial histories of still-running runs are
-handled downstream by simply plotting whatever rows exist. Substrings with no
-match within `max_scan` runs are absent from the result (caller warns + skips).
+RECENT run whose name contains it. Substrings with no match within `max_scan`
+runs are absent from the result (caller warns + skips).
 """
 function find_runs_by_substring(api, substrs::Vector{String}; project::String="RL", max_scan::Int=400)
     all_runs = api.runs(project, order="-created_at")        # lazy paginated iterator
@@ -234,18 +229,46 @@ function get_history_with_runtime(r, metric::String)
 end
 
 """
-    head_label(name) -> String
+    prefix_to_best_training_loss(t, v) -> (t, v)
 
-Extract a human-readable target-head architecture label from an Exa run name.
-Run names embed the head tag as `-H<sizes>-<timestamp>` where `<sizes>` joins
-hidden-layer widths with `_` (see train_hydro_exa_strict.jl RUN_NAME), e.g.
-`...-deteq-strict-gpu-H128_128-20260704-131050` → `"H128×128"`. A linear head
-is tagged `-Hlinear-`. Falls back to the raw name if no tag is found.
+Return the prefix ending at the best raw training-loss row. The phase-1 strict
+CPU checkpoint is selected by this metric.
 """
-function head_label(name::AbstractString)
-    m = match(r"-H([0-9_]+|linear)-", name)
-    m === nothing && return String(name)
-    return "H" * replace(m.captures[1], "_" => "×")
+function prefix_to_best_training_loss(t::Vector{Float64}, v::Vector{Float64})
+    isempty(v) && return t, v
+    stop = argmin(v)
+    return t[1:stop], v[1:stop]
+end
+
+"""
+    prefix_to_best_rollout(r, t, v) -> (t, v)
+
+Second phases use `DR_SAVE_METRIC=rollout`, so the selected checkpoint is the
+best held-out rollout objective rather than the noisy training loss. If the
+rollout metric is available, cut the trace at that runtime.
+"""
+function prefix_to_best_rollout(r, t::Vector{Float64}, v::Vector{Float64})
+    rt, rv = get_history_with_runtime(r, "metrics/rollout_objective_no_deficit")
+    isempty(rv) && return t, v
+    cutoff = rt[argmin(rv)]
+    keep = findall(x -> x <= cutoff, t)
+    isempty(keep) && return t[1:1], v[1:1]
+    return t[keep], v[keep]
+end
+
+"""
+    append_continuation!(all_t, all_v, t, v)
+
+Append a later phase after the current last wall-clock time. Each W&B run
+records runtime from its own start; this converts phases to total runtime.
+"""
+function append_continuation!(all_t::Vector{Float64}, all_v::Vector{Float64},
+                              t::Vector{Float64}, v::Vector{Float64})
+    isempty(v) && return all_t, all_v
+    offset = isempty(all_t) ? 0.0 : all_t[end]
+    append!(all_t, offset .+ t)
+    append!(all_v, v)
+    return all_t, all_v
 end
 
 # ── Load all series ───────────────────────────────────────────────────────────
@@ -259,51 +282,59 @@ bound_final = sddp_bound[end]                                # ≈ 3.782e5 — t
 
 @info "Connecting to W&B (project RL)..."
 api = wb.Api()
-wanted = vcat([MAIN_RUN_SUBSTR], EXA_RUN_SUBSTRS)            # all five substrings in one scan
+wanted = vcat(MAIN_RUN_SUBSTRS, EXA_RUN_SUBSTRS)             # all substrings in one scan
 found  = find_runs_by_substring(api, wanted)
 
 # Series 2: MAIN strict stage-wise subproblems (CPU). `metrics/training_loss`
-# is the per-batch mean 126-stage objective logged by
-# train_dr_hydropowermodels_strict.jl (single sample per batch → noisy).
+# is the per-batch mean 126-stage objective. The default is a continuation
+# curve: stage 1 up to its selected training-loss checkpoint, then phase 2 up
+# to its best held-out rollout checkpoint, with runtimes offset.
 main_hours = Float64[]; main_loss = Float64[]
-if haskey(found, MAIN_RUN_SUBSTR)
-    r = found[MAIN_RUN_SUBSTR]
-    @info "  MAIN run: $(PC.pyconvert(String, r.name)) ($(PC.pyconvert(String, r.state)))"
-    t, v = get_history_with_runtime(r, "metrics/training_loss")
-    main_hours, main_loss = t ./ 3600, v
-else
-    @warn "MAIN subproblems-strict run not found (substring '$MAIN_RUN_SUBSTR') — series skipped"
-end
-
-# Series 3: the four Exa strict-DE GPU runs. `metrics/training_loss` is the
-# highest-resolution loss they log (per batch, from DecisionRulesExa
-# train_tsddr; `metrics/epoch_objective` only lands every NUM_BATCHES=100
-# batches, so we prefer the per-batch series).
-exa_series = NamedTuple{(:label, :hours, :loss, :smooth),
-                        Tuple{String,Vector{Float64},Vector{Float64},Vector{Float64}}}[]
-for s in EXA_RUN_SUBSTRS
+for (i, s) in enumerate(MAIN_RUN_SUBSTRS)
     if !haskey(found, s)
-        @warn "Exa GPU run not found (substring '$s') — skipped"
+        @warn "MAIN subproblems-strict run not found (substring '$s') — continuation segment skipped"
         continue
     end
     r = found[s]
     name = PC.pyconvert(String, r.name)
-    @info "  Exa run: $name ($(PC.pyconvert(String, r.state)))"
+    @info "  MAIN run segment $i: $name ($(PC.pyconvert(String, r.state)))"
     t, v = get_history_with_runtime(r, "metrics/training_loss")
-    if isempty(v)                                            # e.g. run just started
-        @warn "  no metrics/training_loss rows yet for $name — skipped"
+    if isempty(v)
+        @warn "  no metrics/training_loss rows yet for $name — segment skipped"
         continue
     end
-    push!(exa_series, (label = head_label(name), hours = t ./ 3600, loss = v,
-                       smooth = rolling_mean(v, SMOOTH_WINDOW)))
+    if i == 1
+        t, v = prefix_to_best_training_loss(t, v)
+    else
+        t, v = prefix_to_best_rollout(r, t, v)
+    end
+    append_continuation!(main_hours, main_loss, t ./ 3600, v)
+end
+
+# Series 3: strict-DE GPU schedule. `metrics/training_loss` is the
+# highest-resolution loss logged by DecisionRulesExa.
+exa_hours = Float64[]; exa_loss = Float64[]
+for (i, s) in enumerate(EXA_RUN_SUBSTRS)
+    if !haskey(found, s)
+        @warn "Exa GPU run not found (substring '$s') — continuation segment skipped"
+        continue
+    end
+    r = found[s]
+    name = PC.pyconvert(String, r.name)
+    @info "  Exa run segment $i: $name ($(PC.pyconvert(String, r.state)))"
+    t, v = get_history_with_runtime(r, "metrics/training_loss")
+    if isempty(v)
+        @warn "  no metrics/training_loss rows yet for $name — segment skipped"
+        continue
+    end
+    if i > 1
+        t, v = prefix_to_best_rollout(r, t, v)
+    end
+    append_continuation!(exa_hours, exa_loss, t ./ 3600, v)
 end
 
 main_smooth = rolling_mean(main_loss, SMOOTH_WINDOW)
-
-# Index (into exa_series) of the run with the best (lowest) final smoothed loss
-# — drawn bold and individually labeled; the others are thin/faded.
-best_exa = isempty(exa_series) ? 0 :
-           argmin([s.smooth[end] for s in exa_series])
+exa_smooth = rolling_mean(exa_loss, SMOOTH_WINDOW)
 
 # ── Axis limits & styling ─────────────────────────────────────────────────────
 
@@ -334,14 +365,14 @@ tail_level(v::AbstractVector{<:Real}; frac::Float64=0.1) =
 
 finals = Float64[tail_level(sddp_sim)]                       # SDDP forward-pass level
 isempty(main_smooth) || push!(finals, tail_level(main_smooth))
-for s in exa_series; push!(finals, tail_level(s.smooth)); end
+isempty(exa_smooth) || push!(finals, tail_level(exa_smooth))
 y_lo = 0.985 * bound_final
 y_hi = min(3.0 * bound_final,
            1.10 * max(maximum(sddp_sim), maximum(filter(isfinite, finals))))
 
 # X-axis choice: log10. Justification: the series span ~3 orders of magnitude
-# of wall time (GPU DE runs log their first losses within minutes; the SDDP
-# run needs ~12 h to converge, the CPU subproblems run runs for days). On a
+# of wall time (GPU DE runs log their first losses within minutes, while the
+# SDDP and CPU subproblem schedules run much longer). On a
 # linear axis the fast-GPU story is squashed into an invisible sliver at the
 # left edge; log10 lets both the early GPU descent and the long CPU tails read.
 # Same reasoning for the by-iteration plot (441 SDDP iterations vs ~8000
@@ -376,33 +407,16 @@ function convergence_plot(xs, xlabel::String)
     # SDDP lower bound: monotone deterministic series.
     plot!(plt, xs.sddp, sddp_bound; color = C_BOUND, lw = 2.0,
           label = "SDDP lower bound (SOC-WR)")
-    # Final-bound reference line across the full width: nothing can go below.
-    hline!(plt, [bound_final]; color = C_BOUND, ls = :dash, lw = 1.5,
-           label = "SDDP lower bound (SOC-WR) = $(round(Int, bound_final))")
-
-    # MAIN strict subproblems (CPU): raw single-sample loss is noisy → draw it
-    # at low alpha and overlay a rolling mean (window $SMOOTH_WINDOW).
+    # TS-DDR curves use a trailing rolling mean (window $SMOOTH_WINDOW) to make
+    # small-sample training losses readable without using future samples.
     if !isempty(main_loss)
-        plot!(plt, xs.main, main_loss; color = C_MAIN, alpha = 0.15, lw = 0.7,
-              label = "")                                    # raw: no legend entry
         plot!(plt, xs.main, main_smooth; color = C_MAIN, lw = 2.0,
               label = "TS-DDR strict subproblems (CPU, Ipopt)")
     end
 
-    # Exa strict DE (GPU): best-final run bold + labeled with its head size;
-    # the other three thin/faded sharing ONE legend entry for the family.
-    family_labeled = false                                   # emit shared label once
-    for (i, s) in enumerate(exa_series)
-        if i == best_exa
-            plot!(plt, xs.exa[i], s.loss; color = C_EXA, alpha = 0.15, lw = 0.7,
-                  label = "")                                # raw trace of the bold run
-            plot!(plt, xs.exa[i], s.smooth; color = C_EXA, lw = 2.5,
-                  label = "TS-DDR strict DE (GPU, best: $(s.label))")
-        else
-            plot!(plt, xs.exa[i], s.smooth; color = C_EXA, alpha = 0.35, lw = 1.0,
-                  label = family_labeled ? "" : "TS-DDR strict DE (GPU, 4 architectures)")
-            family_labeled = true
-        end
+    if !isempty(exa_loss)
+        plot!(plt, xs.exa, exa_smooth; color = C_EXA, lw = 2.3,
+              label = "TS-DDR strict DE (GPU, MadNLP/cuDSS)")
     end
     return plt
 end
@@ -410,7 +424,7 @@ end
 # Figure 1 — by wall-clock time (hours). This is the headline GPU-vs-CPU plot.
 xs_time = (sddp = clamp_hours(sddp_hours),
            main = clamp_hours(main_hours),
-           exa  = [clamp_hours(s.hours) for s in exa_series])
+           exa  = clamp_hours(exa_hours))
 plt_time = convergence_plot(xs_time, "Wall-clock time (hours, log scale)")
 savefig(plt_time, joinpath(DOCS_ASSETS, "hydro_training_convergence_by_time.png"))
 println("Saved hydro_training_convergence_by_time.png")
@@ -421,7 +435,7 @@ println("Saved hydro_training_convergence_by_time.png")
 # shows per-iteration progress, while Figure 1 shows the honest time story.
 xs_step = (sddp = Float64.(sddp_iter),
            main = collect(1.0:length(main_loss)),
-           exa  = [collect(1.0:length(s.loss)) for s in exa_series])
+           exa  = collect(1.0:length(exa_loss)))
 plt_step = convergence_plot(xs_step, "Training iteration (log scale)")
 savefig(plt_step, joinpath(DOCS_ASSETS, "hydro_training_convergence_by_step.png"))
 println("Saved hydro_training_convergence_by_step.png")
@@ -441,9 +455,8 @@ if !isempty(main_loss)
     @printf("%-48s %14.1f %10.2f %8d\n", "TS-DDR strict subproblems (CPU) [smoothed]",
             main_smooth[end], main_hours[end], length(main_loss))
 end
-for (i, s) in enumerate(exa_series)
-    tag = i == best_exa ? " (best)" : ""
-    @printf("%-48s %14.1f %10.2f %8d\n", "TS-DDR strict DE GPU $(s.label)$(tag) [smoothed]",
-            s.smooth[end], s.hours[end], length(s.loss))
+if !isempty(exa_loss)
+    @printf("%-48s %14.1f %10.2f %8d\n", "TS-DDR strict DE GPU [smoothed]",
+            exa_smooth[end], exa_hours[end], length(exa_loss))
 end
 println("="^88)

@@ -55,3 +55,4 @@ plan/
 *_cuts.json
 settings.json
 *.sh
+*-backup

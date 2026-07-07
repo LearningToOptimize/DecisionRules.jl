@@ -2198,10 +2198,34 @@ include("test_score_function.jl")
     @testset "policy_input_dim" begin
         @test policy_input_dim(5, 3) == 8
         @test policy_input_dim(0, 4) == 4
+        @test policy_input_dim(5, 3, 2) == 10
 
         uncertainty_samples = [[(nothing, [1.0, 2.0]), (nothing, [3.0])]]
         initial_state = [0.0, 0.0, 0.0]
         @test policy_input_dim(uncertainty_samples, initial_state) == 5
+    end
+
+    @testset "ContextualPolicy" begin
+        ctx = stage_phase_context(4; period=4)
+        @test size(ctx) == (3, 4)
+        @test ctx[:, 1] == context_at(ctx, 1)
+        @test_throws BoundsError context_at(ctx, 5)
+
+        ctx2 = fill(Float32(2), 1, 4)
+        @test size(vcat_contexts(ctx, ctx2)) == (4, 4)
+        @test_throws ArgumentError vcat_contexts(ctx, fill(Float32(0), 1, 3))
+
+        seen = Vector{Float32}[]
+        inner = x -> (push!(seen, Float32.(x)); Float32[x[1] + x[end]])
+        policy = ContextualPolicy(inner, Float32[10 20; 30 40])
+
+        @test policy(Float32[1, 2]) == Float32[12]
+        @test policy(Float32[3, 4]) == Float32[24]
+        @test seen[1] == Float32[10, 30, 1, 2]
+        @test seen[2] == Float32[20, 40, 3, 4]
+        Flux.reset!(policy)
+        @test policy.t == 0
+        @test context_at(t -> Float32[t, t + 1], 3) == Float32[3, 4]
     end
 
     @testset "normalize_recur_state" begin

@@ -2,6 +2,36 @@ using JuMP
 using CSV
 using Tables
 using JSON
+using StableRNGs
+
+# Paired evaluation protocol: at stage t of paired scenario s, EVERY method
+# (SDDP.Historical, TS-DDR CPU/GPU rollouts) realizes joint inflow scenario
+# `paired_scenario_indices(N, nCen)[t, s]`. StableRNG streams are stable
+# across Julia versions, so the protocol is fully defined by this seed — no
+# data file to distribute or track.
+const PAIRED_SCENARIO_SEED = 20260706
+# The generated matrix ALWAYS has this many stage rows (the full SDDP horizon:
+# 96 reported + 30 end-of-horizon buffer). Consumers that need fewer stages
+# slice rows — they must never generate a smaller matrix, because arrays of
+# different shapes consume the RNG stream differently and pairing across
+# methods would silently break.
+const PAIRED_NUM_STAGES = 126
+
+"""
+    paired_scenario_indices(num_scenarios, nCen;
+                            seed = PAIRED_SCENARIO_SEED) -> Matrix{Int}
+
+Deterministic paired-evaluation index matrix of fixed shape
+`PAIRED_NUM_STAGES × num_scenarios`: entry `[t, s]` is uniform on `1:nCen`
+(the per-stage joint inflow support, `nCen = ncol(inflows.csv) ÷ nHyd`).
+Slice rows for shorter horizons; never regenerate at a different shape.
+"""
+function paired_scenario_indices(
+    num_scenarios::Integer, nCen::Integer;
+    seed::Integer = PAIRED_SCENARIO_SEED,
+)
+    return rand(StableRNG(seed), 1:Int(nCen), PAIRED_NUM_STAGES, Int(num_scenarios))
+end
 
 function find_reservoirs_and_inflow(model::JuMP.Model)
     reservoir_in = find_variables(model, ["reservoir", "_in"])

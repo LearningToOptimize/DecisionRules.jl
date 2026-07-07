@@ -159,6 +159,12 @@ function _simulate_stage(
 
     # Solve and extract the objective value inside the sensitivity wrapper.
     return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
+        # Cache the deficit-free objective while the model is clean. Integer
+        # strategies dirty the model on cleanup (restoring integer bounds), so
+        # a later logger call would otherwise find a dirty model with no cache
+        # and throw. Mirrors the deterministic-equivalent forward pass.
+        subproblem.ext[:_last_obj_no_deficit] =
+            get_objective_no_target_deficit(sensitivity_model)
         return objective_value(sensitivity_model)
     end
 end
@@ -213,6 +219,10 @@ function _simulate_stage_with_parameter_duals(
     return with_sensitivity_solution(subproblem, integer_strategy) do sensitivity_model
         # Read the optimal objective value.
         objective = objective_value(sensitivity_model)
+        # Cache the deficit-free objective while the model is clean (integer
+        # strategies dirty the model on cleanup; see _simulate_stage).
+        subproblem.ext[:_last_obj_no_deficit] =
+            get_objective_no_target_deficit(sensitivity_model)
         # Extract duals w.r.t. incoming state parameters (mu_t).
         d_state_in = pdual.(state_param_in)
         # Extract duals w.r.t. target parameters (lambda_t).

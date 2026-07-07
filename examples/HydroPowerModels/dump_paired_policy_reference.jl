@@ -4,9 +4,10 @@
 # companion package (DecisionRulesExa.jl) uses to verify that its policy,
 # scenario indexing, and units reproduce this repository's behavior exactly:
 #
-#   1. The 100 paired scenarios' inflow VALUE arrays, reconstructed from
-#      `paired_scenario_indices.csv` and `build_hydropowermodels`'s
-#      `uncertainty_samples` — the same construction as `eval_paired_tsddr.jl`.
+#   1. The paired scenarios' inflow VALUE arrays, reconstructed from the
+#      seeded protocol (`paired_scenario_indices` in load_hydropowermodels.jl)
+#      and `build_hydropowermodels`'s `uncertainty_samples` — the same
+#      construction as `eval_paired_tsddr.jl`.
 #   2. The OPEN-LOOP policy target trajectories
 #
 #         x̂_0 = x_0,   x̂_t = π_θ(w_t, x̂_{t-1}),
@@ -30,7 +31,12 @@
 #
 # Environment overrides:
 #   DR_NUM_EVAL_STAGES=96
-#   DR_NUM_SCENARIOS=100
+#   DR_NUM_SCENARIOS=500
+#   DR_ENCODER_LAYERS=128,128
+#   DR_HEAD_LAYERS=
+#   DR_CONTEXT=                ""/"none", "phase", or "phase+progress"
+#   DR_CONTEXT_HORIZON=126     denominator/horizon used for progress context
+#   DR_OUTPUT_TAG=             suffix for paired_policy_reference_<tag>.jld2
 #
 # Output:
 #   bolivia/ACPPowerModel/results/paired_policy_reference.jld2
@@ -58,25 +64,49 @@ default_model_path = joinpath(
 )
 model_path = length(ARGS) >= 1 ? ARGS[1] : default_model_path
 num_eval_stages = parse(Int, get(ENV, "DR_NUM_EVAL_STAGES", "96"))
-num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "100"))
-layers = Int64[128, 128]
+num_scenarios = parse(Int, get(ENV, "DR_NUM_SCENARIOS", "500"))
+output_tag = strip(get(ENV, "DR_OUTPUT_TAG", ""))
+
+parse_layers(s::AbstractString) =
+    isempty(strip(s)) ? Int64[] : [parse(Int64, strip(x)) for x in split(s, ",") if !isempty(strip(x))]
+
+function canonical_context_mode(raw_mode::AbstractString)
+    mode = lowercase(strip(raw_mode))
+    mode in ("", "none", "off", "false") && return ""
+    mode in ("phase", "phase+progress") && return mode
+    error("DR_CONTEXT must be \"\", \"phase\", or \"phase+progress\"; got \"$raw_mode\"")
+end
+
+function build_stage_context(mode::AbstractString, horizon::Int, period::Int)
+    isempty(mode) && return nothing
+    include_progress = mode == "phase+progress"
+    return DecisionRules.stage_phase_context(
+        horizon;
+        period=period,
+        include_progress=include_progress,
+    )
+end
+
+layers = parse_layers(get(ENV, "DR_ENCODER_LAYERS", get(ENV, "DR_LAYERS", "128,128")))
+head_layers = parse_layers(get(ENV, "DR_HEAD_LAYERS", ""))
+context_mode = canonical_context_mode(get(ENV, "DR_CONTEXT", ""))
+context_horizon = parse(Int, get(ENV, "DR_CONTEXT_HORIZON", "126"))
+context_period = countlines(joinpath(HydroPowerModels_dir, "bolivia", "inflows.csv"))
+context_horizon >= num_eval_stages ||
+    error("DR_CONTEXT_HORIZON=$context_horizon must cover DR_NUM_EVAL_STAGES=$num_eval_stages")
+stage_context = build_stage_context(context_mode, context_horizon, context_period)
+n_context = isnothing(stage_context) ? 0 : size(stage_context, 1)
 
 println("=" ^ 60)
 println("Paired Policy Reference Dump (no solves)")
 println("  Model:      $model_path")
 println("  Stages:     $num_eval_stages")
 println("  Scenarios:  $num_scenarios")
+println("  Layers:     $layers")
+println("  Head:       $head_layers")
+println("  Context:    $(isempty(context_mode) ? "none" : context_mode)")
+isempty(output_tag) || println("  Output tag: $output_tag")
 println("=" ^ 60)
-
-# ── Load pre-sampled scenario indices (single source of truth) ─────────────────
-# paired_scenario_indices.csv is a 126×100 integer matrix; entry [t, s] indexes
-# the per-stage joint inflow scenario ω ∈ {1, …, nCen} exactly as
-# `uncertainty_samples[t][ω]` below.
-indices_file = joinpath(HydroPowerModels_dir, "bolivia", "paired_scenario_indices.csv")
-all_indices = Int.(readdlm(indices_file, ','))
-@assert size(all_indices, 1) >= num_eval_stages
-@assert size(all_indices, 2) >= num_scenarios
-println("Loaded scenario indices: $(size(all_indices))")
 
 # ── Build strict subproblems (structure only — no optimizer, no solves) ────────
 # Built exactly like eval_paired_tsddr.jl (num_stages=96, strict=true) so that
@@ -99,12 +129,24 @@ subproblems, state_params_in, state_params_out, uncertainty_samples,
 num_hydro = length(initial_state)
 nCen = length(uncertainty_samples[1])
 println("nHyd=$num_hydro, nCen=$nCen, K=$(hydro_meta.K)")
-@assert all(1 .<= all_indices[1:num_eval_stages, 1:num_scenarios] .<= nCen) "Scenario indices out of range [1, $nCen]"
+
+# Paired scenario indices: pure function of the protocol seed (entry [t, s]
+# indexes `uncertainty_samples[t][ω]`; see load_hydropowermodels.jl). Fixed
+# 126-row shape; this dump uses rows 1:num_eval_stages.
+@assert num_eval_stages <= PAIRED_NUM_STAGES
+all_indices = paired_scenario_indices(num_scenarios, nCen)
+println("Paired protocol: seed=$(PAIRED_SCENARIO_SEED), rows 1:$(num_eval_stages) of $(PAIRED_NUM_STAGES)×$(num_scenarios), nCen=$nCen")
 
 # ── Build policy and load checkpoint weights ───────────────────────────────────
 # Same construction as eval_paired_tsddr.jl lines 86-91: encoder+combiner
 # weights are restored; hydro bounds come from hydro_meta.
-models = hydro_reachable_policy(hydro_meta, layers)
+base_model = hydro_reachable_policy(
+    hydro_meta,
+    layers;
+    combiner_layers=head_layers,
+    n_context=n_context,
+)
+models = isnothing(stage_context) ? base_model : ContextualPolicy(base_model, stage_context)
 model_save = JLD2.load(model_path)
 model_state = model_save["model_state"]
 load_policy_weights!(models, model_state)
@@ -183,7 +225,9 @@ println("Probe outputs computed.")
 # ── Save reference JLD2 ────────────────────────────────────────────────────────
 out_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "results")
 mkpath(out_dir)
-out_file = joinpath(out_dir, "paired_policy_reference.jld2")
+out_suffix = isempty(output_tag) ? "" : "_" * output_tag
+out_file = joinpath(out_dir, "paired_policy_reference$(out_suffix).jld2")
+metadata_policy = models isa ContextualPolicy ? models.policy : models
 jldsave(out_file;
     # Scenario data (authoritative values for the cross-package rollout)
     inflow_values=inflow_values,                 # [T × nHyd × S]
@@ -196,15 +240,21 @@ jldsave(out_file;
     initial_state=Float64.(initial_state),
     max_volume=Float64.(max_volume),
     # Frozen hydro metadata exactly as used by the policy forward pass
-    policy_K=models.K,
-    policy_min_vol=Float64.(models.min_vol),
-    policy_max_vol=Float64.(models.max_vol),
-    policy_min_turn=Float64.(models.min_turn),
-    policy_max_turn=Float64.(models.max_turn),
-    policy_upstream_max=Float64.(models.upstream_max),
+    policy_K=metadata_policy.K,
+    policy_min_vol=Float64.(metadata_policy.min_vol),
+    policy_max_vol=Float64.(metadata_policy.max_vol),
+    policy_min_turn=Float64.(metadata_policy.min_turn),
+    policy_max_turn=Float64.(metadata_policy.max_turn),
+    policy_upstream_max=Float64.(metadata_policy.upstream_max),
     # Provenance
     model_path=model_path,
     num_eval_stages=num_eval_stages,
     num_scenarios=num_scenarios,
+    encoder_layers=layers,
+    head_layers=head_layers,
+    context_mode=isempty(context_mode) ? "none" : context_mode,
+    context_period=context_period,
+    context_horizon=context_horizon,
+    n_context=n_context,
 )
 println("Saved: $out_file")

@@ -94,6 +94,7 @@ bounds, so stage ``t+1`` is feasible.
 - `encoder::E`:          Recurrent cell or Chain of cells (processes inflow only)
 - `combiner::C`:         Feed-forward head combining encoder output with previous state
 - `state::S`:            Recurrent state (threaded across stages)
+- `n_context::Int`:      Number of context dimensions prepended before inflow
 - `n_uncertainty::Int`:  Number of inflow dimensions (= nHyd)
 - `n_state::Int`:        Number of state dimensions (= nHyd)
 - `min_vol::V`:          Per-unit minimum reservoir volume
@@ -110,6 +111,7 @@ mutable struct HydroReachablePolicy{E,C,S,V,SM}
     encoder::E           # Recurrent encoder (LSTM/GRU chain) processing inflow
     combiner::C          # Feed-forward [encoder_out; state] => normalized target
     state::S             # Carried recurrent state, threaded across stages
+    n_context::Int       # Number of context dimensions prepended before inflow
     n_uncertainty::Int   # Number of uncertainty (inflow) dimensions
     n_state::Int         # Number of state (reservoir) dimensions
     min_vol::V           # Per-unit minimum reservoir volume [nHyd]
@@ -225,11 +227,11 @@ ChainRulesCore.@non_differentiable _cascade_upper_bounds(::Any, ::Any, ::Any, ::
 """
     (m::HydroReachablePolicy)(x)
 
-Forward pass: given input `x = [inflow₁..nHyd; x_prev₁..nHyd]`, produce
+Forward pass: given input `x = [context; inflow₁..nHyd; x_prev₁..nHyd]`, produce
 one-stage reachable reservoir targets.
 
-1. Split input into inflow and previous state
-2. Encode inflow through recurrent encoder (LSTM), carrying state across stages
+1. Split input into context, inflow, and previous state
+2. Encode `[context; inflow]` through recurrent encoder, carrying state across stages
 3. Combine encoder output with previous state via a sigmoid head → y_norm ∈ [0,1]
 4. Compute reachable bounds [lower, upper] from physics (no gradient)
 5. Scale: target = lower + (upper - lower) × y_norm
@@ -248,20 +250,26 @@ one-stage reachable reservoir targets.
   infeasible.
 
 # Arguments
-- `x`: concatenated input vector `[inflow..., previous_state...]`
+- `x`: concatenated input vector `[context..., inflow..., previous_state...]`
 
 # Returns
 - `Vector`: target reservoir volumes, guaranteed within one-stage reachable set
 """
 function (m::HydroReachablePolicy)(x)
-    # Split input: first n_uncertainty elements are inflow, rest is previous state
-    inflow = x[1:m.n_uncertainty]
-    x_prev = x[m.n_uncertainty+1:end]
+    # Split input: optional context first, then true inflow, then previous state.
+    # Physics bounds must use only the true inflow slice.
+    c_end = m.n_context
+    w_start = c_end + 1
+    w_end = c_end + m.n_uncertainty
+    context = c_end == 0 ? x[1:0] : x[1:c_end]
+    inflow = x[w_start:w_end]
+    x_prev = x[w_end+1:end]
+    encoder_input = c_end == 0 ? inflow : vcat(context, inflow)
 
     # Encode inflow through the recurrent encoder, carrying state across calls.
     # Cast to encoder precision for type stability (avoids Zygote codegen bugs).
     T = DecisionRules._state_eltype(m.state)
-    encoded, new_state = DecisionRules._step_encoder(m.encoder, T.(inflow), m.state)
+    encoded, new_state = DecisionRules._step_encoder(m.encoder, T.(encoder_input), m.state)
     # Thread recurrent state to the next call
     m.state = new_state
 
@@ -345,18 +353,21 @@ function hydro_reachable_policy(
     encoder_type=Flux.LSTM,
     spill_max=nothing,
     combiner_layers=Int[],
+    n_context::Int=0,
 )
     nHyd = hydro_meta.nHyd
     # Validate layer sizes
     isempty(layers) && throw(ArgumentError("layers must be non-empty"))
+    n_context >= 0 || throw(ArgumentError("n_context must be nonnegative"))
 
-    # Build encoder: stack of recurrent cells processing inflow (nHyd-dimensional)
+    # Build encoder: stack of recurrent cells processing [context; inflow].
+    encoder_input_dim = nHyd + n_context
     if length(layers) == 1
         # Single-layer encoder
-        encoder = DecisionRules._as_cell(encoder_type(nHyd => layers[1]))
+        encoder = DecisionRules._as_cell(encoder_type(encoder_input_dim => layers[1]))
     else
         # Multi-layer encoder: chain of recurrent cells
-        encoder_layers = [DecisionRules._as_cell(encoder_type(nHyd => layers[1]))]
+        encoder_layers = [DecisionRules._as_cell(encoder_type(encoder_input_dim => layers[1]))]
         for i in 1:(length(layers) - 1)
             push!(
                 encoder_layers,
@@ -415,6 +426,7 @@ function hydro_reachable_policy(
         encoder,
         combiner,
         DecisionRules._init_recurrent_state(encoder),   # initial recurrent state
+        n_context,                         # context dimensions prepended before inflow
         nHyd,                              # n_uncertainty = nHyd (one inflow per unit)
         nHyd,                              # n_state = nHyd (one reservoir per unit)
         Float32.(hydro_meta.min_vol),      # per-unit min volume
@@ -449,8 +461,22 @@ See also: [`hydro_reachable_policy`](@ref)
 """
 function load_policy_weights!(policy::HydroReachablePolicy, state)
     # Load only the encoder and combiner weights, keeping hydro bounds unchanged
-    Flux.loadmodel!(policy.encoder, state.encoder)
-    Flux.loadmodel!(policy.combiner, state.combiner)
+    try
+        Flux.loadmodel!(policy.encoder, state.encoder)
+        Flux.loadmodel!(policy.combiner, state.combiner)
+    catch err
+        throw(ArgumentError(
+            "Could not load HydroReachablePolicy weights. The checkpoint architecture " *
+            "must match encoder/head widths and n_context=$(policy.n_context); " *
+            "contextual policies require newly trained checkpoints. Original error: $err",
+        ))
+    end
+    return policy
+end
+
+function load_policy_weights!(policy::DecisionRules.ContextualPolicy, state)
+    inner_state = hasproperty(state, :policy) ? getproperty(state, :policy) : state
+    load_policy_weights!(policy.policy, inner_state)
     return policy
 end
 
@@ -482,11 +508,13 @@ function load_hydro_reachable_policy(
     encoder_type=Flux.LSTM,
     spill_max=nothing,
     combiner_layers=Int[],
+    n_context::Int=0,
 )
     # Build fresh policy with correct bounds from hydro_meta
     policy = hydro_reachable_policy(hydro_meta, layers; encoder_type=encoder_type,
                                     spill_max=spill_max,
-                                    combiner_layers=combiner_layers)
+                                    combiner_layers=combiner_layers,
+                                    n_context=n_context)
     # Load saved weights into the fresh policy
     model_state = JLD2.load(checkpoint_path, "model_state")
     load_policy_weights!(policy, model_state)
