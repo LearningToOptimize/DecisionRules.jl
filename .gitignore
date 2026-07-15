@@ -56,3 +56,5 @@ plan/
 settings.json
 *.sh
 *-backup
+*.cuts.json.stale_stronggrid
+*strong.json

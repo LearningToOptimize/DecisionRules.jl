@@ -1,9 +1,21 @@
 # # Hydropower Scheduling
 #
-# This example trains target-setting decision rules for the Bolivia
-# long-term hydrothermal dispatch (LTHD) problem — **TS-DDR** (deep,
-# LSTM-based) and its linear counterpart **TS-LDR** — and compares them
-# against an SDDP baseline with inconsistent formulations.  The strict
+# This is the training-and-evaluation walkthrough of the hydrothermal case
+# study.  It assumes the two preceding chapters: the mathematics of the
+# planning problem — reservoir dynamics with cascades, AC power flow,
+# deficit penalties, reachable sets — is developed in
+# [The long-term hydrothermal planning problem](@ref), and the instance
+# itself — Bolivia's real grid and hydrology, its counter-cyclical
+# demand, and why the convex value-of-water shortcut misprices it — is
+# presented in [The Bolivian interconnected system](@ref).  Here we solve
+# it.
+#
+# We train target-setting decision rules for the Bolivia long-term
+# hydrothermal dispatch (LTHD) problem — **TS-DDR** (deep, LSTM-based) and
+# its linear counterpart **TS-LDR** — and compare them against an **SDDP
+# baseline with inconsistent formulations** (convex SOC-WR backward pass,
+# true AC forward pass; see
+# [Stochastic dual dynamic programming](@ref)).  The strict
 # (penalty-free) TS-DDR variant is trained in two independent
 # implementations that we verify are numerically equivalent:
 #
@@ -14,12 +26,16 @@
 #    ExaModels + MadNLP/cuDSS), solving one coupled 126-stage NLP per
 #    gradient sample.
 #
-# The Bolivia system has **28 buses**, **34 generators**, **11 hydro
-# plants** (three of them in river cascades), and **AC power flow**
-# constraints.  Policies are trained on a 126-stage horizon and evaluated on
-# **96 monthly stages**; inflow uncertainty is sampled from **47 historical
-# joint scenarios** (spatially correlated across plants, tiled cyclically
-# for horizons beyond the record).
+# **Instance at a glance** (details in the case chapter): **28 buses**,
+# **34 generators**, **11 hydro plants** (three cascade links:
+# COR→SIS turbine-only; ZON→CHU and TAQ1→TAQ2 turbine+spill), full
+# **AC power flow**.  Policies are trained on a **126 weekly stages**
+# horizon (each stage is 168 h, so the horizon spans roughly two and a
+# half years) and evaluated on a 96-stage out-of-sample rollout; inflow
+# uncertainty is sampled from **15 spatially-correlated historical
+# scenarios per stage**, tiled as an annual cycle across the horizon, and
+# demand follows the seasonal per-bus profile shipped as
+# `bolivia/demand.csv`.
 #
 # ## Overview of the TS-DDR approach
 #
@@ -33,6 +49,8 @@
 # respect to the target parameters is available through Lagrange duality
 # (or equivalently, implicit differentiation of the KKT conditions).
 # This avoids differentiating through the full optimization solver.
+# The general theory is [The TS-DDR framework](@ref); this section
+# instantiates it on the hydro problem.
 #
 # ## Problem formulation
 #
@@ -191,247 +209,33 @@ using Statistics, Random
 # )
 # ```
 
-# ## TS-LDR: Linear Decision Rules
+# ## TS-LDR: a linear baseline
 #
-# As a baseline, we also train a **linear** policy (TS-LDR).  This uses
-# `dense_multilayer_nn` with identity activation — a composition of linear
-# layers equivalent to a single affine map:
+# A **linear** policy (TS-LDR) drops the LSTM for an affine map
+# ``\hat{x}_t = W\,[w_{1:t};\, x_{t-1}] + b`` but reuses the identical
+# target-setting pipeline; it is the classical linear-decision-rule comparator.
+# Construct it with `dense_multilayer_nn(num_inputs, num_hydro, [...];
+# activation=identity)` in place of the reachable policy.
 #
-# ```math
-# \hat{x}_t = W [w_{1:t};\; x_{t-1}] + b.
-# ```
+# ## Training the policy: which formulation
 #
-# TS-LDR uses the same target-setting framework and training pipeline as
-# TS-DDR.  The only difference is the policy class: linear maps have fewer
-# parameters and cannot capture nonlinear inflow patterns, but they are a
-# natural baseline from the classical LDR literature.
-
-# ```julia
-# num_inputs = DecisionRules.policy_input_dim(num_uncertainties, num_hydro)
-# models = dense_multilayer_nn(num_inputs, num_hydro, [64, 64]; activation=identity)
-# ```
-
-# ## Training pipeline 1: Deterministic Equivalent
+# The TS-DDR framework supports several training formulations that trade off
+# gradient quality against cost per sample — the full-horizon **deterministic
+# equivalent**, sequential **stage-wise** decomposition, and **multiple
+# shooting** over sub-horizons, each with an optional target-slack penalty and
+# annealing schedule.  These are derived once, in general form, in
+# [The TS-DDR framework](@ref); the score-function correction and the
+# control-variate critic are in
+# [Extensions: mixed gradients, critics, and risk](@ref).
 #
-# The deterministic equivalent (DE) couples all 96 stages into a **single NLP**
-# for each sampled trajectory.  This is the most direct formulation: the policy
-# generates the full target trajectory ``\hat{x}_{1:T}`` in one forward pass,
-# and a single coupled solve determines all realized states simultaneously.
-#
-# ### How it works
-#
-# ```
-#  ┌──────────────────────────────────────────────────────────┐
-#  │  For each sampled trajectory w_{1:T}:                    │
-#  │                                                          │
-#  │  1. Forward pass: x̂_{1:T} = π_θ(w_{1:T}, x_0)          │
-#  │                                                          │
-#  │  2. Solve coupled NLP:                                   │
-#  │     min  Σ_t c_t(x_t, u_t) + C_δ Σ_t ‖δ_t‖             │
-#  │     s.t. dynamics + AC-OPF for ALL stages simultaneously │
-#  │          x_t + δ_t = x̂_t(θ)   ∀t  (target constraint)  │
-#  │                                                          │
-#  │  3. Read duals λ_t of target constraints                 │
-#  │     Gradient: Σ_t λ_t ⊙ ∇_θ x̂_t(θ)                     │
-#  └──────────────────────────────────────────────────────────┘
-# ```
-#
-# ### Mathematical formulation
-#
-# ```math
-# \begin{aligned}
-# Q(w;\, \theta)
-#   \;=\;
-#   \min_{\{x_t, u_t, \delta_t\}_{t=1}^{T}}
-#   \quad &
-#   \sum_{t=1}^{T} c_t(x_t, u_t)
-#   + C_\delta \sum_{t=1}^{T} \|\delta_t\| \\
-# \text{s.t.}\quad
-#   & x_t = T_t(w_t,\, u_t,\, x_{t-1}),
-#         && t=1,\ldots,T \\
-#   & x_t + \delta_t = \hat{x}_t(\theta),
-#         && : \lambda_t,\quad t=1,\ldots,T \\
-#   & h_t(x_t, u_t) \ge 0,
-#         && t=1,\ldots,T
-# \end{aligned}
-# ```
-#
-# The gradient is exact by the envelope theorem:
-#
-# ```math
-# \nabla_\theta Q
-# \;=\;
-# \sum_{t=1}^{T}
-# \lambda_t \odot \nabla_\theta \hat{x}_t(\theta).
-# ```
-#
-# **Advantages**: strongest gradient signal — full cross-stage coupling
-# captures how a target at stage 3 affects costs at stage 50.
-#
-# **Disadvantage**: the NLP has ``96 \times (\text{AC-OPF variables})``
-# decision variables; the policy generates targets without seeing realized
-# states (open-loop target generation).
-
-# ```julia
-# det_equivalent, uncertainty_samples_det = DecisionRules.deterministic_equivalent!(
-#     det_model, subproblems_de, state_params_in, state_params_out,
-#     Float64.(initial_state), uncertainty_samples,
-# )
-#
-# train_multistage(
-#     models, initial_state, det_equivalent,
-#     state_params_in, state_params_out, uncertainty_samples_det;
-#     num_batches=4000, optimizer=Flux.Adam(),
-#     penalty_schedule=[(1,100,0.1), (101,210,1.0), (211,300,10.0), (301,4000,30.0)],
-# )
-# ```
-
-# ## Training pipeline 2: Stage-wise Decomposition (Single Shooting)
-#
-# Stage-wise decomposition solves one subproblem per stage sequentially.
-# Unlike the DE, the policy operates in **closed loop**: after each stage
-# solve, the realized state ``x_t`` (not the predicted target) is fed back
-# as input to the next stage.
-#
-# ### How it works
-#
-# ```
-#  ┌─────────────────────────────────────────────────────────────┐
-#  │  For each sampled trajectory w_{1:T}:                       │
-#  │                                                             │
-#  │  x_0 = initial state                                        │
-#  │  for t = 1, ..., T:                                         │
-#  │      x̂_t = π_θ(w_t, x_{t-1})          ← predict target     │
-#  │      solve stage-t subproblem          ← project to feasible│
-#  │      x_t = realized state from solver  ← closed-loop        │
-#  │      accumulate c_t + C_δ ‖δ_t‖                             │
-#  │                                                             │
-#  │  Gradient: chain rule through all stage solves               │
-#  └─────────────────────────────────────────────────────────────┘
-# ```
-#
-# ### Gradient chain
-#
-# The gradient must account for two coupled feedback paths: the realized
-# state at stage ``t`` depends on the targets at all earlier stages, and the
-# *policy input* at stage ``t`` includes that realized state.  Writing
-# ``x_t = X_t(x_{t-1}, \hat{x}_t)`` for the realized-state map of the stage
-# solve, the exact total-derivative recursion is
-#
-# ```math
-# \frac{dQ}{d\theta}
-# = \sum_{t=1}^{T} \left[
-#   \frac{\partial q_t}{\partial \hat{x}_t} \frac{d \hat{x}_t}{d\theta}
-#   + \frac{\partial q_t}{\partial x_{t-1}} \frac{d x_{t-1}}{d\theta}
-#   \right],
-# \qquad
-# \frac{d x_t}{d\theta}
-# = \frac{\partial X_t}{\partial x_{t-1}} \frac{d x_{t-1}}{d\theta}
-# + \frac{\partial X_t}{\partial \hat{x}_t} \frac{d \hat{x}_t}{d\theta},
-# ```
-#
-# ```math
-# \frac{d \hat{x}_t}{d\theta}
-# = \nabla_\theta \pi_\theta
-# + \frac{\partial \pi_\theta}{\partial x_{t-1}} \frac{d x_{t-1}}{d\theta}.
-# ```
-#
-# Reverse-mode automatic differentiation (Zygote + ChainRules `rrule`s
-# defined on each stage solve) computes exactly this chain, including the
-# policy-feedback term ``\partial \pi_\theta / \partial x_{t-1}``.
-# The `rrule` for each stage solve reads the dual ``\lambda_t`` for the
-# target constraint and uses DiffOpt's implicit differentiation for the
-# state-transition sensitivities ``\partial X_t / \partial \cdot``.
-#
-# **Advantages**: closed-loop — the policy sees realized states, matching
-# deployment semantics.  Each solve is small (single-stage AC-OPF).
-#
-# **Disadvantage**: gradients weaken over long horizons because the
-# chain rule multiplies many Jacobians; sequential solve prevents
-# parallelism.
-
-# ```julia
-# train_multistage(
-#     models, initial_state, subproblems,
-#     state_params_in, state_params_out, uncertainty_samples;
-#     num_batches=3000, optimizer=Flux.Adam(),
-#     penalty_schedule=:default_annealed,
-# )
-# ```
-
-# ## Training pipeline 3: Multiple Shooting
-#
-# Multiple shooting partitions the ``T``-stage horizon into ``K`` windows of
-# ``W`` stages each.  Within each window, a local deterministic equivalent
-# couples the stages (strong gradient signal).  Between windows, the realized
-# end-state is passed to the next window (closed-loop continuity).
-#
-# ### How it works
-#
-# ```
-#  ┌────────────────────────────────────────────────────────────────┐
-#  │  Partition T=96 stages into K=⌈96/12⌉=8 windows of W=12      │
-#  │                                                                │
-#  │  x_0 = initial state                                           │
-#  │  for k = 1, ..., K:                                            │
-#  │      stages = [(k-1)W+1, ..., kW]                              │
-#  │      x̂_{stages} = π_θ(w_{stages}, x_{start_k})                │
-#  │      solve window-k DE (12-stage coupled NLP)                  │
-#  │      x_{end_k} = realized end-state from window solve          │
-#  │      x_{start_{k+1}} = x_{end_k}                               │
-#  │                                                                │
-#  │  Gradient:                                                     │
-#  │    Within window: duals from the coupled solve (like full DE)  │
-#  │    Across windows: DiffOpt chain rule through end-states       │
-#  └────────────────────────────────────────────────────────────────┘
-# ```
-#
-# ### Gradient structure
-#
-# Let ``Q_k`` be the cost of window ``k``.  The total cost is
-# ``Q = \sum_k Q_k``.  Within a window, the gradient is identical to the
-# DE case (duals of the target constraints in the coupled model).  Across
-# windows, the chain rule threads through the realized end-state:
-#
-# ```math
-# \frac{dQ}{d\theta}
-# \;=\;
-# \sum_{k=1}^{K}
-# \left(
-#   \frac{\partial Q_k}{\partial \hat{x}_k}
-#   \cdot \frac{\partial \hat{x}_k}{\partial \theta}
-#   \;+\;
-#   \frac{\partial Q_k}{\partial x_{\text{start}_k}}
-#   \cdot \frac{d x_{\text{start}_k}}{d\theta}
-# \right),
-# ```
-#
-# where ``\frac{d x_{\text{start}_k}}{d\theta}`` involves the chain
-# through all prior windows via ``x_{\text{end}_{k-1}}``.
-#
-# **Advantages**: balances gradient quality (12-stage coupling) with
-# tractability (8 small DEs instead of one large one); inter-window
-# chain provides some closed-loop signal.
-#
-# **Disadvantage**: window boundaries introduce gradient discontinuities;
-# the full-horizon coupling is weaker than the single DE.
-
-# ```julia
-# windows = DecisionRules.setup_shooting_windows(
-#     subproblems, state_params_in, state_params_out,
-#     Float64.(initial_state), uncertainty_samples;
-#     window_size=12,
-#     model_factory=() -> DiffOpt.nonlinear_diff_model(ipopt_attrs),
-# )
-#
-# train_multiple_shooting(
-#     models, initial_state, windows, () -> uncertainty_samples;
-#     num_batches=3000, optimizer=Flux.Adam(),
-#     penalty_schedule=:default_annealed,
-# )
-# ```
-
-# ## Training pipeline 4: Strict subproblems with reachable policy
+# This example uses the **strict** formulation throughout: hard target
+# equalities with no slack and no penalty to tune, made always-feasible by the
+# reachable policy below.  It is trained in **two implementations that we verify
+# are numerically equivalent** — stage-wise subproblems on CPU, and the
+# full-horizon deterministic equivalent on GPU — and both are benchmarked
+# against SDDP.  The rest of this section covers those two implementations and
+# the feasibility guarantee that makes strict mode work.
+# ## The strict formulation I — stage-wise subproblems (CPU)
 #
 # The three formulations above use a **slack penalty** ``C_\delta \|\delta_t\|``
 # to handle the gap between the policy's targets and the feasible set.  While
@@ -573,7 +377,7 @@ using Statistics, Random
 #     no annealing schedule, and no hyperparameter search.  The clean gradient
 #     signal allows the optimizer to directly minimize operational cost.
 
-# ## Training pipeline 5: Strict deterministic equivalent on GPU
+# ## The strict formulation II — deterministic equivalent (GPU)
 #
 # The strict formulation unlocks a second, much faster training route,
 # implemented in the companion package
@@ -654,26 +458,12 @@ using Statistics, Random
 
 # ## Penalty annealing (non-strict formulations)
 #
-# For the non-strict formulations (DE, stage-wise, multiple shooting), the
-# target penalty ``C_\delta`` controls the trade-off between following
-# the policy's targets and minimizing operational cost.  DecisionRules
-# supports a **penalty annealing schedule** that ramps the penalty multiplier
-# during training:
+# The non-strict formulations expose a target penalty ``C_\delta`` and an
+# annealing schedule (`penalty_schedule=:default_annealed`, or explicit
+# `(start, end, multiplier)` tuples); see
+# [The TS-DDR framework](@ref) for the schedule and its rationale.  Strict mode,
+# used here, has no penalty and needs none of this.
 #
-# | Phase | Multiplier | Purpose |
-# |:------|:----------:|:--------|
-# | Warmup | ``0.1 \times C_\delta`` | Let the policy explore freely |
-# | Nominal | ``1.0 \times C_\delta`` | Standard training |
-# | Tighten | ``10.0 \times C_\delta`` | Sharpen target tracking |
-# | Lock | ``30.0 \times C_\delta`` | Final precision |
-#
-# This is activated with `penalty_schedule=:default_annealed` or by passing
-# an explicit list of `(start_iter, end_iter, multiplier)` tuples.
-#
-# The penalty schedule must be carefully tuned per problem.  In contrast,
-# strict mode bypasses this entirely when the problem admits an always-feasible
-# policy (see above).
-
 # ## Evaluation
 #
 # After training, we evaluate the policy using stage-wise rollout on held-out
@@ -724,23 +514,46 @@ using Statistics, Random
 #
 # For comparison, we also train an SDDP policy using
 # [SDDP.jl](https://github.com/odow/SDDP.jl) with **inconsistent
-# formulations**: a convex SOC-WR relaxation for the backward pass
-# (cut generation) and the nonconvex ACP formulation for the forward
-# pass (simulation).  This is a pragmatic approach when the true problem
-# (AC-OPF) is nonconvex — SDDP requires convexity for valid cuts, so a
-# convex relaxation approximates the value function while the forward pass
-# evaluates under the true physics.
+# formulations**: a convex SOC-WR relaxation (`SOCWRConicPowerModel`,
+# solved with Clarabel) for the backward pass (cut generation) and the
+# nonconvex ACP formulation (`ACPPowerModel`, solved with MadNLP) for the
+# forward pass (simulation).  This is the standard pragmatic approach when
+# the true stage problem (AC-OPF) is nonconvex — SDDP requires convexity
+# for valid cuts, so a convex relaxation approximates the value function
+# while the forward pass evaluates under the true physics.  The theory of
+# this variant, and the meaning of the **bound-versus-forward gap** it
+# produces, are developed in
+# [Stochastic dual dynamic programming](@ref); the runnable script is
+# `examples/HydroPowerModels/sddp/run_sddp_inconsistent.jl`, and the
+# learned cuts are saved to a JSON file, which can be loaded to simulate
+# the policy under the ACP formulation.
 #
-# The learned cuts are saved to a JSON file, which can be loaded to
-# simulate the policy under the ACP formulation.  On this case the SDDP
-# training ran **441 iterations in ≈ 12 hours** (CPU, MadNLP subproblem
-# solver), converging its lower bound to **378,207**; the forward-pass
-# (ACP) simulation cost stabilizes around **380 K** on the 126-stage
-# horizon.  These two numbers frame everything below: no policy can have
-# expected 126-stage cost below the bound, and SDDP's own policy sits
-# roughly 0.5% above it.
+# The SDDP run produces the two framing numbers of the whole comparison:
+# the converged **backward (SOC-WR) lower bound** and the stabilized
+# **forward-pass (ACP) simulation cost** on the 126-stage horizon.  No
+# physically feasible policy can have expected cost below the former; the
+# gap between the two conflates SDDP's own suboptimality with the cost of
+# the convexification (see the theory chapter).
+#
+# !!! warning "Numbers pending regeneration"
+#     The SDDP figures quoted in the Results below — bound, forward cost,
+#     iteration count, and wall-clock — were obtained on the *previous*
+#     calibration of the case (uniform 0.6× load scaling) and are being
+#     regenerated for the seasonal-demand calibration
+#     (`bolivia/demand.csv`).  They are retained as the reference
+#     structure of the comparison, not as current results.
 
 # ## Results
+#
+# !!! warning "All quantitative results below are pending regeneration"
+#     Every number, table, and figure in this section was produced on the
+#     **previous case calibration** (uniform 0.6× load scaling, before the
+#     seasonal per-bus demand profile in `bolivia/demand.csv` was
+#     introduced).  The comparison *protocol* — paired scenarios, metrics,
+#     training recipes — is current and will not change; the values will
+#     be replaced as the seasonal-demand runs (SDDP baseline and both
+#     strict TS-DDR implementations) complete.  Treat the numbers below as
+#     the documented shape of the comparison on the earlier calibration.
 #
 # We evaluate the two **strict** TS-DDR implementations — stage-wise
 # subproblems (CPU) and the full-horizon GPU deterministic equivalent —
@@ -786,7 +599,7 @@ using Statistics, Random
 # several hundred cost units, so cross-method claims are made only on the
 # paired protocol.
 #
-# ### Training convergence against wall-clock time (126 stages)
+# ### Training convergence against wall-clock time (126 stages) — *previous calibration, to be regenerated*
 #
 # The figure below shows all 126-stage training metrics against **wall-clock
 # time** (log scale), which is the axis that exposes the computational
@@ -835,7 +648,7 @@ using Statistics, Random
 #
 # The plotted wall-clock time is cumulative across both phases.
 #
-# ### 96-stage out-of-sample rollout cost (paired, 500 seeded scenarios)
+# ### 96-stage out-of-sample rollout cost (paired, 500 seeded scenarios) — *previous calibration, to be regenerated*
 #
 # The primary evaluation metric is the **96-stage simulation cost** —
 # total dispatch cost under AC power flow on the 500 paired inflow
@@ -865,7 +678,7 @@ using Statistics, Random
 # GPU.  (On the inventory-control example, the same strict construction
 # beats its SDDP baseline outright; see that example's page.)
 #
-# ### Cost distributions on the paired scenario set
+# ### Cost distributions on the paired scenario set — *previous calibration, to be regenerated*
 #
 # Means compress the comparison; the full per-scenario distributions show
 # it.  The top panel overlays each method's cost density over the shared
@@ -921,8 +734,8 @@ using Statistics, Random
 # |:---------|:------|
 # | Network | Bolivia, 28 buses, 34 generators, AC polar (ACPPowerModel) |
 # | Hydro plants | 11 (3 cascade links: 1 turbine-only, 2 turbine+spill) |
-# | Load scaling | 0.6 × PowerModels.json loads (baked into the mof.json) |
-# | Deficit cost | 6,000 per pu (= 60 $/MWh × baseMVA 100) |
+# | Demand | per-stage seasonal `demand.csv` (48-week cycle, tiled cyclically), unscaled; reactive demand at nominal PowerModels.json values |
+# | Deficit cost | 1e5 per pu (load-shedding penalty, shared with DecisionRulesExa.jl) |
 # | Inflow record | 47 monthly joint scenarios, tiled cyclically beyond month 47 |
 # | Training horizon | 126 stages |
 # | Evaluation horizon | 96 stages, 500 seeded paired scenarios |
@@ -932,15 +745,27 @@ using Statistics, Random
 # longer horizon buffers end-of-horizon effects out of the reported window
 # (SDDP additionally trains with 30 extra stages for the same reason).
 #
+# !!! note "Historical configuration of the reported results"
+#     The numerical results reported above were produced with the *historical*
+#     demand configuration: a constant 0.6 × PowerModels.json load baked into
+#     the stage subproblems and a 6,000-per-pu deficit cost. The current
+#     scripts default to the harder seasonal configuration in the table
+#     (per-stage `demand.csv`, unscaled, deficit cost 1e5) — shared with the
+#     SDDP baseline (`sddp/run_sddp_inconsistent.jl`) and DecisionRulesExa.jl.
+#     Reproduce the historical setup by passing
+#     `demand_file=nothing, deficit_cost=nothing` to
+#     `build_hydropowermodels` (the baked MOF demand and cost are then left
+#     untouched).
+#
 # ### A.2 SDDP baseline
 #
 # | Setting | Value |
 # |:--------|:------|
-# | Cut generation | SOC-WR relaxation (convex), SDDP.jl |
-# | Forward simulation | ACP (nonconvex, true physics) |
-# | Subproblem solver | MadNLP (CPU) |
-# | Iterations / wall time | 441 / ≈ 12 h |
-# | Final lower bound | 378,207 (126 stages) |
+# | Cut generation | SOC-WR relaxation (convex, Clarabel), SDDP.jl |
+# | Forward simulation | ACP (nonconvex, true physics, MadNLP) |
+# | Script | `sddp/run_sddp_inconsistent.jl` |
+# | Iterations / wall time | 441 / ≈ 12 h *(previous calibration)* |
+# | Final lower bound | 378,207 (126 stages) *(previous calibration)* |
 # | Paired simulation | `SDDP.Historical` on the shared index matrix |
 #
 # ### A.3 TS-DDR strict subproblems (CPU) — phase 1

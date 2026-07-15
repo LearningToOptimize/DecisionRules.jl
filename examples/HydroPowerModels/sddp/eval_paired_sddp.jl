@@ -26,6 +26,10 @@ const NUM_STAGES = REPORT_STAGES + RM_STAGES
 const FORMULATION = ACPPowerModel
 const FORMULATION_B = SOCWRConicPowerModel
 
+# Register the same inflow × demand product atoms used during SDDP training.
+# This also provides the column-keyed StableRNG protocol shared with Exa.
+include(joinpath(SDDP_DIR, "sddp_demand_noise.jl"))
+
 # ── Paired scenario indices (seeded protocol) ──────────────────────────────
 # Identical generation to load_hydropowermodels.jl's paired_scenario_indices:
 # entry [t, s] is uniform on 1:nCen from StableRNG(PAIRED_SCENARIO_SEED), so
@@ -45,6 +49,13 @@ nCen = div(size(readdlm(joinpath(HYDRO_DIR, CASE, "inflows.csv"), ','), 2), N_HY
 # then optionally simulate only a shard of its columns so the 500 scenarios
 # can run in parallel across nodes (DR_SCENARIO_FIRST/LAST, 1-based inclusive).
 all_indices = rand(StableRNG(PAIRED_SCENARIO_SEED), 1:nCen, PAIRED_NUM_STAGES, num_scenarios)
+# Demand atom IDs are keyed by the GLOBAL protocol column, so shards and full
+# runs replay exactly the same joint paths. `nothing` is the deterministic
+# fallback, in which Historical keeps using scalar inflow noise terms.
+all_demand_indices = DEMAND_SPREAD === nothing ? nothing : reduce(
+    hcat,
+    [protocol_demand_atom_indices(PAIRED_NUM_STAGES, s) for s in 1:num_scenarios],
+)
 scen_first = parse(Int, get(ENV, "DR_SCENARIO_FIRST", "1"))
 scen_last = parse(Int, get(ENV, "DR_SCENARIO_LAST", string(num_scenarios)))
 @assert 1 <= scen_first <= scen_last <= num_scenarios
@@ -53,10 +64,28 @@ println("Paired protocol: seed=$PAIRED_SCENARIO_SEED, $(PAIRED_NUM_STAGES)×$(nu
 println("Evaluating scenarios $scen_first:$scen_last, $REPORT_STAGES reported stages (of $NUM_STAGES total)")
 
 # ── Build SDDP model and load cuts ────────────────────────────────────────
-alldata = HydroPowerModels.parse_folder(CASE_DIR)
-for load in values(alldata[1]["powersystem"]["load"])
-    load["qd"] = load["qd"] * 0.6
-    load["pd"] = load["pd"] * 0.6
+# Concentrated SEASONAL demand — identical to run_sddp_inconsistent.jl's
+# load_case_data so this simulation evaluates EXACTLY the problem the cuts were
+# trained on (real per-stage demand.csv, NOT the legacy pd,qd*=0.6 flat case).
+let demand_file = joinpath(CASE_DIR, "demand.csv")
+    global alldata
+    if isfile(demand_file)
+        demand = Matrix(CSV.read(demand_file, DataFrame; header=false))
+        nrows, nload = size(demand)
+        alldata = HydroPowerModels.parse_folder(CASE_DIR; stages=NUM_STAGES)
+        nbus = length(alldata[1]["powersystem"]["bus"]); Tstg = length(alldata)
+        demand_all = zeros(Float64, Tstg, nbus)
+        for t in 1:Tstg, j in 1:nload
+            demand_all[t, j] = demand[((t - 1) % nrows) + 1, j]
+        end
+        HydroPowerModels.set_active_demand!(alldata, demand_all)
+        println("Applied seasonal concentrated demand.csv ($nrows×$nload) over $Tstg stages")
+    else
+        alldata = HydroPowerModels.parse_folder(CASE_DIR)
+        for load in values(alldata[1]["powersystem"]["load"])
+            load["qd"] *= 0.6; load["pd"] *= 0.6
+        end
+    end
 end
 
 params = create_param(;
@@ -77,19 +106,27 @@ params = create_param(;
 
 m = hydro_thermal_operation(alldata, params)
 
-cuts_file = joinpath(
+# DR_CUTS_FILE lets the launcher point at a stable SNAPSHOT of the live cuts
+# (the training job rewrites the canonical file every iteration → reading it
+# directly risks a torn JSON). Defaults to the canonical inconsistent-run path.
+cuts_file = get(ENV, "DR_CUTS_FILE", joinpath(
     CASE_DIR,
     string(FORMULATION),
-    string(FORMULATION_B) * "-" * string(FORMULATION) * ".cuts.json",
-)
+    string(FORMULATION_B) * "-" * string(FORMULATION) * DEMAND_TAG * ".cuts.json",
+))
 SDDP.read_cuts_from_file(m.forward_graph, cuts_file)
 println("Loaded cuts: $cuts_file")
 
 # ── Build SDDP.Historical sampling scheme ──────────────────────────────────
 # Each scenario is a vector of (node, noise_term) pairs.
-# node = stage index, noise_term = scenario column ω ∈ 1:nCen
+# node = stage index. The noise term is scalar inflow atom ω when demand is
+# deterministic, or the exact registered product atom (ω, ℓ) otherwise.
 historical_scenarios = [
-    [(t, all_indices[t, s]) for t in 1:NUM_STAGES]
+    [
+        (t, DEMAND_SPREAD === nothing ? all_indices[t, s] :
+            (all_indices[t, s], all_demand_indices[t, s]))
+        for t in 1:NUM_STAGES
+    ]
     for s in scen_range
 ]
 n_sim = length(scen_range)
@@ -106,12 +143,13 @@ results = HydroPowerModels.simulate(
 # Verify noise terms match our indices
 for (si, s) in enumerate(first(scen_range, min(3, n_sim))), t in 1:min(5, REPORT_STAGES)
     recorded_ω = results[:simulations][si][t][:noise_term]
-    expected_ω = all_indices[t, s]
+    expected_ω = DEMAND_SPREAD === nothing ? all_indices[t, s] :
+        (all_indices[t, s], all_demand_indices[t, s])
     if recorded_ω != expected_ω
-        error("Mismatch at scenario $s, stage $t: got ω=$recorded_ω, expected $expected_ω")
+        error("Mismatch at scenario $s, stage $t: got noise=$recorded_ω, expected $expected_ω")
     end
 end
-println("Noise term verification passed (spot-checked)")
+println("Joint inflow/demand noise verification passed (spot-checked)")
 
 # ── Extract results ────────────────────────────────────────────────────────
 nhyd = alldata[1]["hydro"]["nHyd"]

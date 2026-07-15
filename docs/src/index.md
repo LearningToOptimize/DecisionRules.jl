@@ -4,34 +4,68 @@
 CurrentModule = DecisionRules
 ```
 
-DecisionRules.jl trains parametric decision rules through multi-stage optimization,
-implementing the **Two-Stage Deep Decision Rules (TS-DDR)** framework from
-[arXiv:2405.14973](https://arxiv.org/abs/2405.14973).
+DecisionRules.jl trains parametric decision rules — from affine policies
+to deep recurrent networks — for **multistage stochastic optimization**
+problems whose actions come from constrained optimization subproblems
+(optimal power flow, MPC, inventory control, …). It implements the
+**Two-Stage Deep Decision Rules (TS-DDR)** framework of
+[arXiv:2405.14973](https://arxiv.org/abs/2405.14973): the policy outputs
+**target states**, a projection subproblem restores exact feasibility, and
+Lagrange duals (with implicit differentiation via
+[DiffOpt.jl](https://github.com/jump-dev/DiffOpt.jl) where needed) provide
+the end-to-end training gradient — no differentiation through solver
+iterations, no feasibility violations at deployment.
 
-## How it works
+In its **strict** formulation, the target constraints are hard equalities
+and the policy is feasibility-guaranteeing by construction (e.g.
+`HydroReachablePolicy` for reservoir systems): there is no slack, no
+penalty hyperparameter, and the dual ``\lambda_t`` is the pure shadow
+price of the target. A GPU companion package,
+[DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl),
+trains the same policies through full-horizon deterministic equivalents
+with ExaModels + MadNLP/cuDSS.
 
-In multi-stage stochastic control, the feasible action at each stage comes from solving
-a constrained optimization problem (OPF, MPC, hydrothermal dispatch, …). Rather than
-outputting actions directly, the neural-network policy outputs **target states**.
-An optimization subproblem then projects these targets onto the feasible set defined by
-dynamics and constraints. Lagrange duals and implicit differentiation (via
-[DiffOpt.jl](https://github.com/jump-dev/DiffOpt.jl)) provide the gradient signal to
-update the policy end-to-end.
+## How this manual is organized
 
-Four training formulations are supported:
+The documentation is written as a book in three parts — theory, package
+guide, and case studies — so that it can be read as a self-contained
+treatment of the method as well as used as reference documentation.
 
-| Formulation | Horizon coupling | Gradient source |
-|:---|:---|:---|
-| **Deterministic Equivalent** | Full horizon, one large NLP | Duals on the coupled problem |
-| **Stage-wise (single shooting)** | Sequential rollout | Duals + DiffOpt per stage |
-| **Multiple Shooting** | Windowed sub-horizons | DiffOpt per window, continuity penalties |
-| **Strict subproblems** | Sequential rollout, no slack | Pure shadow-price duals |
+**Part I — Theory.** The general
+[multistage stochastic optimization problem](@ref "Multistage stochastic optimization")
+and the place of decision rules among solution methods;
+[the TS-DDR framework](@ref "The TS-DDR framework") — target-state
+policies, dual gradients, the training formulations, and the strict
+(penalty-free) mode with its reachability-based feasibility guarantee;
+[stochastic dual dynamic programming](@ref "Stochastic dual dynamic programming"),
+including the inconsistent-formulation variant used on nonconvex physics
+and the meaning of the bound-versus-forward gap; and
+[extensions](@ref "Extensions: mixed gradients, critics, and risk") —
+score-function corrections for integer decisions, control-variate
+critics, and risk-averse objectives.
 
-The **strict subproblems** formulation eliminates the target-slack penalty entirely by
-enforcing hard equality constraints between the policy's targets and the realized state.
-Combined with a feasibility-guaranteeing policy (e.g., `HydroReachablePolicy` for hydro
-scheduling), this produces clean gradient signals with no penalty tuning — the dual
-``\lambda_t`` is the pure shadow price, uncontaminated by any regularization term.
+**Part II — Package guide.**
+[Getting started](@ref) (installation, the anatomy of a training run,
+choosing a formulation);
+[uncertainty sampling formats](@ref "Uncertainty Sampling");
+[gradient fallback](@ref "Gradient Fallback") for robust training;
+[GPU acceleration](@ref "GPU Acceleration with DecisionRulesExa.jl"); and
+the [API Reference](@ref).
+
+**Part III — Case studies.** The flagship study is **hydrothermal
+scheduling on the Bolivian interconnected system**, in three chapters:
+[the planning problem's mathematics](@ref "The long-term hydrothermal planning problem")
+(multistage AC-OPF with cascaded reservoir dynamics),
+[the instance](@ref "The Bolivian interconnected system") (a real grid
+whose counter-cyclical, storage-critical operation sits squarely in the
+regime where convex value-of-water surrogates misprice the network), and
+[the training and evaluation walkthrough](@ref "Hydropower Scheduling")
+(strict TS-DDR on CPU and GPU versus an SDDP baseline, under a paired
+evaluation protocol). Two smaller studies —
+[rocket control](@ref "Rocket Control") and
+[stochastic lot-sizing with integer variables](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs")
+— exercise the framework on continuous control and mixed-integer
+recourse.
 
 ## Installation
 
@@ -40,32 +74,9 @@ using Pkg
 Pkg.add("DecisionRules")
 ```
 
-## Quick start
-
-```julia
-using DecisionRules, JuMP, DiffOpt, Flux, Ipopt
-
-# Build per-stage subproblems in JuMP (DiffOpt-enabled)
-# subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state = ...
-
-# Define a policy: maps [uncertainty; state] → target state
-policy = Chain(
-    Dense(policy_input_dim(num_uncertainties, num_states), 64, relu),
-    Dense(64, num_states),
-)
-
-# Train via stage-wise decomposition
-train_multistage(
-    policy, initial_state, subproblems,
-    state_params_in, state_params_out, uncertainty_samples;
-    num_batches=100, optimizer=Flux.Adam(1e-3),
-)
-```
-
-See the [Algorithm](@ref) page for the mathematical formulation, the
-[Uncertainty Sampling](@ref) guide for how to prepare your scenario data, the
-[GPU Acceleration with DecisionRulesExa.jl](@ref) page for GPU-accelerated training,
-and the examples for complete worked problems.
+See [Getting started](@ref) for solver requirements, a quick-start
+example, and guidance on choosing among the four training formulations
+(deterministic equivalent, stage-wise, multiple shooting, strict).
 
 ## Citation
 

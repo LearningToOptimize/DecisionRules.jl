@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300">
+<rect width="760" height="300" fill="#eef0ec"/>
+<rect x="328.2" y="30.0" width="207.9" height="228.0" fill="#c02d63" fill-opacity="0.06"/>
+<line x1="46" y1="258.0" x2="744" y2="258.0" stroke="#d2d7cf"/>
+<text x="37" y="261.5" font-size="11" text-anchor="end" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">0</text>
+<line x1="46" y1="182.0" x2="744" y2="182.0" stroke="#d2d7cf"/>
+<text x="37" y="185.5" font-size="11" text-anchor="end" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">300</text>
+<line x1="46" y1="106.0" x2="744" y2="106.0" stroke="#d2d7cf"/>
+<text x="37" y="109.5" font-size="11" text-anchor="end" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">600</text>
+<line x1="46" y1="30.0" x2="744" y2="30.0" stroke="#d2d7cf"/>
+<text x="37" y="33.5" font-size="11" text-anchor="end" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">900</text>
+<text x="46.0" y="286" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">wk 1</text>
+<text x="164.8085106382979" y="286" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">wk 9</text>
+<text x="283.6170212765958" y="286" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">wk 17</text>
+<text x="402.4255319148936" y="286" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">wk 25</text>
+<text x="521.2340425531916" y="286" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">wk 33</text>
+<text x="640.0425531914893" y="286" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">wk 41</text>
+<line x1="46" y1="78.9" x2="744" y2="78.9" stroke="#5c6670" stroke-width="1.3" stroke-dasharray="5 4"/>
+<text x="744" y="72.89333333333335" font-size="11" text-anchor="end" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">thermal capacity 707 MW</text>
+<polyline points="46.0,174.7 60.9,175.7 75.7,176.2 90.6,176.4 105.4,176.2 120.3,175.7 135.1,174.7 150.0,173.1 164.8,171.4 179.7,169.1 194.5,166.5 209.4,163.8 224.2,160.7 239.1,157.7 253.9,154.4 268.8,151.1 283.6,147.8 298.5,144.5 313.3,141.2 328.2,138.4 343.0,135.6 357.9,133.1 372.7,130.8 387.6,129.1 402.4,127.5 417.3,126.5 432.1,125.8 447.0,125.5 461.8,125.8 476.7,126.5 491.5,127.5 506.4,129.1 521.2,130.8 536.1,133.1 550.9,135.6 565.8,138.4 580.6,141.2 595.5,144.5 610.3,147.8 625.2,151.1 640.0,154.4 654.9,157.7 669.7,160.7 684.6,163.8 699.4,166.5 714.3,169.1 729.1,171.4 744.0,173.1" fill="none" stroke="#c02d63" stroke-width="2.4"/>
+<circle cx="447.0" cy="125.5" r="4" fill="#c02d63" stroke="#eef0ec" stroke-width="2"/>
+<text x="446.97872340425533" y="115.50666666666666" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" fill="#c02d63" stroke="#eef0ec" stroke-width="3.2" paint-order="stroke">dry-winter peak · 523 MW</text>
+<text x="42" y="22" font-size="15" text-anchor="start" font-family="Georgia,serif" fill="#1f242b" font-weight="600">System demand across the year</text>
+<text x="42" y="39" font-size="11.5" text-anchor="start" font-family="ui-monospace,Menlo,monospace" fill="#5c6670">winter-peaking load · dashed = gas thermal capacity</text>
+</svg>

@@ -14,7 +14,12 @@
 #
 # Environment overrides:
 #   DR_NUM_STAGES=126          number of training stages
-#   DR_NUM_ROLLOUT_STAGES=96   number of rollout evaluation stages (default: DR_NUM_STAGES)
+#   DR_NUM_ROLLOUT_STAGES=96   number of rollout evaluation stages (default: 96,
+#                              matching the Exa strict recipe: train 126 / roll out 96)
+#   DR_LOAD_SCALER=1.0         demand scaler applied to demand.csv active demand and
+#                              the nominal reactive demand (1.0 = real seasonal
+#                              demand, no 0.6 scaler; parity with DecisionRulesExa)
+#   DR_DEFICIT_COST=1e5        load-shedding cost per pu (paper recipe 1e5)
 #   DR_NUM_EPOCHS=80           number of epochs
 #   DR_ENCODER_LAYERS=128,128  recurrent inflow encoder sizes
 #   DR_HEAD_LAYERS=            nonrecurrent state-conditioned target head sizes
@@ -69,7 +74,13 @@ include(joinpath(HydroPowerModels_dir, "hydro_reachable_policy.jl"))
 case_name = "bolivia"
 formulation = "ACPPowerModel"
 num_stages = parse(Int, get(ENV, "DR_NUM_STAGES", "126"))
-num_rollout_stages = parse(Int, get(ENV, "DR_NUM_ROLLOUT_STAGES", string(num_stages)))
+# Default rollout horizon 96 (train 126 / evaluate 96) — the paired-evaluation
+# protocol shared with the SDDP baseline and DecisionRulesExa's strict trainer.
+num_rollout_stages = parse(Int, get(ENV, "DR_NUM_ROLLOUT_STAGES", "96"))
+# Demand scaler: 1.0 = real seasonal demand.csv, no historical 0.6 down-scaling.
+load_scaler = parse(Float64, get(ENV, "DR_LOAD_SCALER", "1.0"))
+# Load-shedding cost per pu; 1e5 is the paper recipe shared with DecisionRulesExa.
+deficit_cost = parse(Float64, get(ENV, "DR_DEFICIT_COST", "1e5"))
 model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 formulation_file = formulation * ".mof.json"
@@ -212,6 +223,11 @@ subproblems, state_params_in, state_params_out, uncertainty_samples,
     num_stages=num_stages,
     optimizer=diff_optimizer,
     strict=true,
+    # Per-stage seasonal demand (bolivia/demand.csv, cyclically tiled) and the
+    # paper deficit cost — parity with SDDP and DecisionRulesExa (see
+    # build_hydropowermodels; demand_file=:auto picks up demand.csv).
+    load_scaler=load_scaler,
+    deficit_cost=deficit_cost,
 )
 
 num_hydro = length(initial_state)
@@ -232,6 +248,8 @@ lg = WandbLogger(;
         "penalty_schedule" => "none (strict)",
         "num_stages" => num_stages,
         "num_rollout_stages" => num_rollout_stages,
+        "load_scaler" => load_scaler,
+        "deficit_cost" => deficit_cost,
         "num_epochs" => string(num_epochs),
         "num_batches" => string(num_batches),
         "num_train_per_batch" => string(_num_train_per_batch),

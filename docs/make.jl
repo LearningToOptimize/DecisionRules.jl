@@ -24,16 +24,28 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
-        "Algorithm" => "algorithm.md",
-        "Gradient Fallback" => "gradient_fallback.md",
-        "Uncertainty Sampling" => "sampling.md",
-        "GPU Acceleration" => "gpu_acceleration.md",
-        "Examples" => [
-            "Hydropower Scheduling" => "examples/hydro.md",
-            "Rocket Control" => "examples/rocket.md",
-            "Stochastic Lot-Sizing (Integer Variables)" => "examples/inventory.md",
+        "Part I — Theory" => [
+            "Multistage stochastic optimization" => "theory/multistage.md",
+            "The TS-DDR framework" => "algorithm.md",
+            "Stochastic dual dynamic programming" => "theory/sddp.md",
+            "Extensions: mixed gradients, critics, risk" => "theory/extensions.md",
         ],
-        "API Reference" => "api.md",
+        "Part II — Package Guide" => [
+            "Getting started" => "guide/getting_started.md",
+            "Uncertainty sampling" => "sampling.md",
+            "Gradient fallback" => "gradient_fallback.md",
+            "GPU acceleration" => "gpu_acceleration.md",
+            "API reference" => "api.md",
+        ],
+        "Part III — Case Studies" => [
+            "Hydrothermal scheduling — the Bolivian SIN" => [
+                "The planning problem" => "casestudies/hydro_problem.md",
+                "The Bolivian interconnected system" => "casestudies/hydro_bolivia.md",
+                "Training and evaluation walkthrough" => "examples/hydro.md",
+            ],
+            "Rocket control" => "examples/rocket.md",
+            "Stochastic lot-sizing (integer variables)" => "examples/inventory.md",
+        ],
     ],
 )
 
