@@ -5,15 +5,15 @@ CurrentModule = DecisionRules
 ```
 
 Stochastic dual dynamic programming (SDDP) is the industrial standard for
-long-horizon hydrothermal planning and the baseline against which the
-case studies in Part III are evaluated. This chapter reviews the
-algorithm, makes precise the convexity assumption on which its guarantees
-rest, and develops the **inconsistent-formulation** variant used when the
-true stage physics is nonconvex — together with the *bound-versus-forward
-gap*, the quantity that measures what the convexification gives up. None
-of this machinery is implemented in DecisionRules.jl itself (we use
-[SDDP.jl](https://github.com/odow/SDDP.jl)); it is presented here because
-a fair comparison requires understanding both methods at the same depth.
+long-horizon planning under uncertainty and the baseline against which the
+case studies are evaluated — a fair comparison requires both methods at
+the same depth. Its guarantees rest on one structural assumption,
+convexity of the stage problem in the state; making that assumption
+precise leads directly to the **inconsistent-formulation** variant used
+when the true stage problem is nonconvex, and to the
+*bound-versus-forward gap*, the quantity that measures what the
+convexification gives up. (DecisionRules.jl does not implement SDDP; the
+baselines use [SDDP.jl](https://github.com/odow/SDDP.jl).)
 
 ## Cutting-plane approximation of the cost-to-go
 
@@ -40,7 +40,7 @@ and iterates two passes over a sampled scenario lattice:
 - **Backward pass.** At each visited state ``x_t``, re-solve the
   stage-``(t{+}1)`` problems for every uncertainty realization, and read
   the **dual multipliers** of the constraints through which ``x_t``
-  enters (in hydro, the water-balance rows). Averaging over realizations
+  enters (the state-coupling rows). Averaging over realizations
   yields a subgradient ``\beta`` of ``\underline{\mathcal{V}}_{t+1}`` at
   ``x_t`` and an intercept ``\alpha`` — a new cut, appended to the model.
 
@@ -65,97 +65,89 @@ state ``x_{t-1}``:
    multiplier a subgradient of the value function rather than merely a
    local sensitivity.
 
-If the stage physics is **nonconvex** — the flagship example being AC
-optimal power flow, whose feasible injection region is nonconvex — both
-properties fail: duals of a nonconvex solve are local objects, and a
-"cut" built from them can *cut off* the true value function. SDDP as
-stated simply does not apply.
+If the stage problem is **nonconvex** in the state, both properties
+fail: duals of a nonconvex solve are local objects, and a "cut" built
+from them can *cut off* the true value function. SDDP as stated simply
+does not apply.
 
-## Inconsistent formulations: convex cuts, nonconvex physics
+## Inconsistent formulations: convex cuts, nonconvex stage problems
 
 The pragmatic and widely used response is to run the two passes on
 **different formulations** of the same stage:
 
-- the **backward pass** (cut generation) uses a **convex relaxation** of
-  the stage physics — in the hydrothermal case study, the second-order
-  cone relaxation of AC power flow (`SOCWRConicPowerModel`), solved with
-  a conic interior-point method (Clarabel);
+- the **backward pass** (cut generation) uses a **convex relaxation**
+  ``\mathcal{X}_t^{\mathrm{rel}} \supseteq \mathcal{X}_t`` of the stage
+  feasible set;
 - the **forward pass** (state sampling and policy simulation) uses the
-  **true nonconvex physics** — the AC polar formulation
-  (`ACPPowerModel`), solved with a nonlinear interior-point method
-  (MadNLP/Ipopt).
+  **true nonconvex stage problem** ``\mathcal{X}_t``.
 
 We refer to this as SDDP with **inconsistent formulations**. It is
 well defined: the relaxed stage problem is convex in the state, so the
 cuts are valid *for the relaxed problem*, and the recursion converges on
 that surrogate. The forward pass then evaluates the resulting
-value-of-water surface against the physics that will actually be
-operated. Concretely, the operating policy is
+value-function approximation against the stage problem that will
+actually be operated. Concretely, the operating policy is
 
 ```math
 u_t^{\mathrm{SDDP}}(x_{t-1}, w_t) \;\in\;
-\arg\min_{(u_t, x_t) \in \mathcal{X}_t^{\mathrm{AC}}(x_{t-1}, w_t)}
-\; c_t(x_t, u_t) + \underline{\mathcal{V}}_{t+1}^{\mathrm{SOC}}(x_t) :
+\arg\min_{(u_t, x_t) \in \mathcal{X}_t(x_{t-1}, w_t)}
+\; c_t(x_t, u_t) + \underline{\mathcal{V}}_{t+1}^{\mathrm{rel}}(x_t) :
 ```
 
-true AC feasibility inside the stage, *relaxation-priced* future outside
-it. (In the reference scripts, this is
-`examples/HydroPowerModels/sddp/run_sddp_inconsistent.jl`.)
+true feasibility inside the stage, *relaxation-priced* future outside
+it.
 
 ### What the surrogate misprices
 
 The quality of this policy hinges on how well the relaxed cost-to-go
-``\underline{\mathcal{V}}^{\mathrm{SOC}}`` prices the *true* marginal
-value of the state. The SOC relaxation is exact on radial, lightly loaded
-networks; on meshed networks with high resistance-to-reactance ratios,
-binding voltage bands, and spatially concentrated load, it is not — it
-systematically **underestimates the cost of delivering power** across the
-stressed part of the grid, because it can realize flows the physical
-network cannot. A value-of-water surface computed on that surrogate then
-misprices storage in exactly the states where storage matters most: the
-relaxation "believes" dry-season delivery is cheaper than it is, so it
-undervalues the water that would relieve it. Whether the resulting error
-is negligible or material is a property of the *network and the operating
-regime*, not of the algorithm — the Bolivian case study of Part III sits
-deliberately in the regime where the question is live, because that is
-the regime real storage-critical systems occupy (see
-[The Bolivian interconnected system](@ref)).
+``\underline{\mathcal{V}}^{\mathrm{rel}}`` prices the *true* marginal
+value of the state. Relaxation only widens the stage feasible set, so
+the surrogate can realize transitions the true system cannot — it
+systematically **underestimates the cost of future operation** wherever
+the relaxation is loose, and therefore undervalues precisely the states
+whose worth derives from relieving that future stress. Whether the
+resulting error is negligible or material is a property of the
+*instance and its operating regime*, not of the algorithm. The
+[hydropower case study](@ref "The Bolivian interconnected system")
+works through a concrete mechanism — a conic relaxation of the network
+constraints mispricing stored energy — on an instance family chosen to
+sit in the regime where the question is live.
 
 ## The bound and the forward cost
 
 The inconsistent scheme produces two headline numbers with different
 epistemic status:
 
-- ``\underline{z}^{\mathrm{SOC}}`` — the converged **backward bound**: a
+- ``\underline{z}^{\mathrm{rel}}`` — the converged **backward bound**: a
   valid lower bound on the expected cost of the *relaxed* multistage
   problem. Because relaxation only widens each stage's feasible set, it
-  is also a valid lower bound on the true AC problem — but a *slack* one:
-  it is attained (if at all) by relaxed trajectories that no physically
-  feasible policy can reproduce.
-- ``\hat{z}^{\mathrm{AC}}`` — the **forward simulation cost**: the Monte
-  Carlo estimate of the expected cost of the actual operating policy
-  under true AC physics.
+  is also a valid lower bound on the true problem — but a *slack* one:
+  it is attained (if at all) by relaxed trajectories that no feasible
+  policy can reproduce.
+- ``\hat{z}`` — the **forward simulation cost**: the Monte Carlo
+  estimate of the expected cost of the actual operating policy on the
+  true stage problems.
 
 Their relative difference,
 
 ```math
 \mathrm{gap} \;=\;
-\frac{\hat{z}^{\mathrm{AC}} - \underline{z}^{\mathrm{SOC}}}
-     {\underline{z}^{\mathrm{SOC}}},
+\frac{\hat{z} - \underline{z}^{\mathrm{rel}}}
+     {\underline{z}^{\mathrm{rel}}},
 ```
 
 is the **bound-versus-forward gap**. It conflates two contributions that
 cannot be separated without further work: ordinary SDDP suboptimality
 (finitely many cuts) and the **cost of convexification** — the systematic
-error of pricing the future on a relaxed network. On instances where the
+error of pricing the future on a relaxed model. On instances where the
 relaxation is nearly tight, the gap collapses to the first contribution
 and SDDP is close to unbeatable; as the relaxation loosens, the gap grows
 and becomes *headroom*: expected cost that a method free of the
 convexification assumption is, at least in principle, able to recover.
 TS-DDR trains directly on the nonconvex stage problems — its gradient
-comes from duals of the *true* AC solves, not from a relaxation — so the
-gap is the natural ex-ante measure of how much room such a method has on
-a given instance. The hydrothermal case study reports this gap
+comes from duals of the *true* stage solves, not from a relaxation — so
+the gap is the natural ex-ante measure of how much room such a method has
+on a given instance. The hydropower case study reports this gap
 explicitly for its instance family.
 
 Two disciplines keep the comparison honest, and both are enforced in the
@@ -163,14 +155,11 @@ case studies:
 
 1. **Bounds are horizon-specific.** A bound computed on a
    ``T``-stage problem does not bound a ``T' < T``-stage simulation
-   metric; training and evaluation horizons must be stated and matched
-   (the hydro study trains on 126 stages and evaluates on the first 96
-   precisely to keep end-of-horizon effects out of the metric, for every
-   method equally).
+   metric; training and evaluation horizons must be stated and matched.
 2. **Policies are compared on the forward metric only.** The only number
    comparable across SDDP, TS-DDR, and any other method is the simulated
-   expected cost under identical physics and identical scenarios — hence
-   the paired-scenario protocol of the case study.
+   expected cost under identical stage problems and identical scenarios —
+   hence the paired-scenario protocol of the case studies.
 
 ## Complementarity with decision rules
 
@@ -184,7 +173,7 @@ arbitrary NLP — but it certifies nothing by itself: its quality is
 established empirically, by simulation against a baseline. This is why
 the case studies always report both: SDDP supplies the yardstick (a bound
 and a strong incumbent policy), and the decision rule is measured against
-it under the true physics.
+it on the true stage problems.
 
 ## Further reading
 
@@ -194,6 +183,3 @@ it under the true physics.
   dynamic programming*, INFORMS Journal on Computing 33 (2021).
 - Shapiro, *Analysis of stochastic dual dynamic programming method*,
   EJOR 209 (2011) — convergence analysis and statistical stopping.
-- Molzahn & Hiskens, *A survey of relaxations and approximations of the
-  power flow equations* (2019) — where and why conic relaxations of AC
-  power flow are (in)exact.

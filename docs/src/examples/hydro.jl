@@ -1,13 +1,11 @@
 # # Hydropower Scheduling
 #
-# This is the training-and-evaluation walkthrough of the hydrothermal case
-# study.  It assumes the two preceding chapters: the mathematics of the
-# planning problem — reservoir dynamics with cascades, AC power flow,
-# deficit penalties, reachable sets — is developed in
-# [The long-term hydrothermal planning problem](@ref), and the instance
-# itself — Bolivia's real grid and hydrology, its counter-cyclical
-# demand, and why the convex value-of-water shortcut misprices it — is
-# presented in [The Bolivian interconnected system](@ref).  Here we solve
+# The mathematics of the planning problem — reservoir dynamics with
+# cascades, AC power flow, deficit penalties, reachable sets — is in
+# [The long-term hydrothermal planning problem](@ref); the instance —
+# Bolivia's real grid and hydrology, its counter-cyclical demand, and why
+# the convex value-of-water shortcut misprices it — is in
+# [The Bolivian interconnected system](@ref).  What remains is to solve
 # it.
 #
 # We train target-setting decision rules for the Bolivia long-term
@@ -98,9 +96,7 @@
 # ```
 #
 # i.e. the constraint multiplier reported by the solver, mapped through the
-# sign convention of the modeling layer (both implementations extract it this
-# way, and the two extractions are verified to agree numerically — see the
-# equivalence audit in the Results section).  Combined with backpropagation
+# sign convention of the modeling layer.  Combined with backpropagation
 # through the policy network, the full gradient of the expected cost is:
 #
 # ```math
@@ -193,10 +189,9 @@ using Statistics, Random
 #     silently *memoryless* — the "LSTM" degenerates to a per-stage MLP over
 #     the current inflow.  Both packages therefore thread the hidden state
 #     explicitly across stages inside their policy types (and implement a
-#     real `Flux.reset!` for scenario boundaries).  The effect is large: on
-#     this example, evaluating the same trained weights with and without
-#     state threading changes the 100-scenario mean cost by **19%**
-#     (361,056 vs 303,631).  If you build custom recurrent policies on this
+#     real `Flux.reset!` for scenario boundaries).  The effect is large: a
+#     memoryless policy evaluates markedly worse than the same weights with
+#     state threading.  If you build custom recurrent policies on this
 #     framework, verify statefulness with the pattern used in the package
 #     test suites: the same input fed twice without `reset!` must produce
 #     different outputs.
@@ -224,17 +219,14 @@ using Statistics, Random
 # equivalent**, sequential **stage-wise** decomposition, and **multiple
 # shooting** over sub-horizons, each with an optional target-slack penalty and
 # annealing schedule.  These are derived once, in general form, in
-# [The TS-DDR framework](@ref); the score-function correction and the
-# control-variate critic are in
-# [Extensions: mixed gradients, critics, and risk](@ref).
+# [The TS-DDR framework](@ref).
 #
 # This example uses the **strict** formulation throughout: hard target
 # equalities with no slack and no penalty to tune, made always-feasible by the
 # reachable policy below.  It is trained in **two implementations that we verify
 # are numerically equivalent** — stage-wise subproblems on CPU, and the
 # full-horizon deterministic equivalent on GPU — and both are benchmarked
-# against SDDP.  The rest of this section covers those two implementations and
-# the feasibility guarantee that makes strict mode work.
+# against SDDP.
 # ## The strict formulation I — stage-wise subproblems (CPU)
 #
 # The three formulations above use a **slack penalty** ``C_\delta \|\delta_t\|``
@@ -257,84 +249,27 @@ using Statistics, Random
 # ### Feasibility guarantee: HydroReachablePolicy
 #
 # Removing the slack requires that every target produced by the policy be
-# **physically achievable**.  For hydro scheduling, this means the target volume
-# must lie within the one-stage reachable set — the range of volumes achievable
-# from the current state ``v_{r,t-1}`` by choosing turbine flow ``q_r`` and
-# spillage ``s_r`` within their physical bounds.
-#
-# #### Per-unit reachable bounds
-#
-# The water balance for reservoir ``r`` at stage ``t`` is
-#
-# ```math
-# v_{r,t} = v_{r,t-1} + K\, w_{r,t} - K\, q_{r,t} - K\, s_{r,t}
-#           + \sum_{u \in \mathcal{U}_r} K\, q_{u,t}
-#           + \sum_{u \in \mathcal{S}_r} K\, s_{u,t},
-# ```
-#
-# where ``K`` is the water-balance conversion factor extracted from the model,
-# ``w_{r,t}`` is the inflow,
-# ``q_{r,t}`` is the turbined flow, ``s_{r,t}`` is the spillage,
-# ``\mathcal{U}_r`` is the set of upstream units connected by turbine flow,
-# and ``\mathcal{S}_r`` is the set connected by spillage.
-#
-# The reachable bounds for unit ``r`` (ignoring cascade interactions) are:
+# **physically achievable** — the well-posedness condition of strict mode
+# (see [The condition: target reachability](@ref)).  For this problem the
+# one-stage reachable set is an interval per reservoir, derived in
+# [Per-unit reachable bounds](@ref) together with the cascade-aware
+# clamping that keeps downstream targets consistent with the release
+# actually implied upstream.  `HydroReachablePolicy` implements that
+# construction: it wraps the same LSTM uncertainty encoder plus
+# feed-forward state-conditioned target head as
+# [`StateConditionedPolicy`](@ref), but maps the head output into the
+# reachable interval ``[\ell_{r,t}, u_{r,t}]`` through a sigmoid,
 #
 # ```math
-# \ell_{r,t} = \max\bigl(\underline{v}_r,\;
-#     v_{r,t-1} + K\, w_{r,t} - K\,\bar{q}_r - K\,\bar{s}_r
-#     + K \sum_{u \in \mathcal{U}_r} \underline{q}_u\bigr),
+# \hat{v}_{r,t} = \ell_{r,t} + (u_{r,t} - \ell_{r,t}) \cdot \sigma(z_{r,t}),
 # ```
 #
-# ```math
-# u_{r,t} = \min\bigl(\bar{v}_r,\;
-#     v_{r,t-1} + K\, w_{r,t} - K\,\underline{q}_r
-#     + K \sum_{u \in \mathcal{U}_r} \bar{q}_u
-#     + K \sum_{u \in \mathcal{S}_r} \bar{s}_u\bigr).
-# ```
-#
-# These bounds assume worst-case upstream contributions (maximum turbine/spill
-# capacity). The [`HydroReachablePolicy`] wraps the same LSTM uncertainty
-# encoder plus feed-forward state-conditioned target head as
-# [`StateConditionedPolicy`](@ref) but uses a **sigmoid** activation to bound
-# the output to this reachable interval:
-#
-# ```math
-# \hat{v}_{r,t} = \ell_{r,t} + (u_{r,t} - \ell_{r,t}) \cdot \sigma(z_{r,t}).
-# ```
-#
-# #### Cascade-aware clamping
-#
-# The per-unit upper bound ``u_{r,t}`` uses worst-case upstream contributions
-# (``K \bar{q}_u``, ``K \bar{s}_u``).  When an upstream unit ``u`` stores water
-# (its target ``\hat{v}_{u,t}`` is high), the actual upstream release
-#
-# ```math
-# R_u = K\, w_{u,t} + v_{u,t-1} - \hat{v}_{u,t}
-# ```
-#
-# can be much less than the assumed maximum.  For cascaded systems, this means
-# the downstream target may exceed the true reachable set, causing infeasibility
-# in strict mode (no slack to absorb the gap).
-#
-# After computing the initial sigmoid targets for all units, the policy applies
-# a **cascade clamping** step.  For each upstream→downstream connection:
-#
-# - **Turn + spill** connection: the full release reaches downstream,
-#   so ``\text{max\_contrib} = \max(0,\, R_u)``.
-# - **Turn-only** connection: only turbined flow reaches downstream,
-#   so ``\text{max\_contrib} = \min(K\,\bar{q}_u,\, \max(0,\, R_u))``.
-#
-# The downstream target is then clamped:
-#
-# ```math
-# \hat{v}_{d,t} \;\le\; v_{d,t-1} + K\, w_{d,t}
-#   - K\,\underline{q}_d + \text{max\_contrib}.
-# ```
-#
-# This clamping is `@non_differentiable` — gradient flows through ``\sigma``
-# for unclamped targets, and is zero for clamped ones (correct projected-gradient
-# signal).
+# then applies the cascade clamps.  Bounds and clamps are
+# `@non_differentiable`: the gradient flows only through ``\sigma(z_{r,t})``
+# (and is zero for clamped targets — a projected-gradient signal), exactly
+# as in the standard TS-DDR pipeline.  The implementation, with the bound
+# and clamp formulas in its docstring, is
+# `examples/HydroPowerModels/hydro_reachable_policy.jl`.
 #
 # ### Setup
 #
@@ -387,22 +322,24 @@ using Statistics, Random
 # algebraic modeling) and [MadNLP.jl](https://github.com/MadNLP/MadNLP.jl)
 # with the cuDSS sparse linear solver.
 #
-# ### Why strict mode makes the regular DE safe
+# ### Strict validity in the regular DE — the same theorem
 #
-# A regular (non-embedded) DE is normally *open-loop*: the policy produces
-# all targets ``\hat{x}_{1:T}`` before the coupled solve, seeing its own
-# previous target instead of a realized state.  With an arbitrary policy this
-# can render a strict DE infeasible.  The reachable policy restores safety
-# **by induction**: roll targets out as ``\hat{x}_0 = x_0`` and
-# ``\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1})`` with every target inside the
-# one-stage reachable set of its input state.  Stage 1 is then feasible from
-# the true initial state; and if stages ``1..t`` are feasible, the strict
-# equalities force ``x_t = \hat{x}_t``, so stage ``t{+}1`` starts exactly at
-# the state the policy planned from — making ``\hat{x}_{t+1}`` feasible too.
-# Strict feasibility *removes* the open-loop/closed-loop gap: the realized
-# state path must equal the reachable target path, so training-time DE
-# solves and deployment-time stage-wise rollouts traverse identical
-# trajectories (we verify this numerically below).
+# In a regular (non-embedded) DE the policy produces all targets
+# ``\hat{x}_{1:T}`` before the coupled solve, reading its own previous
+# target rather than a realized state.  This changes nothing about strict
+# validity: the general induction of
+# [Validity in every formulation, by induction](@ref) applies verbatim.
+# Roll targets out as ``\hat{x}_0 = x_0`` and
+# ``\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1})`` with every target inside
+# the one-stage reachable set of its input state; stage 1 is feasible from
+# the true initial state, and if stages ``1..t`` are feasible, the strict
+# equalities force ``x_s = \hat{x}_s``, so the state the policy conditioned
+# on *is* the realized state and stage ``t{+}1`` is feasible too.  The
+# strict equality closes the loop as a consequence — previous target and
+# previous realized state are the same object — so the open-loop/closed-loop
+# distinction collapses: training-time DE solves and deployment-time
+# stage-wise rollouts traverse identical trajectories (we verify this
+# numerically below).
 #
 # ### Reservoir volumes become parameters
 #
@@ -426,11 +363,9 @@ using Statistics, Random
 #
 # ### What the GPU buys
 #
-# Each gradient sample requires one coupled 126-stage AC NLP solve.  On an
-# NVIDIA H200, MadNLP + cuDSS solves it fast enough that a full 8,000-solve
-# training run completes in roughly a day — and, more importantly, the
-# training loss enters the SDDP-forward-cost envelope within the **first
-# hours** (see the wall-clock convergence figure in the Results).  Solver
+# Each gradient sample requires one coupled 126-stage AC NLP solve; on a
+# data-center GPU, MadNLP + cuDSS makes this fast enough that thousands of
+# full-horizon gradient samples fit in a training run.  Solver
 # state is reused across solves with a dual-snapshot warm-start scheme that
 # prevents one failed solve from corrupting subsequent ones.
 #
@@ -445,25 +380,9 @@ using Statistics, Random
 #     num_batches=8000, madnlp_kwargs=(tol=1e-6,))
 # ```
 #
-# !!! note "Cross-package equivalence audit"
-#     The two strict implementations are verified against each other on this
-#     exact case: with identical weights, data, and scenarios, (i) the two
-#     policy implementations produce bit-identical targets, (ii) the
-#     stage-wise CPU rollout (Ipopt) and the strict full-horizon DE (MadNLP)
-#     agree per scenario to ``10^{-9}`` relative cost, and (iii) the two
-#     packages' 100-scenario evaluations of the same checkpoint agree to
-#     0.001% (303,631 vs 303,635).  The audit scripts
-#     (`dump_paired_policy_reference.jl`, `eval_paired_exa_strict.jl`,
-#     `compare_paired_evals.jl`) ship with the packages and re-run on demand.
+# Both packages implement this same case, and their evaluations of a given
+# policy agree — results from either implementation are directly comparable.
 
-# ## Penalty annealing (non-strict formulations)
-#
-# The non-strict formulations expose a target penalty ``C_\delta`` and an
-# annealing schedule (`penalty_schedule=:default_annealed`, or explicit
-# `(start, end, multiplier)` tuples); see
-# [The TS-DDR framework](@ref) for the schedule and its rationale.  Strict mode,
-# used here, has no penalty and needs none of this.
-#
 # ## Evaluation
 #
 # After training, we evaluate the policy using stage-wise rollout on held-out
@@ -474,9 +393,8 @@ using Statistics, Random
 #   realized state from the solver, matching deployment semantics.
 #
 # The **target-violation share** measures how much cost comes from the slack
-# penalty rather than actual operations — it should be small (``\le 5\%``) for
-# a well-trained policy.  In strict mode, the violation share is always **zero**
-# by construction.
+# penalty rather than actual operations; in strict mode it is **zero** by
+# construction.
 #
 # ### Paired evaluation protocol
 #
@@ -491,14 +409,11 @@ using Statistics, Random
 # with `SDDP.Historical` on those indices (`sddp/eval_paired_sddp.jl`); every
 # decision-rule checkpoint is rolled out stage-wise on the identical
 # trajectories (`eval_paired_tsddr.jl` here; `eval_paired_exa_strict.jl` in
-# the GPU package).  Pairing removes the between-scenario variance
-# (per-scenario cost std ≈ 5,600) from the *comparison*: the standard error
-# of the paired mean difference is ≈ 50, roughly two orders of magnitude
-# tighter than comparing unpaired means.  Data-file identity across
-# implementations is enforced (byte-identical `inflows.csv`, `hydro.json`,
-# `PowerModels.json`), and the stage-index-to-inflow-row mapping (cyclic
-# tiling of the 47-row record) is asserted programmatically inside the
-# cross-package evaluation.
+# the GPU package).  Pairing removes the between-scenario variance from the
+# *comparison*: the standard error of the paired mean difference is orders
+# of magnitude tighter than a comparison of unpaired means, so the protocol
+# resolves cost differences far smaller than the scenario-to-scenario
+# spread.
 
 # ```julia
 # rollout_eval = RolloutEvaluation(
@@ -534,43 +449,20 @@ using Statistics, Random
 # physically feasible policy can have expected cost below the former; the
 # gap between the two conflates SDDP's own suboptimality with the cost of
 # the convexification (see the theory chapter).
-#
-# !!! warning "Numbers pending regeneration"
-#     The SDDP figures quoted in the Results below — bound, forward cost,
-#     iteration count, and wall-clock — were obtained on the *previous*
-#     calibration of the case (uniform 0.6× load scaling) and are being
-#     regenerated for the seasonal-demand calibration
-#     (`bolivia/demand.csv`).  They are retained as the reference
-#     structure of the comparison, not as current results.
 
 # ## Results
 #
-# !!! warning "All quantitative results below are pending regeneration"
-#     Every number, table, and figure in this section was produced on the
-#     **previous case calibration** (uniform 0.6× load scaling, before the
-#     seasonal per-bus demand profile in `bolivia/demand.csv` was
-#     introduced).  The comparison *protocol* — paired scenarios, metrics,
-#     training recipes — is current and will not change; the values will
-#     be replaced as the seasonal-demand runs (SDDP baseline and both
-#     strict TS-DDR implementations) complete.  Treat the numbers below as
-#     the documented shape of the comparison on the earlier calibration.
-#
 # We evaluate the two **strict** TS-DDR implementations — stage-wise
 # subproblems (CPU) and the full-horizon GPU deterministic equivalent —
-# against the SDDP baseline on the Bolivia case with AC power flow (11
-# hydro plants, 47 inflow scenarios).  The non-strict formulations (DE,
-# stage-wise, multiple shooting) are available through the same API but
-# require penalty scheduling and careful tuning; strict mode eliminates
-# this entirely, so it is the configuration we benchmark.
+# against the SDDP baseline on the Bolivia case with AC power flow.
 #
 # Three comparison disciplines keep the results honest:
 #
-# 1. **Same scenarios** — every number below uses the paired 100-scenario
-#    protocol described above.
+# 1. **Same scenarios** — every number uses the paired protocol
+#    described above.
 # 2. **Same physics at evaluation** — all rollouts solve the identical
-#    ACP stage problem (hard reactive balance, mof.json objective); the
-#    cross-package audit pins the implementations to each other at
-#    solver-tolerance level.
+#    ACP stage problem (hard reactive balance, same operating-cost
+#    objective).
 # 3. **Documented training recipes** — every trained artifact corresponds
 #    to a from-scratch-reproducible configuration listed in the appendix
 #    and in the example READMEs (no ad-hoc checkpoints).
@@ -579,8 +471,7 @@ using Statistics, Random
 #
 # - **SDDP lower bound** (126 stages): the expected-cost lower bound from
 #   the convex SOC-WR relaxation.  This is a *relaxation bound* — it cannot
-#   be beaten by any feasible policy.  For Bolivia, it converges to
-#   approximately **378 207**.
+#   be beaten by any feasible policy.
 #
 # - **SDDP forward-pass cost** (126 stages): the simulation cost of the
 #   SDDP policy evaluated under the true AC formulation during the forward
@@ -588,9 +479,7 @@ using Statistics, Random
 #
 # - **Simulation cost** (96 stages): the operational cost obtained by
 #   rolling out a policy under AC power flow on the 500 seeded paired inflow
-#   scenarios.  This is the primary metric for policy quality.  SDDP's
-#   96-stage simulation cost is **303 665** (mean over the 500 paired
-#   scenarios, std 5 921).
+#   scenarios.  This is the primary metric for policy quality.
 #
 # During TS-DDR training, the logged loss is a *training-batch average*
 # over a small number of sampled scenarios, and periodic rollout
@@ -599,38 +488,14 @@ using Statistics, Random
 # several hundred cost units, so cross-method claims are made only on the
 # paired protocol.
 #
-# ### Training convergence against wall-clock time (126 stages) — *previous calibration, to be regenerated*
+# ### Training convergence against wall-clock time (126 stages)
 #
-# The figure below shows all 126-stage training metrics against **wall-clock
-# time** (log scale), which is the axis that exposes the computational
-# trade-off between the methods:
+# The 126-stage training metrics — the SDDP lower bound and forward-pass
+# cost alongside both TS-DDR training trajectories — are plotted against
+# wall-clock time, the axis that exposes the computational trade-off
+# between the methods.
 #
-# ![Training convergence vs wall-clock time](../assets/hydro_training_convergence_by_time.png)
-#
-# - **SDDP lower bound** (SOC-WR relaxation): converges to ~378.2 K over
-#   ≈ 12 hours (441 iterations).  Dashed line — no policy can beat it.
-# - **SDDP forward-pass cost**: the 126-stage simulation cost of the SDDP
-#   policy under the true AC formulation, ~380 K after convergence.
-# - **TS-DDR strict subproblems (CPU)**: the final two-phase stage-wise
-#   schedule.  Phase 1 uses single-sample gradients and training-loss
-#   checkpointing; phase 2 switches to larger batches, decayed learning
-#   rate, and held-out rollout checkpointing.  The wall-clock axis counts
-#   both phases.
-# - **TS-DDR strict DE (GPU)**: the analogous two-phase full-horizon
-#   deterministic-equivalent schedule on an H200.  One coupled 126-stage
-#   solve provides each gradient sample; the second phase uses the same
-#   rollout-selected, lower-variance training discipline and hard reactive
-#   balance used at evaluation.
-#
-# In cumulative wall-clock time, the plotted two-phase schedules end at
-# approximately **21.3 h** for strict subproblems and **24.2 h** for strict
-# DE.  The GPU DE curve reaches the lowest TS-DDR training objective, but this
-# run is not a wall-clock win over SDDP.
-#
-# The plot is regenerated by
-# `examples/HydroPowerModels/plot_hydro_strict_convergence.jl`, which parses
-# the SDDP training log and pulls the policy-training histories from the
-# experiment tracker.
+# <!-- figure: training convergence vs wall-clock time -->
 #
 # ### Two-phase TS-DDR training protocol
 #
@@ -648,79 +513,35 @@ using Statistics, Random
 #
 # The plotted wall-clock time is cumulative across both phases.
 #
-# ### 96-stage out-of-sample rollout cost (paired, 500 seeded scenarios) — *previous calibration, to be regenerated*
+# ### 96-stage out-of-sample rollout cost (paired, 500 seeded scenarios)
 #
 # The primary evaluation metric is the **96-stage simulation cost** —
 # total dispatch cost under AC power flow on the 500 paired inflow
-# trajectories of the seeded protocol.
+# trajectories of the seeded protocol — reported per method with its
+# per-scenario standard deviation, paired mean differences against SDDP,
+# and win rates.
 #
-# | Method | Policy | Mean Cost | Std | Target violations | Training |
-# |:-------|:------:|----------:|----:|:-----------------:|:---------|
-# | SDDP (SOC-WR / ACP) | cuts | 303 665 | 5 921 | — | CPU, ≈ 12 h |
-# | **TS-DDR strict DE (warm-continued)** | LSTM + reachable | 303 936 | 6 119 | 0.0% | H200 GPU, 22 h + 11 h |
-# | **TS-DDR strict subproblems (two-stage)** | LSTM + reachable | 304 027 | 6 114 | 0.0% | CPU (Ipopt), ≈ 2 d + 21 h |
-# | **TS-DDR strict DE (from scratch, SDDP-matched budget)** | LSTM + reachable | 304 460 | 6 052 | 0.0% | H200 GPU, 12.3 h |
+# <!-- table: paired 96-stage rollout costs -->
 #
-# Because the protocol is paired, differences are measured per scenario and
-# their standard errors are two orders of magnitude below the cost std:
+# ### Cost distributions on the paired scenario set
 #
-# - Best TS-DDR (warm-continued GPU DE) − SDDP: **+270 ± 19**
-#   (``t \\approx 14.5``); TS-DDR dispatches cheaper than SDDP on **17.4%**
-#   of scenarios.
-# - From-scratch GPU DE at SDDP's own ≈ 12 h training budget − SDDP:
-#   **+794 ± 19** (win rate 4.2%).
+# Means compress the comparison; the per-scenario distributions show it in
+# full.  We overlay each method's cost density on the shared paired
+# scenarios and, decisively for paired data, the density of the
+# **per-scenario paired difference** ``\\text{method} - \\text{SDDP}`` —
+# pairing removes the common between-scenario variance, so the difference
+# densities resolve gaps an order of magnitude smaller than the raw
+# distributions can.
 #
-# The verdict on this benchmark is symmetric and honest: SDDP retains a
-# statistically significant but operationally tiny advantage — **0.09%**
-# against the best TS-DDR policy — while TS-DDR guarantees zero target
-# violations by construction, requires no penalty tuning, and reaches
-# within 0.26% of SDDP from scratch in the same wall-clock budget on one
-# GPU.  (On the inventory-control example, the same strict construction
-# beats its SDDP baseline outright; see that example's page.)
+# <!-- figure: paired cost distributions -->
 #
-# ### Cost distributions on the paired scenario set — *previous calibration, to be regenerated*
+# ### Comparing the two strict implementations
 #
-# Means compress the comparison; the full per-scenario distributions show
-# it.  The top panel overlays each method's cost density over the shared
-# paired scenarios (kernel density estimates of the per-scenario rollout
-# costs; dashed lines mark means).  The bottom panel is the statistically
-# decisive view for paired data: the density of the **per-scenario paired
-# difference** ``\\text{method} - \\text{SDDP}``.  Pairing removes the
-# common between-scenario variance (per-scenario cost std ≈ 5.6 K vs
-# paired-difference std ≈ 0.5 K), so this panel resolves differences an
-# order of magnitude smaller than the raw distributions can — probability
-# mass left of the zero line is exactly the fraction of scenarios where the
-# method dispatches cheaper than SDDP (the win rate annotated per series).
-#
-# ![Paired cost distributions](../assets/hydro_paired_cost_distributions.png)
-#
-# The figure is regenerated by
-# `examples/HydroPowerModels/plot_hydro_paired_distributions.jl` from the
-# tagged outputs of the paired evaluation scripts.
-#
-# The key advantage of strict mode is that it requires **no penalty tuning**:
-# the gradient signal from the hard-equality duals avoids soft-deficit or
-# reactive-balance penalty schedules.  The two-phase protocol above uses only
-# ordinary optimizer scheduling and held-out rollout checkpointing; the
-# non-strict formulations require careful penalty schedules to achieve
-# competitive results.
-#
-# ### Comparing the two strict implementations fairly
-#
-# The GPU DE trainer optimizes the same strict target-setting policy class,
-# and the audit above shows its inner solve is numerically interchangeable
-# with the CPU stage-wise solve.  The table therefore compares policies under
-# the same 96-stage paired rollout, hard reactive balance, and mof.json
-# operating cost.  The practical distinction is computational: the CPU path
+# Both trainers optimize the same strict target-setting policy class and are
+# evaluated under the same 96-stage paired rollout, hard reactive balance,
+# and operating cost.  The distinction is purely computational: the CPU path
 # solves 126 small Ipopt subproblems sequentially per gradient sample, while
 # the GPU path solves one coupled 126-stage MadNLP/cuDSS problem per sample.
-#
-# The current result is encouraging but not final for the "fastest method"
-# ambition: the GPU DE schedule now reaches the best TS-DDR cost, but it has
-# not yet delivered a policy that both beats SDDP and does so in less
-# wall-clock time.  Closing that remaining gap requires improving the DE
-# training schedule or gradient estimator, not changing the evaluation
-# protocol.
 
 # ## Appendix: experimental details
 #
@@ -745,18 +566,6 @@ using Statistics, Random
 # longer horizon buffers end-of-horizon effects out of the reported window
 # (SDDP additionally trains with 30 extra stages for the same reason).
 #
-# !!! note "Historical configuration of the reported results"
-#     The numerical results reported above were produced with the *historical*
-#     demand configuration: a constant 0.6 × PowerModels.json load baked into
-#     the stage subproblems and a 6,000-per-pu deficit cost. The current
-#     scripts default to the harder seasonal configuration in the table
-#     (per-stage `demand.csv`, unscaled, deficit cost 1e5) — shared with the
-#     SDDP baseline (`sddp/run_sddp_inconsistent.jl`) and DecisionRulesExa.jl.
-#     Reproduce the historical setup by passing
-#     `demand_file=nothing, deficit_cost=nothing` to
-#     `build_hydropowermodels` (the baked MOF demand and cost are then left
-#     untouched).
-#
 # ### A.2 SDDP baseline
 #
 # | Setting | Value |
@@ -764,8 +573,6 @@ using Statistics, Random
 # | Cut generation | SOC-WR relaxation (convex, Clarabel), SDDP.jl |
 # | Forward simulation | ACP (nonconvex, true physics, MadNLP) |
 # | Script | `sddp/run_sddp_inconsistent.jl` |
-# | Iterations / wall time | 441 / ≈ 12 h *(previous calibration)* |
-# | Final lower bound | 378,207 (126 stages) *(previous calibration)* |
 # | Paired simulation | `SDDP.Historical` on the shared index matrix |
 #
 # ### A.3 TS-DDR strict subproblems (CPU) — phase 1
@@ -806,7 +613,7 @@ using Statistics, Random
 # | Solver settings | tol ``10^{-6}``, max_iter 9,000, dual-snapshot warm starts |
 # | Checkpoint selection | phase 1: training-batch loss; phase 2: held-out rollout objective |
 # | Iteration budget | phase 1: 8,000; phase 2: 800 |
-# | Deficit cost (training) | ``10^{5}`` (inert: deficit never activates; evaluation uses the mof.json 6,000) |
+# | Deficit cost | ``10^{5}`` per pu, shared with the CPU path |
 # | Reactive balance | phase 2 and evaluation use hard reactive balance (`reactive_deficit_cost = Inf`) |
 # | Recurrent state | threaded explicitly across stages (see warning above) |
 #
@@ -817,15 +624,13 @@ using Statistics, Random
 # SDDP.jl for the baseline.  Package versions are pinned in the respective
 # `Manifest.toml` files.
 #
-# ### A.7 Artifact-to-script map
+# ### A.7 Entry points
 #
-# | Artifact | Produced by |
-# |:---------|:------------|
-# | Strict CPU training runs | `train_dr_hydropowermodels_strict.jl` (stage 1 & 2 via env recipes) |
-# | Strict GPU training runs | `train_hydro_exa_strict.jl` (DecisionRulesExa.jl) |
-# | SDDP cuts + log | `sddp/run_sddp.jl` |
+# | Step | Script |
+# |:-----|:-------|
+# | Strict CPU training (phases 1 & 2 via env recipes) | `train_dr_hydropowermodels_strict.jl` |
+# | Strict GPU training | `train_hydro_exa_strict.jl` (DecisionRulesExa.jl) |
+# | SDDP baseline (cuts + forward simulation) | `sddp/run_sddp_inconsistent.jl` |
 # | Paired SDDP simulation | `sddp/eval_paired_sddp.jl` |
 # | Paired CPU-policy evaluation | `eval_paired_tsddr.jl` |
 # | Paired GPU-policy evaluation | `eval_paired_exa_strict.jl` (DecisionRulesExa.jl) |
-# | Cross-package equivalence audit | `dump_paired_policy_reference.jl` + `compare_paired_evals.jl` |
-# | Convergence figures | `plot_hydro_strict_convergence.jl` |

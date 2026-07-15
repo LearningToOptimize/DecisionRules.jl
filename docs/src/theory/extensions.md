@@ -6,21 +6,21 @@ CurrentModule = DecisionRules
 
 The dual gradient of [The TS-DDR framework](@ref) is exact for smooth
 subproblems and, over fresh samples, an unbiased estimator of the
-expected-cost gradient. Two practical situations call for extending it:
-**discrete decisions** (the dual is blind to integer switches) and
-**small sample budgets** (the estimator is unbiased but noisy). This
-chapter develops the corresponding extensions — a score-function
-correction and a control-variate critic — together with a risk-averse
-change-of-measure variant. All three ship with the package.
+expected-cost gradient. Two practical situations call for more:
+**discrete decisions**, where the dual is blind to integer switches and a
+score-function (REINFORCE) correction restores the missing signal, and
+**small sample budgets**, where a control-variate critic cuts the
+estimator's variance without moving its optimum. Both extensions, and a
+risk-averse change-of-measure variant of the gradient, ship with the
+package.
 
 !!! note "Scope"
-    None of these extensions is used in the hydrothermal case study of
-    Part III, which is smooth and trains with the pure strict dual
-    gradient. The score-function correction is exercised in the
-    [Stochastic Lot-Sizing with Fixed Ordering Costs](@ref) case study,
-    whose fixed-charge (binary) ordering decisions are exactly the
-    situation it addresses. They are collected here so the core
-    framework chapter stays on the critical path of the case studies.
+    The hydrothermal case study is smooth and trains with the pure strict
+    dual gradient — it uses none of these extensions. The score-function
+    correction is exercised in
+    [Stochastic Lot-Sizing with Fixed Ordering Costs](@ref), whose
+    fixed-charge (binary) ordering decisions are exactly the situation it
+    addresses.
 
 ## Mixed gradient: score-function (REINFORCE) correction
 

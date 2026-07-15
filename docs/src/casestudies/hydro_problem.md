@@ -4,15 +4,13 @@
 CurrentModule = DecisionRules
 ```
 
-This chapter states, in full, the mathematics of the problem solved in the
-hydrothermal case study: **long-term hydrothermal dispatch (LTHD)** — the
-coordinated operation of hydro reservoirs and thermal generation on an AC
-transmission network over a multi-year horizon under inflow and demand
-uncertainty. It is an instance of the general multistage problem of
-[Multistage stochastic optimization](@ref), with the state given by stored
-water, the uncertainty by river inflows, and the stage feasibility set by a
-nonconvex AC optimal power flow. The specific system on which the case
-study runs is presented in
+**Long-term hydrothermal dispatch (LTHD)** is the coordinated operation of
+hydro reservoirs and thermal generation on an AC transmission network over
+a multi-year horizon under inflow and demand uncertainty — an instance of
+the general problem of [Multistage stochastic optimization](@ref) with the
+state given by stored water, the uncertainty by river inflows, and the
+stage feasibility set by a nonconvex AC optimal power flow. The system the
+case study runs on is presented in
 [The Bolivian interconnected system](@ref); the training and evaluation
 walkthrough is [Hydropower Scheduling](@ref).
 
@@ -142,7 +140,8 @@ most expensive generator so that shedding load is always the last resort.
 Hydro production itself is free at the stage level — its cost is
 *opportunity cost*, visible only through the intertemporal coupling.
 
-The planning problem is then exactly the general problem of Part I:
+The planning problem is then exactly the general problem of
+[Multistage stochastic optimization](@ref):
 
 ```math
 \min_{\pi \in \Pi} \;\;
@@ -202,15 +201,78 @@ R(x_{t-1}, w_t) \;=\;
 \Bigr\}.
 ```
 
-For a single reservoir this is an interval whose endpoints follow from
-substituting the extreme releases into the water balance; for cascaded
-systems the sets are coupled (the attainable range of a downstream
-reservoir depends on what its upstream neighbour actually releases), which
-is what the cascade-aware clamping of the
-[`HydroReachablePolicy`](@ref "Feasibility guarantee: HydroReachablePolicy")
-accounts for. Because the water balance is *linear* in ``(q_t, s_t)``,
-reachable bounds are cheap to compute in closed form — the property that
-makes penalty-free (strict) training practical for hydro.
+Because the water balance is *linear* in ``(q_t, s_t)``, the per-reservoir
+reachable set is an interval whose endpoints follow from substituting the
+extreme releases — the property that makes penalty-free (strict) training
+practical for hydro.
+
+### Per-unit reachable bounds
+
+For reservoir ``r`` at state ``v_{r}`` under inflow ``w_{r}``, the highest
+attainable next volume corresponds to minimum outflow plus the worst-case
+(maximal) upstream contribution, and the lowest to maximum outflow:
+
+```math
+u_r \;=\; \min\Bigl(\overline{v}_r,\;
+    v_r + K w_r - K \underline{q}_r
+    + \sum_{u \in \mathcal{U}_r} K \overline{q}_u\Bigr),
+\qquad
+\ell_r \;=\; \max\bigl(\underline{v}_r,\;
+    v_r + K w_r - K \overline{q}_r - \overline{s}_r\bigr),
+```
+
+with ``\overline{s}_r`` the spill bound; when spillage is unbounded,
+``\ell_r = \underline{v}_r`` — the reservoir can always be drawn down to its
+physical minimum. A feasibility-guaranteeing policy
+(`HydroReachablePolicy` in the walkthrough) maps its network output
+``z_r`` into this interval through a sigmoid,
+
+```math
+\hat{v}_r \;=\; \ell_r + (u_r - \ell_r)\,\sigma(z_r),
+```
+
+with the bounds ``\ell_r, u_r`` computed from the physics and excluded from
+differentiation (`@non_differentiable`): the gradient path is solely through
+``\sigma(z_r)``.
+
+### Cascade-aware clamping
+
+The fixed upstream term ``\sum_u K \overline{q}_u`` in ``u_r`` is an
+**overestimate** whenever an upstream unit stores water: its actual release
+is then smaller than ``K \overline{q}_u``, so the fixed bound can exceed the
+true reachable set and render a strict subproblem infeasible. After
+computing the raw sigmoid targets for all units, the policy therefore clamps
+downstream targets against the release actually implied upstream. For each
+cascade link ``u \to d``, the implied upstream release is
+
+```math
+R_u \;=\; K w_u + v_u - \hat{v}_u ,
+```
+
+and the maximum contribution reaching ``d`` is ``\max(0, R_u)`` for
+turbine-plus-spill links and ``\min(K \overline{q}_u,\, \max(0, R_u))`` for
+turbine-only links. The downstream target is clamped to
+
+```math
+\hat{v}_d \;\le\; \min\bigl(\overline{v}_d,\;
+    v_d + K w_d - K \underline{q}_d + \text{max\_contrib}\bigr).
+```
+
+Two assumptions are documented for this scheme:
+
+- **Single-level cascades**: the release formula ``R_u`` omits the upstream
+  unit's own incoming cascade contribution, which is conservative
+  (underestimates the release) for multi-level chains — and exact for the
+  Bolivian topology, whose three links are all single-level.
+- **No gradient through binding clamps**: like the bounds, the clamping step
+  is `@non_differentiable`; when a clamp binds, the dependence of the
+  downstream target on the upstream target is not differentiated (a
+  projected-gradient signal).
+
+With these bounds and clamps, every target is one-stage reachable from the
+state the policy conditioned on, which is precisely the condition under
+which strict training is well-posed in every formulation (see
+[Validity in every formulation, by induction](@ref)).
 
 ## Convexification and what it misprices
 
@@ -235,4 +297,14 @@ cost — developed in [The bound and the forward cost](@ref). The size of
 that gap on a given instance is an honest, method-agnostic estimate of how
 much the convexification assumption costs there; the Bolivian system, by
 its physical geography alone, sits in the regime where it is material
-(see the next chapter).
+(see [The Bolivian interconnected system](@ref)).
+
+## Further reading
+
+- Molzahn & Hiskens, *A survey of relaxations and approximations of the
+  power flow equations*, Foundations and Trends in Electric Energy
+  Systems (2019) — where and why conic relaxations of AC power flow are
+  (in)exact.
+- Pereira & Pinto, *Multi-stage stochastic optimization applied to energy
+  planning*, Mathematical Programming 52 (1991) — the origin of SDDP, in
+  exactly this application domain.

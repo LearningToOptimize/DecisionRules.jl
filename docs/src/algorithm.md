@@ -169,144 +169,115 @@ dual ``\lambda_t`` is the **pure shadow price** ``\partial Q_t / \partial
 \hat{x}_t`` — the marginal value of changing the target, uncontaminated by
 any regularization.
 
-### Feasibility-guaranteeing policies
+### The condition: target reachability
 
-Strict mode requires that the policy always produce feasible targets — if the
-target is outside the feasible set, the subproblem has no slack to absorb the
-violation and becomes infeasible. This is guaranteed by construction through a
-**reachable-set policy** that bounds its output to the one-stage reachable set.
-
-For hydro scheduling with reservoir ``r``, the one-stage reachable set from
-current volume ``v_r`` under inflow ``w_r`` is:
+A hard equality has no slack to absorb an unreachable target, so strict mode
+is well-posed under exactly one condition: **every target the policy emits
+must be attainable from the state the system is in when the corresponding
+stage is solved.** Formally, let
 
 ```math
-\hat{v}_r \in
-\Bigl[
-  \max\bigl(\underline{v}_r,\; v_r + K w_r - K \overline{q}_r - \overline{s}_r
-        + \sum_{u \in U_r^{\text{turn}}} K \underline{q}_u\bigr),\;
-  \min\bigl(\overline{v}_r,\; v_r + K w_r - K \underline{q}_r
-        + \sum_{u \in U_r^{\text{turn}}} K \overline{q}_u\bigr)
-\Bigr],
+R(x, w) \;=\; \bigl\{\, x' \;:\; \exists\, u \text{ with }
+  (u, x') \in \mathcal{X}(x, w) \,\bigr\}
 ```
 
-where ``K`` is the water-balance conversion factor, ``\underline{q}_r,
-\overline{q}_r`` are turbine bounds, ``\overline{s}_r`` is the spill bound,
-and ``U_r^{\text{turn}}`` is the set of upstream units feeding into ``r``.
+denote the **one-stage reachable set** — the states attainable from ``x``
+under realization ``w`` by some admissible action. Strict mode requires
+``\hat{x}_t \in R(x_{t-1}, w_t)`` at every stage, where ``x_{t-1}`` is the
+*realized* state.
 
-#### Cascade-aware clamping
+A **feasibility-guaranteeing policy** enforces this by construction: it
+computes (an inner approximation of) ``R`` from its input state and maps the
+network output into that set, typically by scaling a sigmoid-bounded output
+across the reachable interval. The bounds carry no gradient; the gradient path
+is solely through the network output, exactly as in the standard TS-DDR
+pipeline. Constructing ``R`` is problem-specific. It is cheap whenever the
+dynamics are linear in the controls with box bounds — resource-balance
+equations are the canonical case — and the hydropower case study works out a
+complete instance, cascade interactions included, in
+[One-stage reachable sets](@ref) and its `HydroReachablePolicy`
+implementation.
 
-The fixed upstream term ``\sum_{u} K \overline{q}_u`` in the displayed upper
-bound is an **overestimate** whenever an upstream unit stores water: its actual
-release is then smaller than ``K \overline{q}_u``, so the fixed bound can exceed
-the true reachable set and make strict subproblems infeasible. The policy
-therefore applies a clamping step after computing all raw targets. For each
-cascade link ``u \to d``, the release implied by the upstream target is
+### Validity in every formulation, by induction
+
+Reachability of each target from the *policy's input state* is enough to make
+strict mode well-posed in **all** training formulations — stage-wise
+subproblems, the embedded deterministic equivalent, and the regular
+deterministic equivalent alike. The argument is one induction, and the strict
+equality itself is what carries it: suppose ``\hat{x}_0 = x_0`` (the known
+initial state) and every policy call returns a target reachable from the state
+it conditioned on,
 
 ```math
-R_u = K w_u + v_u - \hat{v}_u ,
+\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}) \in R(\hat{x}_{t-1}, w_t).
 ```
 
-and the maximum contribution to the downstream unit is ``\max(0, R_u)`` for
-turbine-plus-spill links and ``\min(K \overline{q}_u, \max(0, R_u))`` for
-turbine-only links. The downstream target is then clamped to
+1. Stage 1 is feasible: ``\hat{x}_1`` is reachable from the true initial
+   state ``x_0 = \hat{x}_0``.
+2. If stages ``1, \ldots, t`` are feasible, their strict equalities force
+   ``x_s = \hat{x}_s`` for ``s \le t``. The state the policy conditioned on
+   when producing ``\hat{x}_{t+1}`` is therefore *identical* to the realized
+   state ``x_t``, so ``\hat{x}_{t+1} \in R(x_t, w_{t+1})`` and stage ``t+1``
+   is feasible.
 
-```math
-\hat{v}_d \le \min\bigl(\overline{v}_d,\;
-    v_d + K w_d - K \underline{q}_d + \text{max\_contrib}\bigr).
-```
+The formulations differ only in *which symbol* plays the policy input. In
+stage-wise rollouts the policy reads the realized state ``x_{t-1}`` directly;
+in the embedded DE it reads the solver's state variables; in the regular DE it
+reads its own previous target ``\hat{x}_{t-1}``. Under strict equalities these
+are the same object — the induction shows previous target ``\equiv`` previous
+realized state — so no formulation is a special case and none needs a separate
+argument. In particular, the regular DE is *not* an exception requiring extra
+structure: the strict equality **closes the loop as a consequence**, it does
+not presuppose a closed loop.
 
-Two assumptions are documented for this scheme:
+### Information pattern: closed-loop vs. open-loop
 
-- **Single-level cascades**: the release formula ``R_u`` omits the upstream
-  unit's own incoming cascade contribution, which is conservative
-  (underestimates the release) for multi-level chains.
-- **No gradient through binding clamps**: the bounds and the clamping step carry
-  no gradient (`@non_differentiable`), so when a clamp binds, the dependence of
-  the downstream target on the upstream target is not differentiated.
+Distinct from the well-posedness question is the **information pattern**: does
+the policy read the *realized* state (closed-loop feedback) or its *own
+previous target* (open-loop target generation)? This axis matters
+independently of strict mode:
 
-The [`HydroReachablePolicy`] implements this by passing the LSTM encoder output
-through a sigmoid activation and scaling the result to ``[\ell_r, u_r]``:
+- In **non-strict** training, slack lets the realized state deviate from the
+  target, so the two inputs genuinely differ. A regular DE trains the policy
+  on target feedback while the optimizer realizes something else — a
+  train/deploy mismatch that shows up at evaluation (below).
+- Under **strict equalities** the distinction collapses: realized state and
+  target are identical at every stage, so target feedback and realized
+  feedback are the same function evaluation, and training-time DE solves and
+  deployment-time stage-wise rollouts traverse identical trajectories.
 
-```math
-\hat{v}_r = \ell_r + (u_r - \ell_r) \cdot \sigma(z_r).
-```
-
-The bounds ``\ell_r, u_r`` are computed from physics (no gradient flows through
-them); the gradient path is solely through ``\sigma(z_r)``, exactly as in the
-standard TS-DDR pipeline.
-
-### Why strict mode is usually closed-loop
-
-Strict target equality is naturally compatible with formulations where the
-policy sees the state from which the target must be reached.
-
-- In **stage-wise subproblems**, stage ``t`` is solved after stage ``t-1`` has
-  produced a realized state. The next policy call receives that realized state,
-  so a reachable policy can produce a target that is feasible for the next
-  strict stage solve.
-- In **embedded deterministic equivalents**, the policy is evaluated inside the
-  NLP against realized state decision variables. The strict equality then
-  couples policy output and realized next state directly.
-
-A plain deterministic equivalent is different. The training loop normally
-computes all targets before solving the coupled multi-stage NLP. Except for
-``x_0``, the policy receives its own previously predicted targets rather than
-the realized states that the optimizer will eventually choose. With an arbitrary
-policy this is open-loop target generation, so a strict equality can make the
-DE infeasible.
-
-### Strict regular DE by induction
-
-The hydro reachable policy creates an important exception. Suppose
-``x_0`` is feasible and the target rollout for a sampled inflow path is
-
-```math
-\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}),
-\qquad \hat{x}_0 = x_0,
-```
-
-with
-
-```math
-\hat{x}_t \in R(\hat{x}_{t-1}, w_t)
-```
-
-for every stage ``t``. Then the full strict deterministic-equivalent target
-trajectory is feasible. The proof is induction:
-
-1. Stage 1 is feasible because ``\hat{x}_1`` is reachable from the known
-   feasible initial state ``x_0``.
-2. If stages ``1,\ldots,t`` are feasible and strict equalities force
-   ``x_t = \hat{x}_t``, then stage ``t+1`` starts from a feasible state equal to
-   the state used by the policy rollout. Since
-   ``\hat{x}_{t+1} \in R(\hat{x}_t, w_{t+1})``, stage ``t+1`` is feasible.
-
-This is why strict mode can be used in the regular hydro DE when targets are
-generated from a reachability-preserving policy starting at the true initial
-state. The policy is still not reacting to optimizer deviations, but strict
-feasibility removes those deviations: the realized state path must equal the
-reachable target path.
+Keeping the two axes separate is the point: *strict-mode validity* is about
+reachability of targets; *closed- vs. open-loop* is about what information the
+policy consumes. Strict mode does not require closed-loop evaluation — it
+makes the question moot by forcing the two information patterns to coincide.
 
 ### When to use strict mode
 
-Strict mode is the preferred approach when:
+Whenever it is applicable — a feasible initial state and a policy constructed
+to emit only **one-stage reachable** targets — strict mode is the preferred
+formulation. The only reason to fall back to the penalty formulation is
+numerical: some solvers degrade when the additional hard equality constraints
+are imposed (the equalities remove the slack that otherwise absorbs small
+constraint violations during intermediate iterates).
 
-1. The initial state is feasible and every policy target is **one-stage
-   reachable** from the state used as policy input.
-2. The reachable set is **easy to compute** — e.g., reservoir water balance with
-   known turbine/spill bounds.
-3. You want to avoid **penalty tuning** — strict mode has no penalty hyperparameter.
+Everything else follows as a beneficial side effect rather than a selection
+criterion: there is no penalty hyperparameter to tune, no annealing schedule,
+and the dual ``\lambda_t`` is the exact shadow price of the target — the
+gradient signal is uncontaminated by a regularization term.
 
-In the [Hydropower Scheduling](@ref) example, strict mode with a
-`HydroReachablePolicy` achieves competitive simulation costs out of the box,
+In the [Hydropower Scheduling](@ref) case study, strict mode with a
+reachable-set policy achieves competitive simulation costs out of the box,
 with no penalty schedule, no annealing, and no hyperparameter search.
 
 ## Evaluation semantics
 
-A policy trained on the deterministic equivalent generates targets using **target-state
-feedback** (each target depends on the previous *predicted* target, not the realized
-state). Evaluating such a policy with **realized-state feedback** (deployment semantics)
-tests a different closed-loop path and will generally report higher cost.
+A policy trained on the (non-strict) deterministic equivalent generates targets
+using **target-state feedback** (each target depends on the previous *predicted*
+target, not the realized state). Evaluating such a policy with **realized-state
+feedback** (deployment semantics) tests a different closed-loop path and will
+generally report higher cost. Under strict equalities the two modes coincide —
+realized states equal targets identically — so the choice below is material
+only when slack is present.
 
 [`RolloutEvaluation`](@ref) supports both modes via the `policy_state` keyword:
 - `:target` — matches DE training semantics (fair in-sample comparator)

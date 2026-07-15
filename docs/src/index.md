@@ -5,7 +5,7 @@ CurrentModule = DecisionRules
 ```
 
 DecisionRules.jl trains parametric decision rules — from affine policies
-to deep recurrent networks — for **multistage stochastic optimization**
+to deep recurrent networks — for multistage stochastic optimization
 problems whose actions come from constrained optimization subproblems
 (optimal power flow, MPC, inventory control, …). It implements the
 **Two-Stage Deep Decision Rules (TS-DDR)** framework of
@@ -16,56 +16,48 @@ Lagrange duals (with implicit differentiation via
 the end-to-end training gradient — no differentiation through solver
 iterations, no feasibility violations at deployment.
 
-In its **strict** formulation, the target constraints are hard equalities
-and the policy is feasibility-guaranteeing by construction (e.g.
-`HydroReachablePolicy` for reservoir systems): there is no slack, no
+In the **strict** formulation, the target constraints are hard equalities
+and the policy is built to emit only reachable targets: no slack, no
 penalty hyperparameter, and the dual ``\lambda_t`` is the pure shadow
 price of the target. A GPU companion package,
 [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl),
 trains the same policies through full-horizon deterministic equivalents
 with ExaModels + MadNLP/cuDSS.
 
-## How this manual is organized
+## The documentation
 
-The documentation is written as a book in three parts — theory, package
-guide, and case studies — so that it can be read as a self-contained
-treatment of the method as well as used as reference documentation.
-
-**Part I — Theory.** The general
+**Theory.** The
 [multistage stochastic optimization problem](@ref "Multistage stochastic optimization")
-and the place of decision rules among solution methods;
+and where decision rules sit among solution methods;
 [the TS-DDR framework](@ref "The TS-DDR framework") — target-state
-policies, dual gradients, the training formulations, and the strict
-(penalty-free) mode with its reachability-based feasibility guarantee;
+policies, dual gradients, the training formulations, and strict mode with
+its reachability-based feasibility guarantee;
 [stochastic dual dynamic programming](@ref "Stochastic dual dynamic programming"),
-including the inconsistent-formulation variant used on nonconvex physics
-and the meaning of the bound-versus-forward gap; and
+including the inconsistent-formulation variant for nonconvex stage problems and
+the bound-versus-forward gap; and
 [extensions](@ref "Extensions: mixed gradients, critics, and risk") —
 score-function corrections for integer decisions, control-variate
-critics, and risk-averse objectives.
+critics, risk-averse objectives.
 
-**Part II — Package guide.**
-[Getting started](@ref) (installation, the anatomy of a training run,
-choosing a formulation);
+**Package guide.** [Getting started](@ref);
 [uncertainty sampling formats](@ref "Uncertainty Sampling");
-[gradient fallback](@ref "Gradient Fallback") for robust training;
-[GPU acceleration](@ref "GPU Acceleration with DecisionRulesExa.jl"); and
-the [API Reference](@ref).
+[gradient fallback](@ref "Gradient Fallback");
+[GPU acceleration](@ref "GPU Acceleration with DecisionRulesExa.jl");
+[API Reference](@ref).
 
-**Part III — Case studies.** The flagship study is **hydrothermal
-scheduling on the Bolivian interconnected system**, in three chapters:
-[the planning problem's mathematics](@ref "The long-term hydrothermal planning problem")
+**Case studies.** The flagship is hydrothermal scheduling on the Bolivian
+interconnected system, in three chapters —
+[the planning problem](@ref "The long-term hydrothermal planning problem")
 (multistage AC-OPF with cascaded reservoir dynamics),
-[the instance](@ref "The Bolivian interconnected system") (a real grid
-whose counter-cyclical, storage-critical operation sits squarely in the
-regime where convex value-of-water surrogates misprice the network), and
-[the training and evaluation walkthrough](@ref "Hydropower Scheduling")
-(strict TS-DDR on CPU and GPU versus an SDDP baseline, under a paired
-evaluation protocol). Two smaller studies —
+[the instance](@ref "The Bolivian interconnected system")
+(a real grid whose counter-cyclical, storage-critical operation sits in
+the regime where convex value-of-water surrogates misprice the network),
+and [the walkthrough](@ref "Hydropower Scheduling")
+(strict TS-DDR on CPU and GPU against an SDDP baseline, under a paired
+evaluation protocol). Two further studies,
 [rocket control](@ref "Rocket Control") and
-[stochastic lot-sizing with integer variables](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs")
-— exercise the framework on continuous control and mixed-integer
-recourse.
+[stochastic lot-sizing](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs"),
+exercise continuous control and mixed-integer recourse.
 
 ## Installation
 
@@ -74,9 +66,8 @@ using Pkg
 Pkg.add("DecisionRules")
 ```
 
-See [Getting started](@ref) for solver requirements, a quick-start
-example, and guidance on choosing among the four training formulations
-(deterministic equivalent, stage-wise, multiple shooting, strict).
+[Getting started](@ref) covers solver requirements, a quick-start example,
+and how to choose among the training formulations.
 
 ## Citation
 

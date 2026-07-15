@@ -307,7 +307,7 @@ maintainability.
   parameters from an uncertainty pool, discarding the scenario values.
   Used by `setup_shooting_windows` for multiple-shooting training.
 
-## API Reference
+## Docstrings
 
 ```@docs
 sample

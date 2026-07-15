@@ -10,9 +10,8 @@ country's real grid topology and hydrology. The instance is hard in the
 ways real systems are hard: water that arrives out of phase with demand,
 the heaviest load stacked on a meshed high-altitude mining core far from
 both generation sources, and an AC network whose true delivery cost the
-standard convex shortcut quietly misses. This chapter presents the system;
-the underlying mathematics is [the previous chapter](@ref
-"The long-term hydrothermal planning problem"), and the training and
+standard convex shortcut quietly misses. The underlying mathematics is in
+[The long-term hydrothermal planning problem](@ref); the training and
 evaluation walkthrough is [Hydropower Scheduling](@ref).
 
 ## One country, two worlds, one thin backbone
@@ -97,9 +96,9 @@ is invisible.
     the real system. Quantitative statements that depend on the demand
     profile — peak/trough megawatts, the concentration share, and the
     measured relaxation gap — are properties of the shipped calibration
-    and are reported, together with the regenerated results, in the
-    [walkthrough](@ref "Hydropower Scheduling"); this chapter keeps them
-    symbolic. Feasibility of the concentrated dry-season regime with zero
+    and are reported in the [walkthrough](@ref "Hydropower Scheduling");
+    they are kept symbolic here. Feasibility of the concentrated
+    dry-season regime with zero
     load shedding under perfect foresight is verified on the full
     126-stage AC deterministic equivalent.
 

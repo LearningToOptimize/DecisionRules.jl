@@ -30,6 +30,8 @@ const ITERATION_LIMIT = parse(Int, get(ENV, "DR_SDDP_ITERATION_LIMIT", "2000"))
 const NUM_SIMULATIONS = parse(Int, get(ENV, "DR_SDDP_SIMULATIONS", "300"))
 const STAT_REPLICATIONS = parse(Int, get(ENV, "DR_SDDP_STAT_REPLICATIONS", "300"))
 const STAT_PERIOD = parse(Int, get(ENV, "DR_SDDP_STAT_PERIOD", "200"))
+# Reactive-demand scaler (historical value 0.6; see load_case_data comment)
+const QD_SCALER = parse(Float64, get(ENV, "DR_SDDP_QD_SCALER", "0.6"))
 
 const FORMULATION_BACKWARD = SOCWRConicPowerModel
 const FORMULATION_FORWARD = ACPPowerModel
@@ -41,6 +43,9 @@ const FORMULATION_FORWARD = ACPPowerModel
 # hydro_thermal_operation builds the policy graphs; the same override runs in
 # BOTH the SOCWRConic backward and the ACP forward graph builders.
 include(joinpath(@__DIR__, "sddp_demand_noise.jl"))
+# Robust flat-voltage primal starts for the ACP forward graph (vm = 0 default
+# start is singular for polar AC and crashes MadNLP at stressed load levels).
+include(joinpath(@__DIR__, "sddp_ac_starts.jl"))
 
 const save_file = "SDDP-$(CASE)-$(FORMULATION_FORWARD)-$(FORMULATION_BACKWARD)-h$(NUM_STAGES)$(DEMAND_TAG)-$(Dates.now())"
 const CUTS_DIR = joinpath(CASE_DIR, string(FORMULATION_FORWARD))
@@ -55,10 +60,13 @@ const CUTS_FILE = joinpath(
 function clarabel_optimizer()
     return Clarabel.Optimizer(;
         verbose=false,
-        max_iter=parse(Int, get(ENV, "DR_SDDP_CLARABEL_MAX_ITER", "1000")),
-        tol_gap_abs=parse(Float64, get(ENV, "DR_SDDP_CLARABEL_TOL", "1e-7")),
-        tol_gap_rel=parse(Float64, get(ENV, "DR_SDDP_CLARABEL_TOL", "1e-7")),
-        tol_feas=parse(Float64, get(ENV, "DR_SDDP_CLARABEL_TOL", "1e-7")),
+        # 1e-6 / 20000 (was 1e-7 / 1000): Clarabel reports SLOW_PROGRESS
+        # before reaching 1e-7 on stressed seasonal-demand stages; 1e-6 duals
+        # are ample for cut generation.
+        max_iter=parse(Int, get(ENV, "DR_SDDP_CLARABEL_MAX_ITER", "20000")),
+        tol_gap_abs=parse(Float64, get(ENV, "DR_SDDP_CLARABEL_TOL", "1e-6")),
+        tol_gap_rel=parse(Float64, get(ENV, "DR_SDDP_CLARABEL_TOL", "1e-6")),
+        tol_feas=parse(Float64, get(ENV, "DR_SDDP_CLARABEL_TOL", "1e-6")),
     )
 end
 
@@ -114,7 +122,15 @@ function load_case_data()
             demand_all[t, j] = demand[((t-1) % nrows) + 1, j]
         end
         HydroPowerModels.set_active_demand!(alldata, demand_all)
-        @info "Applied real seasonal per-stage demand" nrows nload T
+        # Reactive demand keeps the historical 0.6 scaling: demand.csv covers
+        # ACTIVE power only, and nominal qd (1.67× the historical level) makes
+        # low-pd weeks voltage-infeasible in the stage ACP solves
+        # (LOCALLY_INFEASIBLE at node 5, 2026-07-15). Same scaling on the Exa
+        # side via DR_QD_SCALER=0.6 for engine parity.
+        for data in alldata, load in values(data["powersystem"]["load"])
+            load["qd"] *= QD_SCALER
+        end
+        @info "Applied real seasonal per-stage demand" nrows nload T QD_SCALER
         return alldata
     else
         alldata = HydroPowerModels.parse_folder(CASE_DIR)
@@ -173,6 +189,14 @@ function main()
     )
 
     model = hydro_thermal_operation(alldata, params)
+    # ACP forward subproblems need non-singular voltage starts (see sddp_ac_starts.jl)
+    preset_ac_starts!(model.forward_graph)
+    # multi-attempt numerical recovery on BOTH graphs (intermittent MadNLP
+    # failures at stressed operating points survive SDDP's single-retry default;
+    # rung 2+ re-attaches a brand-new solver instance — see sddp_ac_starts.jl)
+    recovery = make_robust_recovery(madnlp_optimizer, clarabel_optimizer)
+    model.forward_graph.ext[:numerical_difficulty_callback] = recovery
+    model.backward_graph.ext[:numerical_difficulty_callback] = recovery
 
     if isfile(CUTS_FILE)
         println("Loading existing cuts: ", CUTS_FILE)
