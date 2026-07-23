@@ -138,22 +138,6 @@ The key requirements are:
 3. **Return** a struct with fields `.core`, `.model`, `.horizon`, and
    `.target_con_range`.
 
-The `HydroPowerModels` example in DecisionRulesExa.jl demonstrates this
-pattern for a full AC-OPF problem with reservoir dynamics:
-
-```julia
-# In examples/HydroPowerModels/hydro_power_exa.jl
-prob = build_hydro_de(
-    power_data,
-    hydro_data,
-    96;
-    backend        = CUDABackend(),
-    formulation    = :ac_polar,
-    deficit_cost   = 1e5,
-    target_penalty = :auto,
-)
-```
-
 ## Parallel GPU solves
 
 When training samples are independent, multiple NLP instances can be
@@ -413,21 +397,3 @@ Two actor modes are supported:
 - `:surrogate` — blends dual and critic actor gradients via explicit
   weights (`dual_actor_weight`, `critic_actor_weight`).  Useful when raw
   duals are noisy, but no longer strictly unbiased.
-
-## Full example: HydroPowerModels
-
-The `examples/HydroPowerModels/` directory in DecisionRulesExa.jl contains
-a complete AC-OPF hydrothermal scheduling example for the Bolivia test case
-— the same problem solved by DecisionRules.jl in the
-[Hydropower Scheduling](@ref) tutorial. It demonstrates:
-
-- Parsing PowerModels.jl network data and hydro reservoir parameters
-- Building a multi-stage deterministic-equivalent NLP in ExaModels
-  (DC or AC polar OPF formulations)
-- L1 + L2 penalty on target slack (δ⁺/δ⁻ splitting for smooth NLP)
-- GPU training with parallel MadNLP solves
-- Warm-start caching to prevent cascade solver failures
-- Penalty and sample-count annealing schedules
-- Embedded closed-loop training with strict reachable targets
-- Optional critic control variate with rollout-based value targets
-- W&B metric logging

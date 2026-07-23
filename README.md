@@ -278,10 +278,8 @@ julia --project -e 'using Pkg; Pkg.test()'
 | `src/score_function.jl` | Score-function gradient correction for nonsmooth/integer problems |
 | `src/parameter_duals.jl` | Dual/sensitivity helpers for parameterized JuMP models |
 | `docs/src/` | Documenter.jl manual pages |
-| `examples/HydroPowerModels/` | Bolivia hydrothermal scheduling, strict reachable policies, SDDP comparisons |
 | `examples/inventory_control/` | Inventory-control example and dynamic-programming/SDDP comparisons |
 | `examples/rocket_control/` | Rocket MPC/control example |
-| `examples/RL/` | Reinforcement-learning style hydro scripts |
 | `examples/Experimental/` | Research prototypes and robotics/control explorations |
 | `test/runtests.jl` | Package test suite |
 

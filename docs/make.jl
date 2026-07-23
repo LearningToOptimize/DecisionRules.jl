@@ -38,11 +38,6 @@ makedocs(;
             "API reference" => "api.md",
         ],
         "Part III — Case Studies" => [
-            "Hydrothermal scheduling — the Bolivian SIN" => [
-                "The planning problem" => "casestudies/hydro_problem.md",
-                "The Bolivian interconnected system" => "casestudies/hydro_bolivia.md",
-                "Training and evaluation walkthrough" => "examples/hydro.md",
-            ],
             "Rocket control" => "examples/rocket.md",
             "Stochastic lot-sizing (integer variables)" => "examples/inventory.md",
         ],
