@@ -45,16 +45,15 @@ critics, risk-averse objectives.
 [GPU acceleration](@ref "GPU Acceleration with DecisionRulesExa.jl");
 [API Reference](@ref).
 
-**Case studies.** The flagship is hydrothermal scheduling on the Bolivian
-interconnected system, in three chapters —
-[the planning problem](@ref "The long-term hydrothermal planning problem")
-(multistage AC-OPF with cascaded reservoir dynamics),
-[the instance](@ref "The Bolivian interconnected system")
-(a real grid whose counter-cyclical, storage-critical operation sits in
-the regime where convex value-of-water surrogates misprice the network),
-and [the walkthrough](@ref "Hydropower Scheduling")
-(strict TS-DDR on CPU and GPU against an SDDP baseline, under a paired
-evaluation protocol). Two further studies,
+**Case studies.** The flagship is
+[stochastic battery-storage AC optimal power flow](@ref "Stochastic battery-storage AC optimal power flow"), which defines the
+PGLib case generator, demand information pattern, battery physics, strict and
+soft target projections, true ACP model, SOC-WR backward relaxation, and paired
+PF/SDDP/TS-DDR evaluation protocol. The
+[long-term hydrothermal planning problem](@ref "The long-term hydrothermal planning problem") applies the
+same strict-target/true-ACP machinery to a cascaded multi-reservoir hydro system,
+where SDDP is essentially optimal and strict-ACP TS-DDR recovers a policy with
+almost the same true-ACP operating cost. Two further studies,
 [rocket control](@ref "Rocket Control") and
 [stochastic lot-sizing](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs"),
 exercise continuous control and mixed-integer recourse.

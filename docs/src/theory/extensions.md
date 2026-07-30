@@ -15,9 +15,9 @@ risk-averse change-of-measure variant of the gradient, ship with the
 package.
 
 !!! note "Scope"
-    The hydrothermal case study is smooth and trains with the pure strict
-    dual gradient — it uses none of these extensions. The score-function
-    correction is exercised in
+    The battery-storage case study is continuous and is designed to use the
+    pure strict dual gradient after its feasibility gates; it uses none of these
+    extensions. The score-function correction is exercised in
     [Stochastic Lot-Sizing with Fixed Ordering Costs](@ref), whose
     fixed-charge (binary) ordering decisions are exactly the situation it
     addresses.

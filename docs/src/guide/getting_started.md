@@ -83,10 +83,12 @@ As a rule of thumb:
   feasibility-guaranteeing policy — one that bounds its output to the
   one-stage reachable set ``R(x, w)`` of the dynamics. Constructing ``R``
   is problem-specific (cheap for resource-balance dynamics with box
-  bounds; the [Hydropower Scheduling](@ref) case study builds a complete
-  instance). Strict mode eliminates the target-slack penalty and its
-  tuning entirely, and the dual ``\lambda_t`` becomes the pure shadow
-  price.
+  bounds). The
+  [battery-storage AC-OPF specification](@ref "Stochastic battery-storage AC optimal power flow")
+  shows both the battery-dynamic interval and the additional network-feasibility
+  gate needed before strict mode is accepted. Strict mode eliminates the
+  target-slack penalty and its tuning entirely, and the dual ``\lambda_t``
+  becomes the pure shadow price.
 
 ## Robustness and hardware
 
@@ -106,10 +108,8 @@ As a rule of thumb:
   [the TS-DDR framework](@ref "The TS-DDR framework"),
   [SDDP and inconsistent formulations](@ref "Stochastic dual dynamic programming"),
   [extensions](@ref "Extensions: mixed gradients, critics, and risk").
-- Worked problems: the hydrothermal case study
-  ([problem](@ref "The long-term hydrothermal planning problem"),
-  [instance](@ref "The Bolivian interconnected system"),
-  [walkthrough](@ref "Hydropower Scheduling")),
+- Worked problems:
+  [stochastic battery-storage AC-OPF](@ref "Stochastic battery-storage AC optimal power flow"),
   [rocket control](@ref "Rocket Control"), and
   [stochastic lot-sizing](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs").
 - [API Reference](@ref): every exported symbol.

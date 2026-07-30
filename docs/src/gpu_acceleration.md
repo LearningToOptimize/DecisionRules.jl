@@ -273,23 +273,14 @@ reachable-set mapping), the slack variables ``\delta_t`` can be removed
 entirely. This is strict mode: target constraints are hard equalities, the duals
 are pure shadow prices, and there is no target penalty to tune.
 
-There are two safe strict paths in the hydro example.
+There are two strict deterministic-equivalent paths.
 
 **Embedded strict DE** evaluates the policy inside the NLP against realized
-reservoir decision variables:
-
-```julia
-prob = build_embedded_hydro_de(policy, power_data, hydro_data, T;
-    formulation    = :ac_polar,
-    strict_targets = true,
-)
-```
+state decision variables.
 
 Its constraint is simply ``x_t = \pi_\theta(w_t, x_{t-1}^*)``. Because the
 policy receives the realized previous state, a reachable-set map can guarantee
-that the next strict equality is feasible. The current embedded hydro oracle
-hand-codes the reachable policy Jacobian for the default single Dense head; use
-`combiner_layers = Int[]` unless that oracle is extended.
+that the next strict equality is dynamically feasible.
 
 **Regular strict DE** keeps the policy outside the NLP but rolls out targets
 from the known initial state:
@@ -304,33 +295,13 @@ then the entire strict DE target trajectory is feasible by induction. The solve
 then enforces ``x_t = \hat{x}_t`` for every stage, so the realized state path is
 exactly the reachable target path.
 
-For cascaded hydro systems (upstream→downstream water flows), the per-unit
-reachable set depends on the upstream unit's target at the same stage.  The
-`HydroReachablePolicy` handles this by computing initial targets for all units
-using worst-case upstream bounds (``K \times \bar{q}_u``), then applying a
-**cascade clamping** step that adjusts downstream targets based on the actual
-upstream release implied by the upstream target.  For turn+spill connections
-the full release is available; for turn-only connections only
-``\min(K \bar{q}_u, R_u)`` reaches the downstream unit.  This clamping is
-`@non_differentiable` — gradient flows through for non-clamped targets, and
-is zero for clamped ones (correct projected-gradient signal).
-
-The ExaModels strict DE also applies cascade clamping in `prepare_solve!` as a
-safety net: before each NLP solve, the reservoir parameter values are checked
-and clamped stage-by-stage to ensure cascade feasibility.
-
-The Exa hydro script exposing this path is:
-
-```bash
-DR_ENCODER_LAYERS=128,128 \
-DR_HEAD_LAYERS=128,128 \
-julia --project -t auto train_hydro_exa_strict.jl
-```
-
-`DR_ENCODER_LAYERS` controls recurrence over inflows. `DR_HEAD_LAYERS` controls
-the nonrecurrent state-conditioned target head; it can be used to make the
-reachable policy nonlinear in the current reservoir state without adding state
-recurrence.
+For battery storage, the charge/discharge and energy bounds give a cheap
+one-stage battery-dynamic interval. It is not the complete reachable set of an
+AC-OPF: a target can still conflict with generation, branch, voltage, or
+reactive-power limits. The
+[battery-storage specification](@ref "Stochastic battery-storage AC optimal power flow")
+therefore requires true-ACP zero-shedding tests before strict mode becomes the
+production default.
 
 ## Sequential rollout evaluation
 

@@ -108,10 +108,9 @@ the relaxation is loose, and therefore undervalues precisely the states
 whose worth derives from relieving that future stress. Whether the
 resulting error is negligible or material is a property of the
 *instance and its operating regime*, not of the algorithm. The
-[hydropower case study](@ref "The Bolivian interconnected system")
-works through a concrete mechanism — a conic relaxation of the network
-constraints mispricing stored energy — on an instance family chosen to
-sit in the regime where the question is live.
+[battery-storage AC-OPF study](@ref "Stochastic battery-storage AC optimal power flow")
+tests the concrete mechanism of a conic network relaxation mispricing the
+locational value of stored energy.
 
 ## The bound and the forward cost
 
@@ -136,19 +135,17 @@ Their relative difference,
      {\underline{z}^{\mathrm{rel}}},
 ```
 
-is the **bound-versus-forward gap**. It conflates two contributions that
-cannot be separated without further work: ordinary SDDP suboptimality
-(finitely many cuts) and the **cost of convexification** — the systematic
-error of pricing the future on a relaxed model. On instances where the
-relaxation is nearly tight, the gap collapses to the first contribution
-and SDDP is close to unbeatable; as the relaxation loosens, the gap grows
-and becomes *headroom*: expected cost that a method free of the
-convexification assumption is, at least in principle, able to recover.
-TS-DDR trains directly on the nonconvex stage problems — its gradient
-comes from duals of the *true* stage solves, not from a relaxation — so
-the gap is the natural ex-ante measure of how much room such a method has
-on a given instance. The hydropower case study reports this gap
-explicitly for its instance family.
+is the **bound-versus-forward gap**. It conflates ordinary SDDP
+suboptimality, relaxation error, and finite-cut error. It is a diagnostic,
+not recoverable policy headroom: the relaxed bound can be attained only by
+network states that ACP cannot realize.
+
+The relevant empirical room compares the SDDP ACP forward cost with a
+paired perfect-foresight ACP solve over the same full horizon. Even that
+quantity is only an information-relaxation upper bound on possible
+nonanticipative improvement. The
+[battery-storage protocol](@ref "Stochastic battery-storage AC optimal power flow")
+defines both quantities and keeps them separate.
 
 Two disciplines keep the comparison honest, and both are enforced in the
 case studies:

@@ -38,6 +38,8 @@ makedocs(;
             "API reference" => "api.md",
         ],
         "Part III — Case Studies" => [
+            "Battery-storage AC-OPF" => "casestudies/battery_storage_opf.md",
+            "Bolivia hydro problem" => "casestudies/hydro_problem.md",
             "Rocket control" => "examples/rocket.md",
             "Stochastic lot-sizing (integer variables)" => "examples/inventory.md",
         ],

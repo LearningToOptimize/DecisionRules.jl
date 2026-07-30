@@ -56,12 +56,12 @@ solution methods differ precisely in how they treat them:
 
 - **Intertemporal coupling through the state.** The only channel through
   which stage ``t`` affects stage ``t+1`` is ``x_t``. A resource stored in
-  the state (water in a reservoir, inventory on a shelf, fuel in a tank)
+  the state (energy in a battery, inventory on a shelf, fuel in a tank)
   has an *opportunity cost* — the expected future cost avoided by carrying
   it forward — that no single-stage view can price.
 - **Constrained actions.** The feasible set ``\mathcal{X}_t`` is itself an
   optimization-level object — possibly a full nonconvex program, as in
-  the hydrothermal case study. Any learned policy must produce
+  the battery-storage AC-OPF case study. Any learned policy must produce
   decisions that *satisfy it exactly*, not approximately.
 
 ## The dynamic-programming recursion
@@ -174,8 +174,8 @@ two complementary quantities, used throughout the case studies:
   scenarios. This is the only number that treats every method — cuts,
   linear rules, deep rules — on identical footing, and it is the primary
   metric of the case studies (see the
-  [paired evaluation protocol](@ref "Paired evaluation protocol") used in
-  the hydrothermal study).
+  paired evaluation protocol in the
+  [battery-storage AC-OPF study](@ref "Stochastic battery-storage AC optimal power flow")).
 
 The gap between the two jointly measures the suboptimality of the policy
 *and* the fidelity of the model used to bound it — and keeping those two

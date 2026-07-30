@@ -58,3 +58,4 @@ settings.json
 *-backup
 *.cuts.json.stale_stronggrid
 *strong.json
+.claude/settings.local.json

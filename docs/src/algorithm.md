@@ -193,10 +193,10 @@ across the reachable interval. The bounds carry no gradient; the gradient path
 is solely through the network output, exactly as in the standard TS-DDR
 pipeline. Constructing ``R`` is problem-specific. It is cheap whenever the
 dynamics are linear in the controls with box bounds — resource-balance
-equations are the canonical case — and the hydropower case study works out a
-complete instance, cascade interactions included, in
-[One-stage reachable sets](@ref) and its `HydroReachablePolicy`
-implementation.
+equations are the canonical case. The
+[battery-storage study](@ref "Stochastic battery-storage AC optimal power flow")
+derives the battery-dynamic interval and explains why a network-constrained OPF
+still needs an empirical strict-feasibility gate.
 
 ### Validity in every formulation, by induction
 
@@ -265,9 +265,11 @@ criterion: there is no penalty hyperparameter to tune, no annealing schedule,
 and the dual ``\lambda_t`` is the exact shadow price of the target — the
 gradient signal is uncontaminated by a regularization term.
 
-In the [Hydropower Scheduling](@ref) case study, strict mode with a
-reachable-set policy achieves competitive simulation costs out of the box,
-with no penalty schedule, no annealing, and no hyperparameter search.
+In the
+[battery-storage AC-OPF study](@ref "Stochastic battery-storage AC optimal power flow"),
+strict mode is accepted only after representative true-ACP rollouts solve with
+zero load shedding. This distinguishes dynamic reachability from full network
+feasibility.
 
 ## Evaluation semantics
 
