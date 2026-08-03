@@ -27,9 +27,6 @@ const NUM_STAGES = REPORT_STAGES + RM_STAGES
 const FORMULATION = ACPPowerModel
 const FORMULATION_B = SOCWRConicPowerModel
 
-include(joinpath(HYDRO_DIR, "hydro_solution_schema.jl"))
-using .HydroSolutionSchema
-
 # The frozen case has DETERMINISTIC demand: `0.6 x PowerModels.json` active and
 # reactive load at every stage, and inflow as the only uncertainty. This is
 # asserted rather than assumed — a demand file appearing in the case directory
@@ -133,20 +130,6 @@ sampling_scheme = SDDP.Historical(historical_scenarios)
 # already solved — no extra solve, and the recorded costs are bit-identical to
 # the un-instrumented run (verified against the existing shard costs).
 const PHYSICAL_AUDIT = get(ENV, "DR_PHYSICAL_AUDIT", "0") == "1"
-# `DR_SOLUTION_DUMP=1` additionally records EVERY named primal variable of every
-# simulated stage, in the shared long format of `hydro_solution_schema.jl`,
-# together with the decision trace that reproduces it. This is what lets the
-# frozen cut policy's within-stage solution be differenced against a replay of
-# the same decisions through the serialized JuMP stage model — a one-stage model
-# carries no cuts and cannot reconstruct SDDP's decision on its own, so the
-# decision has to come from here.
-const SOLUTION_DUMP = get(ENV, "DR_SOLUTION_DUMP", "0") == "1"
-SOLUTION_DUMP && !PHYSICAL_AUDIT &&
-    error("DR_SOLUTION_DUMP=1 requires DR_PHYSICAL_AUDIT=1 (it rides on the same recorders)")
-# Number of stages whose full solution is dumped. Defaults to the whole
-# simulated horizon, not the reported window: the look-ahead stages are part of
-# the model being verified even though no cost is reported from them.
-const SOLUTION_DUMP_STAGES = parse(Int, get(ENV, "DR_SOLUTION_DUMP_STAGES", string(NUM_STAGES)))
 println("\nSimulating $n_sim scenarios with SDDP.Historical...")
 results = if !PHYSICAL_AUDIT
     HydroPowerModels.simulate(m, n_sim; sampling_scheme=sampling_scheme)
@@ -186,18 +169,6 @@ else
             ),
             # ── solve status of the stage subproblem ───────────────────────
             :status => sp -> string(JuMP.termination_status(sp)),
-            # ── FULL primal solution, by variable NAME ─────────────────────
-            # Recorded only under DR_SOLUTION_DUMP because it is one entry per
-            # variable per stage. Reading the variables by their serialized
-            # names — the same names `export_subproblem_mof.jl` writes and
-            # `verify_full_solution_parity.jl` reads back — is what makes the
-            # cross-engine comparison a comparison of the same objects rather
-            # than of two orderings that happen to line up.
-            :named_solution => sp -> SOLUTION_DUMP ?
-                Dict{String,Float64}(
-                    JuMP.name(v) => JuMP.value(v) for v in JuMP.all_variables(sp)
-                    if !isempty(JuMP.name(v))
-                ) : Dict{String,Float64}(),
         ),
     )
     Dict{Symbol,Any}(
