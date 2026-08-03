@@ -10,7 +10,7 @@
 # simplifies, it says so.
 #
 # The case, the numbers and the honest reading of the comparison are in
-# [Results](@ref); the mathematics is in
+# [Results](@ref "Results: TS-DDR versus SDDP"); the mathematics is in
 # [The long-term hydrothermal planning problem](@ref).
 
 # ## Setup
@@ -24,7 +24,7 @@ using Flux
 using Random
 using Statistics
 
-HYDRO_DIR = joinpath(dirname(dirname(dirname(@__DIR__))), "examples", "HydroPowerModels") #hide
+HYDRO_DIR = joinpath(pkgdir(DecisionRules), "examples", "HydroPowerModels") #hide
 nothing #hide
 
 # ## 1. The system
@@ -192,7 +192,7 @@ DecisionRules.train_multistage(
 # The published run is the same construction at full scale — a longer horizon,
 # a training schedule of several phases, and a GPU. How each method arrives at a
 # price for water is [Valuing water: two approaches](@ref); what the comparison
-# measured, and what it does and does not say, is [Results](@ref).
+# measured, and what it does and does not say, is [Results](@ref "Results: TS-DDR versus SDDP").
 #
 # To actually run it, the example READMEs of `DecisionRules.jl` and
 # `DecisionRulesExa.jl` carry the commands, from verifying the case through to

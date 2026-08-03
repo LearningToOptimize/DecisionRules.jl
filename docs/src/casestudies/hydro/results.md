@@ -1,4 +1,4 @@
-# Results
+# Results: TS-DDR versus SDDP
 
 ```@meta
 CurrentModule = DecisionRules
@@ -124,9 +124,27 @@ for hydro exactly when hydro is most valuable.
 <img src="../../assets/hydro_stagewise_physical.png" alt="Stagewise physical comparison" width="100%"/>
 ```
 
-The same story appears in the price of energy. TS-DDR's marginal cost of serving
-load sits *below* SDDP's for most of the horizon and rises *above* it at the
-peak: cheaper while the water lasts, scarcer once it does not.
+The same story appears in the price of energy, and it appears *cyclically* rather
+than as a single drift. The difference in marginal cost tracks the reservoir
+cycle: TS-DDR prices energy **below** SDDP while the reservoirs are refilling,
+and **above** SDDP in the weeks just after each storage peak, when it is drawing
+down a stock it did not build as high.
+
+| stages | sign | mean difference |
+|---|---|---|
+| 1–15 | TS-DDR cheaper | −33.5 |
+| 20–30 | **TS-DDR dearer** | +14.0 |
+| 34–64 | TS-DDR cheaper | −11.4 to −38.8 |
+| 65–83 | **TS-DDR dearer** | +10.8 |
+| 93–96 | **TS-DDR dearer** | +23.5 |
+
+Storage peaks near stages 15 and 63, and the dear bands open at 20 and 65 — just
+after each peak. The last band is both the largest and the final one, which is
+where the cumulative cost difference is actually paid.
+
+The two price *levels* differ by well under a percent and are not distinguishable
+by eye, which is why the difference is drawn on its own axis below them rather
+than left to the reader to infer from two overlaid curves.
 
 ```@raw html
 <img src="../../assets/hydro_energy_price.png" alt="Marginal cost of energy" width="100%"/>

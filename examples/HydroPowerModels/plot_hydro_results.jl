@@ -188,11 +188,28 @@ function figure_training()
     panel = dropmissing(history, "metrics/rollout_objective_no_target_penalty")
     epochs = dropmissing(history, "metrics/epoch_objective")
 
+    # Reserve empty bands above and below the data: the phase annotations live in
+    # the upper one and the legend in the lower right, so neither can land on the
+    # curves or on each other. Placing both at :topright previously overlapped the
+    # annotations with the legend box and clipped the last phase at the frame.
+    loss_lo = minimum(skipmissing(loss[!, "metrics/training_loss"]))
+    loss_hi = maximum(skipmissing(loss[!, "metrics/training_loss"]))
+    loss_span = loss_hi - loss_lo
+    annotation_y = loss_hi + 0.11 * loss_span
+
+    # Pad the time axis so the last phase's centred annotation cannot run into the
+    # frame. Both panels get the SAME limits: they are stacked and read as one
+    # time axis, so padding only the top one would misalign the restart lines.
+    hours_max = maximum(loss.active_seconds) / 3600
+    xlimits = (-0.02 * hours_max, 1.05 * hours_max)
+
     top = plot(;
         ylabel = "126-stage objective",
         title = "Training from random initialisation — " *
                 join(phase_label.(selected), " → "),
-        legend = :topright, grid = :y, gridalpha = 0.15,
+        legend = :bottomright, grid = :y, gridalpha = 0.15,
+        ylims = (loss_lo - 0.20 * loss_span, loss_hi + 0.22 * loss_span),
+        xlims = xlimits,
     )
     # Raw stochastic samples, faint. Smoothing is per STAGE so it resets at each
     # restart, and per trajectory so its noise level does not track nt.
@@ -217,13 +234,14 @@ function figure_training()
     end
     for (i, b) in enumerate(boundaries)
         vline!(top, [b]; color = C_ACCENT, linestyle = :dash, linewidth = 1.2,
-               label = i == 1 ? "restart (new stage: optimizer, LR phase, warm-up reset)" : "")
+               label = i == 1 ? "restart (optimiser, LR schedule and warm-up reset)" : "")
     end
 
     bottom = plot(;
         xlabel = "active wall time (h)",
         ylabel = "96-stage fixed-panel cost",
         legend = :topright, grid = :y, gridalpha = 0.15,
+        xlims = xlimits,
     )
     hours = panel.active_seconds ./ 3600
     plot!(bottom, hours, panel[!, "metrics/rollout_objective_no_target_penalty"];
@@ -245,15 +263,24 @@ function figure_training()
     end
 
     # Stage annotations: nt and the learning-rate band actually used.
+    #
+    # The schedule RAMPS UP from LR/100 across the warm-up before the cosine
+    # decay begins, so a plain `minimum` over the logged rate returns the warm-up's
+    # first step rather than the schedule's floor — for phase 1 that is
+    # 1e-3 * (0.01 + 0.99/20) = 6e-5, which reads as a decay target it never was.
+    # The floor after the peak is the band the phase actually descended through,
+    # and it stays truthful when a phase stops before the cosine completes.
     running = 0.0
     for stage in selected
         rows = history[history.stage .== stage, :]
         nt = Int(first(skipmissing(rows[!, "metrics/num_train_per_batch"])))
         lrs = collect(skipmissing(rows[!, "metrics/lr"]))
+        lr_peak = maximum(lrs)
+        lr_floor = minimum(@view lrs[argmax(lrs):end])
         mid = (running + per_stage[stage]["active_seconds"] / 2) / 3600
-        annotate!(top, mid, maximum(skipmissing(loss[!, "metrics/training_loss"])),
+        annotate!(top, mid, annotation_y,
                   text(@sprintf("%s\nsample %d\nLR %.0e→%.0e",
-                                phase_label(stage), nt, maximum(lrs), minimum(lrs)),
+                                phase_label(stage), nt, lr_peak, lr_floor),
                        7, C_INK, :center))
         running += per_stage[stage]["active_seconds"]
     end
@@ -273,12 +300,13 @@ function figure_distributions(paired, statistics)
     sddp = Float64.(paired.sddp_cost)
 
     figure = plot(;
-        xlabel = "96-stage true-ACP operating cost (USD)",
+        xlabel = "96-stage true-ACP operating cost (objective units)",
         ylabel = "density",
         title = @sprintf("Cost over %d paired inflow scenarios", nrow(paired)),
-        legend = :topright, grid = :y, gridalpha = 0.15, size = (1000, 420),
+        legend = :topright, grid = :y, gridalpha = 0.15, size = (1000, 460),
+        left_margin = 12Plots.mm, bottom_margin = 10Plots.mm,
     )
-    for (label, costs, colour) in (("SDDP", sddp, C_SDDP), ("TS-DDR (C3)", tsddr, C_TSDDR))
+    for (label, costs, colour) in (("SDDP", sddp, C_SDDP), ("TS-DDR", tsddr, C_TSDDR))
         xs, dens = gaussian_kde(costs)
         plot!(figure, xs, dens; label = @sprintf("%s   mean %.0f, sd %.0f", label,
                                                  mean(costs), std(costs)),
@@ -307,10 +335,13 @@ function figure_paired_differences(paired, statistics)
     wins = statistics["wins_losses_ties"]["tsddr_wins"]
 
     figure = plot(;
-        xlabel = "paired difference, TS-DDR − SDDP, same scenario (USD)",
+        xlabel = "paired difference, TS-DDR − SDDP, same scenario (objective units)",
         ylabel = "density",
         title = "Paired differences — the comparison the evaluation is designed to make",
-        legend = :topright, grid = :y, gridalpha = 0.15, size = (1000, 440),
+        # The mass sits to the RIGHT of zero, so :topright puts the legend on top
+        # of the peak. The left half of this axis is empty by construction.
+        legend = :topleft, grid = :y, gridalpha = 0.15, size = (1000, 470),
+        left_margin = 12Plots.mm, bottom_margin = 10Plots.mm,
     )
     xs, dens = gaussian_kde(diffs)
     plot!(figure, xs, dens; color = C_TSDDR, linewidth = 2,
@@ -339,7 +370,7 @@ function figure_stagewise()
     reported = stagewise[stagewise.stage .<= 96, :]
 
     top = plot(;
-        ylabel = "cumulative cost difference (USD)",
+        ylabel = "cumulative cost difference\n(objective units)",
         title = "Where the cost difference is incurred — means over 500 paired scenarios",
         legend = :bottomright, grid = :y, gridalpha = 0.15,
     )
@@ -352,17 +383,17 @@ function figure_stagewise()
     plot!(middle, reported.stage, reported.sddp_reservoir2;
           color = C_SDDP, linewidth = 2, label = "SDDP")
     plot!(middle, reported.stage, reported.tsddr_reservoir2;
-          color = C_TSDDR, linewidth = 2, label = "TS-DDR (C3)")
+          color = C_TSDDR, linewidth = 2, label = "TS-DDR")
 
     bottom = plot(; xlabel = "stage (week)", ylabel = "thermal generation (MW)",
                   legend = :topright, grid = :y, gridalpha = 0.15)
     plot!(bottom, reported.stage, reported.sddp_thermal_MW;
           color = C_SDDP, linewidth = 2, label = "SDDP")
     plot!(bottom, reported.stage, reported.tsddr_thermal_MW;
-          color = C_TSDDR, linewidth = 2, label = "TS-DDR (C3)")
+          color = C_TSDDR, linewidth = 2, label = "TS-DDR")
 
     figure = plot(top, middle, bottom; layout = (3, 1), size = (1000, 900),
-                  left_margin = 9Plots.mm, bottom_margin = 6Plots.mm)
+                  left_margin = 14Plots.mm, bottom_margin = 8Plots.mm)
     path = joinpath(ASSETS, "hydro_stagewise_physical.png")
     savefig(figure, path)
     println("Saved: $path")
@@ -388,8 +419,11 @@ It is a *system* price, not a locational one: the point of the figure is when
 energy is expensive, and how the two policies' water decisions move that in
 time. Per-bus detail is in the dumps for anyone who wants it.
 
-`price_active` is the dual of a bus's active-power balance in per-unit power per
-stage; multiplying by `baseMVA = 100` puts it in USD per MW per stage.
+`price_active` is the dual of a bus's active-power balance, in objective units
+per per-unit power per stage; dividing by `baseMVA = 100` would put it per MW.
+The objective's own unit is whatever the case's cost coefficients are denominated
+in, which the case does not state, so it is not called a currency here — the
+load-shedding price of 6000 is the reference that makes the level interpretable.
 """
 function price_series()
     compact = joinpath(RESULTS, "stagewise_prices.csv")
@@ -449,6 +483,64 @@ function price_series()
     return frame
 end
 
+"""
+    price_bands(prices; min_run=3) -> Vector{NamedTuple}
+
+Contiguous runs of constant sign in the per-stage price difference
+`TS-DDR − SDDP`, keeping only runs of at least `min_run` stages.
+
+This exists because the obvious summary is misleading. Bucketing the horizon
+into equal segments and averaging reports a smooth drift from cheaper to dearer;
+the difference actually alternates in bands tied to the reservoir cycle, and
+fixed buckets straddle them. Runs of constant sign are the structure that is
+there, so the prose quotes this rather than a bucketing chosen in advance.
+
+`min_run` drops one- and two-stage sign flips, which are sampling noise on a
+ten-scenario mean rather than a change in behaviour.
+"""
+function price_bands(prices::DataFrame; min_run::Int = 3)
+    delta = (.-prices.tsddr_price) .- (.-prices.sddp_price)
+    stages = prices.stage
+    bands = NamedTuple[]
+    i = 1
+    while i <= length(delta)
+        j = i
+        while j < length(delta) && (delta[j + 1] > 0) == (delta[i] > 0)
+            j += 1
+        end
+        if j - i + 1 >= min_run
+            push!(bands, (first_stage = stages[i], last_stage = stages[j],
+                          n = j - i + 1, dearer = delta[i] > 0,
+                          mean = mean(view(delta, i:j))))
+        end
+        i = j + 1
+    end
+    return bands
+end
+
+"""
+    report_price_bands()
+
+Print the sign bands of the price difference.
+
+The case study quotes these numbers, so they are printed by the script that
+draws the figure rather than derived once by hand: a table transcribed into prose
+has no way to notice when the evidence beneath it changes.
+"""
+function report_price_bands()
+    prices = price_series()
+    prices === nothing && return nothing
+    all(c -> Symbol(c) in propertynames(prices), ("sddp_price", "tsddr_price")) ||
+        return nothing
+    println("\nPrice difference (TS-DDR − SDDP), contiguous sign bands of >= 3 stages:")
+    for b in price_bands(prices)
+        @printf("  stages %3d-%-3d (%2d stages)  %-14s  mean %+7.1f\n",
+                b.first_stage, b.last_stage, b.n,
+                b.dearer ? "TS-DDR dearer" : "TS-DDR cheaper", b.mean)
+    end
+    return nothing
+end
+
 function figure_prices()
     prices = price_series()
     if prices === nothing
@@ -459,25 +551,63 @@ function figure_prices()
     # The recorded dual is of the balance AS STORED, which is the NEGATIVE of the
     # conventional price (see PRICE_CLASSES). Negating puts "expensive" up, where
     # a reader expects it.
-    figure = plot(;
-        xlabel = "stage (week)",
-        ylabel = "marginal cost of serving load\n(objective units per pu per stage)",
-        title = "What energy is worth, week by week" *
-                (:n_scenarios in propertynames(prices) ?
-                 "  ($(Int(first(prices.n_scenarios))) paired scenario(s))" : ""),
-        legend = :topright, grid = :y, gridalpha = 0.15, size = (1000, 460),
+    n_paired = :n_scenarios in propertynames(prices) ?
+               Int(first(prices.n_scenarios)) : 0
+    suffix = n_paired == 0 ? "" :
+             "  ($n_paired paired scenario$(n_paired == 1 ? "" : "s"))"
+
+    has_both = all(c -> Symbol(c) in propertynames(prices),
+                   ("sddp_price", "tsddr_price"))
+
+    # LEVELS. Drawn on the data's own scale. Earlier versions put the
+    # load-shedding price (6000) on this axis as a reference line, which set the
+    # y-range to [0, 6000] and squeezed the entire signal — a band about 120 wide
+    # — into an unreadable sliver at the bottom. The reference belongs in words:
+    # serving load costs roughly a quarter of what shedding it does, which is why
+    # nothing is shed anywhere in this study.
+    # Negate once, here: the recorded dual is of the balance as stored, and every
+    # panel below plots the conventional price.
+    series = Dict(col => .-prices[!, Symbol(col)]
+                  for col in ("sddp_price", "tsddr_price")
+                  if Symbol(col) in propertynames(prices))
+
+    levels = plot(;
+        ylabel = "marginal cost of load\n(objective units per pu per stage)",
+        title = "What energy is worth, week by week" * suffix,
+        legend = :topright, grid = :y, gridalpha = 0.15,
     )
     for (col, label, colour) in (("sddp_price", "SDDP", C_SDDP),
-                                 ("tsddr_price", "TS-DDR (C3)", C_TSDDR))
-        Symbol(col) in propertynames(prices) || continue
-        plot!(figure, prices.stage, .-prices[!, Symbol(col)];
+                                 ("tsddr_price", "TS-DDR", C_TSDDR))
+        haskey(series, col) || continue
+        plot!(levels, prices.stage, series[col];
               color = colour, linewidth = 2, label = label)
     end
-    # The load-shedding price is the only other price on this scale, and it is
-    # what makes the level interpretable: serving load costs a fraction of what
-    # shedding it does, which is why no load is shed anywhere in this study.
-    hline!(figure, [6000.0]; color = C_ACCENT, linestyle = :dash, linewidth = 1.5,
-           label = "load-shedding price (6000)")
+    annotate!(levels, first(prices.stage), maximum(series["sddp_price"]),
+              text("load shedding is priced at 6000, far above this axis",
+                   7, C_INK, :left, :top))
+
+    # DIFFERENCE. The levels differ by well under a percent, so the sign of the
+    # difference — cheaper early, dearer at the end — is not legible from two
+    # overlaid curves however they are scaled. It is the claim the text makes, so
+    # it gets its own panel rather than a reader's benefit of the doubt.
+    panels = Any[levels]
+    if has_both
+        delta = series["tsddr_price"] .- series["sddp_price"]
+        gap = plot(; xlabel = "stage (week)",
+                   ylabel = "TS-DDR − SDDP",
+                   legend = :topleft, grid = :y, gridalpha = 0.15)
+        plot!(gap, prices.stage, delta; color = C_TSDDR, linewidth = 2,
+              fill = (0, 0.20, C_TSDDR), label = "difference in marginal cost")
+        hline!(gap, [0.0]; color = C_INK, linewidth = 1.2, label = "")
+        push!(panels, gap)
+    else
+        plot!(levels; xlabel = "stage (week)")
+    end
+
+    figure = length(panels) == 1 ? plot(panels[1]; size = (1000, 480)) :
+             plot(panels...; layout = grid(2, 1; heights = [0.62, 0.38]),
+                  size = (1000, 700))
+    plot!(figure; left_margin = 14Plots.mm, bottom_margin = 10Plots.mm)
     path = joinpath(ASSETS, "hydro_energy_price.png")
     savefig(figure, path)
     println("Saved: $path")
@@ -510,6 +640,7 @@ function main()
     @printf("  paired difference +%.5f, SE %.5f, t = %.2f\n", d["mean"], d["se"], d["t"])
     @printf("  relative %+.6f%%, 95%% CI [%+.6f%%, %+.6f%%]\n",
             d["relative_gap_pct"], d["ci95_pct"][1], d["ci95_pct"][2])
+    report_price_bands()
 end
 
 (abspath(PROGRAM_FILE) == @__FILE__) && main()

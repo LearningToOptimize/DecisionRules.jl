@@ -42,7 +42,7 @@ against SDDP on 500 shared inflow scenarios under true AC physics:
 | TS-DDR, from scratch | **314,023** |
 
 A difference of **+0.152%** — statistically unambiguous, practically small, and
-in SDDP's favour. Not a tie, and not a win: the [Results](@ref) page says so in
+in SDDP's favour. Not a tie, and not a win: the [Results](@ref "Results: TS-DDR versus SDDP") page says so in
 those words and refuses the three obvious overstatements.
 
 The interesting part is not the number but the mechanism. The learned policy
@@ -58,7 +58,7 @@ than merely reported.
 |---|---|
 | [The problem](@ref "The long-term hydrothermal planning problem") | the planning problem itself: reservoir dynamics, cascades, AC network physics, and why the value of water is both locational and temporal |
 | [Valuing water: two approaches](@ref) | how SDDP and TS-DDR each arrive at a price for water, what each assumes, and what is held identical so the comparison is about the methods |
-| [Results](@ref "Results") | the measured comparison, its statistics, the physical mechanism behind the difference, and an honest reading |
+| [Results](@ref "Results: TS-DDR versus SDDP") | the measured comparison, its statistics, the physical mechanism behind the difference, and an honest reading |
 | [Walkthrough](@ref "Walkthrough") | a runnable, few-minute version on CPU: build the stage problems, construct the policy, roll out, read the value of water, take some gradient steps |
 
 Everything needed to reproduce the published numbers — the case, both trained

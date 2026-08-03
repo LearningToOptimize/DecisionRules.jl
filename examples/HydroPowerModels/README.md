@@ -34,8 +34,13 @@ files are and what to run.
   every reservoir at zero. That is the state the published result was produced
   from, and the input bytes are not repaired.
 - Physical load shedding is the per-bus active-balance slack `deficit[b]`,
-  priced at `6000 USD/(pu·stage)` (`60 USD/MWh × 100 MVA`). Reactive balance is
-  **hard** — there is no reactive slack anywhere.
+  priced at `6000` per pu per stage (`cost_deficit = 60 × baseMVA = 100`).
+  The case files do not declare a currency for their cost coefficients, so costs
+  and prices are reported in objective units here and in the figures rather than
+  named as a currency. `case_manifest.json` still records the derivation in the
+  upstream form (`60 USD/MWh × 100`), because the manifest is a frozen artifact
+  that is verified by hash and is not edited for presentation.
+  Reactive balance is **hard** — there is no reactive slack anywhere.
 - 126 stages are simulated; costs are reported over the first 96. The 30-stage
   tail is a look-ahead buffer that keeps the reported window free of
   end-of-horizon reservoir dumping.

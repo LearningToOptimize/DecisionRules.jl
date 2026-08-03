@@ -11,7 +11,7 @@ the general problem of [Multistage stochastic optimization](@ref) with the
 state given by stored water, the uncertainty by river inflows, and the
 stage feasibility set by a nonconvex AC optimal power flow. The system the
 case study runs on is presented in
-[Results](@ref); how each policy arrives at a price for water is
+[Results](@ref "Results: TS-DDR versus SDDP"); how each policy arrives at a price for water is
 [Valuing water: two approaches](@ref); a runnable version is
 [Walkthrough](@ref).
 
