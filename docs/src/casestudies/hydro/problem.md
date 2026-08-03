@@ -11,14 +11,16 @@ the general problem of [Multistage stochastic optimization](@ref) with the
 state given by stored water, the uncertainty by river inflows, and the
 stage feasibility set by a nonconvex AC optimal power flow. The system the
 case study runs on is presented in
-[The Bolivian interconnected system](@ref); the training and evaluation
-walkthrough is [Hydropower Scheduling](@ref).
+[Results](@ref); how each policy arrives at a price for water is
+[Valuing water: two approaches](@ref); a runnable version is
+[Walkthrough](@ref).
 
 ## Stages, state, uncertainty, decisions
 
 Time is discretized into **weekly stages** ``t = 1, \ldots, T`` (each stage
-represents 168 hours of operation; the case study trains on ``T = 126``
-stages, roughly two and a half years). At each stage:
+the case study trains on ``T`` stages spanning several years, and reports over
+a shorter window so the reported horizon is free of end-of-horizon effects). At
+each stage:
 
 - **State** — the vector of reservoir volumes
   ``x_t = (v_{r,t})_{r \in \mathcal{R}} \in \mathbb{R}^{n_{\mathrm{hyd}}}``,
@@ -27,8 +29,9 @@ stages, roughly two and a half years). At each stage:
   ``w_t = (w_{r,t})_{r \in \mathcal{R}}``, revealed at the start of the
   stage. Inflows are strongly seasonal and spatially correlated across the
   basin, so realizations are drawn as *joint* scenarios (see
-  [Uncertainty Sampling](@ref)); demand may follow a deterministic
-  seasonal profile or be sampled as an additional uncertainty.
+  [Uncertainty Sampling](@ref)). Demand follows a fixed profile: inflow is the
+  only uncertainty, which keeps the comparison a statement about how the two
+  methods value **water**.
 - **Decisions** — the stage dispatch ``u_t``: thermal generation
   ``p_{g,t}`` (and reactive ``q_{g,t}``), turbined outflow ``q_{r,t}``,
   spillage ``s_{r,t}``, load-shedding (deficit) variables, and the AC
@@ -43,18 +46,23 @@ length). For each reservoir ``r``,
 
 ```math
 v_{r,t} \;=\; v_{r,t-1}
-  + K \Bigl( w_{r,t} - q_{r,t} - s_{r,t}
-  + \sum_{u \in \mathcal{U}_r} q_{u,t}
-  + \sum_{u \in \mathcal{S}_r} s_{u,t} \Bigr),
+  + K \Bigl( w_{r,t} - q_{r,t}
+  + \sum_{u \in \mathcal{U}_r} q_{u,t} \Bigr)
+  - s_{r,t} + \sum_{u \in \mathcal{S}_r} s_{u,t},
 \qquad
 v_{r,t} \in [\underline{v}_r,\, \overline{v}_r],
 ```
 
 where
 
-- ``K`` is the **flow-to-volume conversion factor** (in the case study,
-  ``K = 0.0036``: a flow of 1 m³/s sustained for one hour is
-  0.0036 hm³);
+- ``K`` is the **flow-to-volume conversion factor**: the volume accumulated by
+  a unit flow sustained over one stage. It therefore scales with the stage
+  duration, which for long-term planning is long — the case study uses weekly
+  stages — and the whole water balance is proportional to it;
+- note that **turbine flow is scaled by ``K`` and spill is not**: inflow and
+  turbined outflow are rates (m³/s) while spill is already carried as a volume
+  in this formulation. The asymmetry is HydroPowerModels' convention and is
+  reproduced exactly by every engine here;
 - ``\mathcal{U}_r`` is the set of plants whose **turbined** water feeds
   ``r``, and ``\mathcal{S}_r`` the set whose **spilled** water does — the
   two sets need not coincide (some diversions bypass the downstream
@@ -223,17 +231,23 @@ u_r \;=\; \min\Bigl(\overline{v}_r,\;
 
 with ``\overline{s}_r`` the spill bound; when spillage is unbounded,
 ``\ell_r = \underline{v}_r`` — the reservoir can always be drawn down to its
-physical minimum. A feasibility-guaranteeing policy
-(`HydroReachablePolicy` in the walkthrough) maps its network output
-``z_r`` into this interval through a sigmoid,
+physical minimum. A policy that must emit attainable targets therefore has a
+natural construction available: squash an unconstrained output into this
+interval,
 
 ```math
 \hat{v}_r \;=\; \ell_r + (u_r - \ell_r)\,\sigma(z_r),
 ```
 
-with the bounds ``\ell_r, u_r`` computed from the physics and excluded from
-differentiation (`@non_differentiable`): the gradient path is solely through
-``\sigma(z_r)``.
+The bounds ``\ell_r, u_r`` are functions of the incoming state and the realized
+inflow, and they **are differentiated**. An earlier implementation declared them
+non-differentiable, which silently truncated ``\partial \hat v_r / \partial
+v_r`` to the ``\sigma`` term alone; measured against finite differences over the
+full 126-stage horizon, that truncated gradient carried 5.9% of the true
+magnitude and pointed 48 degrees away from it, and the error compounds with the
+horizon. Restoring the path through ``\ell_r`` and ``u_r`` reproduces the finite
+difference to `cos = 1.000000` and `‖AD‖/‖FD‖ = 1.000000`. See
+[The gradient must flow through the reachable map](@ref).
 
 ### Cascade-aware clamping
 
@@ -264,40 +278,17 @@ Two assumptions are documented for this scheme:
   unit's own incoming cascade contribution, which is conservative
   (underestimates the release) for multi-level chains — and exact for the
   Bolivian topology, whose three links are all single-level.
-- **No gradient through binding clamps**: like the bounds, the clamping step
-  is `@non_differentiable`; when a clamp binds, the dependence of the
-  downstream target on the upstream target is not differentiated (a
-  projected-gradient signal).
+- **The clamp is a real dependence, not a projection.** Where it binds, the
+  downstream reachable set genuinely moves with the upstream decision — one more
+  unit released above is one more unit the unit below can hold — and where the
+  turbine cap binds instead, it does not. Both branches matter to any method that
+  differentiates through this map; see
+  [Valuing water: two approaches](@ref "The gradient must flow through the reachable map").
 
-With these bounds and clamps, every target is one-stage reachable from the
-state the policy conditioned on, which is precisely the condition under
-which strict training is well-posed in every formulation (see
+With these bounds and clamps, a target chosen inside the interval is reachable in
+one stage from the state it was conditioned on — the condition under which a hard
+target equality is well posed at all (see
 [Validity in every formulation, by induction](@ref)).
-
-## Convexification and what it misprices
-
-The classical solution method for LTHD is SDDP
-([Stochastic dual dynamic programming](@ref)), which requires each stage
-problem to be **convex** in the incoming state so that value-function cuts
-are valid. With AC physics in the stage, practice substitutes a convex
-relaxation — here the second-order-cone (SOC-WR) relaxation — in the
-backward pass, and simulates the resulting policy under the true AC
-equations in the forward pass: SDDP with *inconsistent formulations*.
-
-The substitution is not free. The SOC relaxation is exact on radial,
-lightly loaded networks; on meshed networks with high ``r/x`` ratios,
-binding voltage bands, and load concentrated far from generation, it
-admits flows the physical network cannot realize and therefore
-**underprices delivery** into the stressed region. A value-of-water
-surface computed against the relaxed network inherits that mispricing
-precisely where storage decisions are most consequential. The measurable
-symptom is the **bound-versus-forward gap** — the relative difference
-between the converged relaxation bound and the simulated AC forward
-cost — developed in [The bound and the forward cost](@ref). The size of
-that gap on a given instance is an honest, method-agnostic estimate of how
-much the convexification assumption costs there; the Bolivian system, by
-its physical geography alone, sits in the regime where it is material
-(see [The Bolivian interconnected system](@ref)).
 
 ## Further reading
 

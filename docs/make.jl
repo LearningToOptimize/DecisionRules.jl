@@ -2,15 +2,16 @@ using Documenter
 using Literate
 using DecisionRules
 
-# Convert Literate.jl sources to markdown
-examples_src = joinpath(@__DIR__, "src", "examples")
-examples_out = joinpath(@__DIR__, "src", "examples")
-for file in readdir(examples_src)
-    endswith(file, ".jl") || continue
-    Literate.markdown(
-        joinpath(examples_src, file), examples_out;
-        documenter=true, credit=false,
-    )
+# Convert Literate.jl sources to markdown, in place, wherever they live: a case
+# study that owns a runnable walkthrough keeps it beside its prose rather than in
+# a separate examples pile.
+for dir in (joinpath(@__DIR__, "src", "examples"),
+            joinpath(@__DIR__, "src", "casestudies", "hydro"))
+    isdir(dir) || continue
+    for file in readdir(dir)
+        endswith(file, ".jl") || continue
+        Literate.markdown(joinpath(dir, file), dir; documenter=true, credit=false)
+    end
 end
 
 makedocs(;
@@ -39,7 +40,13 @@ makedocs(;
         ],
         "Part III — Case Studies" => [
             "Battery-storage AC-OPF" => "casestudies/battery_storage_opf.md",
-            "Bolivia hydro problem" => "casestudies/hydro_problem.md",
+            "Long-term hydrothermal planning" => [
+                "Overview" => "casestudies/hydro/index.md",
+                "The problem" => "casestudies/hydro/problem.md",
+                "Valuing water: two approaches" => "casestudies/hydro/method.md",
+                "Results" => "casestudies/hydro/results.md",
+                "Walkthrough" => "casestudies/hydro/walkthrough.md",
+            ],
             "Rocket control" => "examples/rocket.md",
             "Stochastic lot-sizing (integer variables)" => "examples/inventory.md",
         ],

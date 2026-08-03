@@ -13,6 +13,7 @@
 #   hydro_cost_distributions.png     absolute cost densities, both policies
 #   hydro_paired_differences.png     paired TS-DDR - SDDP differences, zero marked
 #   hydro_stagewise_physical.png     where the cost difference is actually incurred
+#   hydro_energy_price.png           the mean nodal energy price, week by week
 #
 # ── The training figure, and the mistakes it is built to avoid ────────────────
 #
@@ -73,6 +74,21 @@ const C_ACCENT = colorant"#D55E00"
 # 8,000 is ~20 updates at nt = 16 and ~13 at nt = 24: enough to see through the
 # sample noise, short enough to keep a real change visible.
 const SMOOTH_TRAJECTORIES = 8_000
+
+"""
+    phase_label(stage) -> String
+
+Display name for a training phase.
+
+The recorded evidence keys phases by the identifiers the original run used.
+Those are lab-notebook tags: they carry no meaning to a reader and, worse, they
+read as a search over many attempts. A published figure names phases by their
+position in the schedule; the identifiers stay in the record, where they are
+what actually indexes the data.
+"""
+phase_label(stage) = get(PHASE_LABELS, stage, stage)
+
+const PHASE_LABELS = Dict("coldB" => "phase 1", "C1" => "phase 2", "C3" => "phase 3")
 
 """
     gaussian_kde(samples; npoints=512) -> (xs, density)
@@ -174,8 +190,8 @@ function figure_training()
 
     top = plot(;
         ylabel = "126-stage objective",
-        title = "From-scratch TS-DDR training — selected lineage " *
-                join(selected, " → "),
+        title = "Training from random initialisation — " *
+                join(phase_label.(selected), " → "),
         legend = :topright, grid = :y, gridalpha = 0.15,
     )
     # Raw stochastic samples, faint. Smoothing is per STAGE so it resets at each
@@ -236,7 +252,8 @@ function figure_training()
         lrs = collect(skipmissing(rows[!, "metrics/lr"]))
         mid = (running + per_stage[stage]["active_seconds"] / 2) / 3600
         annotate!(top, mid, maximum(skipmissing(loss[!, "metrics/training_loss"])),
-                  text(@sprintf("%s\nnt=%d\nLR %.0e→%.0e", stage, nt, maximum(lrs), minimum(lrs)),
+                  text(@sprintf("%s\nsample %d\nLR %.0e→%.0e",
+                                phase_label(stage), nt, maximum(lrs), minimum(lrs)),
                        7, C_INK, :center))
         running += per_stage[stage]["active_seconds"]
     end
@@ -352,6 +369,121 @@ function figure_stagewise()
     return nothing
 end
 
+"""
+    price_series() -> Union{Nothing,DataFrame}
+
+Per-stage nodal energy price for each policy, averaged over the panel columns.
+
+Prefers the compact `results/stagewise_prices.csv`. If that is absent but the
+raw solution dumps are, it reduces them and writes the compact file, so the
+figure is reproducible from `results/` alone thereafter. Returns `nothing` when
+neither exists, and the price figure is then skipped rather than faked.
+
+The reduction is a mean of `price_active` over buses and over the scenarios the
+two policies have IN COMMON — averaging one policy over ten columns and the other
+over one would compare scenario sets, not policies. The number of paired
+scenarios is carried in the output and shown on the figure.
+
+It is a *system* price, not a locational one: the point of the figure is when
+energy is expensive, and how the two policies' water decisions move that in
+time. Per-bus detail is in the dumps for anyone who wants it.
+
+`price_active` is the dual of a bus's active-power balance in per-unit power per
+stage; multiplying by `baseMVA = 100` puts it in USD per MW per stage.
+"""
+function price_series()
+    compact = joinpath(RESULTS, "stagewise_prices.csv")
+    isfile(compact) && return CSV.read(compact, DataFrame)
+
+    audit = joinpath(HYDRO_DIR, "bolivia", "ACPPowerModel", "audit")
+    isdir(audit) || return nothing
+    sources = Dict(
+        "sddp" => filter(f -> occursin(r"^sddp_\d+_\d+_solution\.csv$", f), readdir(audit)),
+        "tsddr" => filter(f -> occursin(r"solution.*\.csv$", f),
+                          readdir(joinpath(HYDRO_DIR, "bolivia", "ACPPowerModel"))),
+    )
+    isempty(sources["sddp"]) && return nothing
+
+    # Accumulate per (policy, scenario, stage) so the two policies can be
+    # restricted to the SAME scenarios before averaging. A mean over ten columns
+    # on one side and one column on the other would not be a comparison of
+    # policies — it would be a comparison of scenario sets.
+    price = Dict{String,Dict{Tuple{Int,Int},Vector{Float64}}}()
+    for (policy, files) in sources
+        acc = Dict{Tuple{Int,Int},Vector{Float64}}()
+        base = policy == "sddp" ? audit : joinpath(HYDRO_DIR, "bolivia", "ACPPowerModel")
+        for f in files
+            path = joinpath(base, f)
+            isfile(path) || continue
+            for row in CSV.Rows(path;
+                                types = Dict(:scenario => Int, :stage => Int,
+                                             :value => Float64))
+                row.class == "price_active" || continue
+                push!(get!(acc, (row.scenario, row.stage), Float64[]), row.value)
+            end
+        end
+        isempty(acc) || (price[policy] = acc)
+    end
+    haskey(price, "sddp") || return nothing
+
+    scenarios = Set(k[1] for k in keys(price["sddp"]))
+    for policy in keys(price)
+        intersect!(scenarios, Set(k[1] for k in keys(price[policy])))
+    end
+    isempty(scenarios) && return nothing
+    stages = sort(unique(k[2] for k in keys(price["sddp"]) if k[1] in scenarios))
+    @info "nodal prices" policies = sort(collect(keys(price))) n_scenarios =
+        length(scenarios) scenarios = sort(collect(scenarios))
+
+    frame = DataFrame(stage = stages)
+    for policy in ("sddp", "tsddr")
+        haskey(price, policy) || continue
+        frame[!, Symbol(policy * "_price")] = [
+            mean(vcat((get(price[policy], (s, t), Float64[]) for s in scenarios)...))
+            for t in stages
+        ]
+    end
+    frame[!, :n_scenarios] .= length(scenarios)
+    CSV.write(compact, frame)
+    println("Wrote: $compact")
+    return frame
+end
+
+function figure_prices()
+    prices = price_series()
+    if prices === nothing
+        @warn "no nodal-price data found; skipping the price figure. Produce it with " *
+              "DR_SOLUTION_DUMP=1 on either paired evaluator."
+        return nothing
+    end
+    # The recorded dual is of the balance AS STORED, which is the NEGATIVE of the
+    # conventional price (see PRICE_CLASSES). Negating puts "expensive" up, where
+    # a reader expects it.
+    figure = plot(;
+        xlabel = "stage (week)",
+        ylabel = "marginal cost of serving load\n(objective units per pu per stage)",
+        title = "What energy is worth, week by week" *
+                (:n_scenarios in propertynames(prices) ?
+                 "  ($(Int(first(prices.n_scenarios))) paired scenario(s))" : ""),
+        legend = :topright, grid = :y, gridalpha = 0.15, size = (1000, 460),
+    )
+    for (col, label, colour) in (("sddp_price", "SDDP", C_SDDP),
+                                 ("tsddr_price", "TS-DDR (C3)", C_TSDDR))
+        Symbol(col) in propertynames(prices) || continue
+        plot!(figure, prices.stage, .-prices[!, Symbol(col)];
+              color = colour, linewidth = 2, label = label)
+    end
+    # The load-shedding price is the only other price on this scale, and it is
+    # what makes the level interpretable: serving load costs a fraction of what
+    # shedding it does, which is why no load is shed anywhere in this study.
+    hline!(figure, [6000.0]; color = C_ACCENT, linestyle = :dash, linewidth = 1.5,
+           label = "load-shedding price (6000)")
+    path = joinpath(ASSETS, "hydro_energy_price.png")
+    savefig(figure, path)
+    println("Saved: $path")
+    return nothing
+end
+
 function main()
     paired = CSV.read(joinpath(RESULTS, "paired_500.csv"), DataFrame)
     statistics = JSON.parsefile(joinpath(RESULTS, "statistics.json"))["statistics"]
@@ -369,6 +501,7 @@ function main()
     figure_distributions(paired, statistics)
     figure_paired_differences(paired, statistics)
     figure_stagewise()
+    figure_prices()
 
     println("\nPaired evaluation, n = ", nrow(paired))
     @printf("  TS-DDR  %.5f  (sd %.5f)\n", statistics["tsddr"]["mean"], statistics["tsddr"]["sd"])

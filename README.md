@@ -236,8 +236,17 @@ trajectory is rolled out from the true initial state using a reachable policy:
 ```
 
 By induction, all targets are feasible, and the strict equalities force the
-realized trajectory to match that reachable path. See the hydro example and the
+realized trajectory to match that reachable path. See
+[`examples/HydroPowerModels`](examples/HydroPowerModels) and the
 DecisionRulesExa.jl companion for the GPU strict regular-DE implementation.
+
+The reachable map ``R(\hat x_{t-1}, w_t)`` depends on the state, and that
+dependence **must be differentiated**. Treating the interval endpoints as
+constants still trains and still lowers the loss while descending a materially
+different direction — on the hydro case, a gradient carrying 6% of the true
+magnitude and pointing 48 degrees away from it. Verify the complete actor
+gradient against finite differences before trusting any hyperparameter
+conclusion drawn on top of it.
 
 The policy helpers separate two architectural choices:
 

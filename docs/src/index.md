@@ -49,11 +49,13 @@ critics, risk-averse objectives.
 [stochastic battery-storage AC optimal power flow](@ref "Stochastic battery-storage AC optimal power flow"), which defines the
 PGLib case generator, demand information pattern, battery physics, strict and
 soft target projections, true ACP model, SOC-WR backward relaxation, and paired
-PF/SDDP/TS-DDR evaluation protocol. The
-[long-term hydrothermal planning problem](@ref "The long-term hydrothermal planning problem") applies the
-same strict-target/true-ACP machinery to a cascaded multi-reservoir hydro system,
-where SDDP is essentially optimal and strict-ACP TS-DDR recovers a policy with
-almost the same true-ACP operating cost. Two further studies,
+PF/SDDP/TS-DDR evaluation protocol. [Long-term hydrothermal planning](@ref) asks whether a learned policy can
+value water as well as a method built to do exactly that: on a real grid under
+full AC physics, a policy trained from random initialisation in eleven GPU-hours,
+with no value function and no convex relaxation anywhere in its path, operates
+the system within **0.152%** of a converged SDDP baseline over 500 shared inflow
+scenarios — close, measurably more expensive, and diagnosably so. Two further
+studies,
 [rocket control](@ref "Rocket Control") and
 [stochastic lot-sizing](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs"),
 exercise continuous control and mixed-integer recourse.

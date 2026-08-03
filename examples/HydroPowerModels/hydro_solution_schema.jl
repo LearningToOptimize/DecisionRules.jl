@@ -95,8 +95,18 @@ and where scarcity is binding.
 
 They exist ONLY as duals, so no primal recording substitutes for them, and they
 come from the JuMP engine, which evaluates both policies against the same stage
-model. Prices are per unit of the case's per-unit power, per stage; multiply by
-`baseMVA` for USD/MWh-equivalent units.
+model.
+
+UNITS AND SIGN, because both are easy to get wrong. The value is the dual of the
+balance constraint AS STORED, whose normalized form is
+`sum(p_arcs) - sum(pg) + gs*vm^2 == -sum(pd)`; the dual of that is the NEGATIVE
+of the conventional locational marginal price, so a more negative number means
+energy is more expensive. Its unit is objective units per per-unit injection per
+stage — the case's own cost units, not USD/MWh. The meaningful reference on the
+same scale is `ACTIVE_DEFICIT_COST = 6000`, the price of shedding a per-unit of
+load for one stage: on this case the marginal energy price runs around 1600, so
+shedding is roughly four times the cost of serving, which is why the deficit
+variables sit at their bound.
 """
 const PRICE_CLASSES = ("price_active", "price_reactive")
 

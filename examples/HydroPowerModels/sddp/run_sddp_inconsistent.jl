@@ -17,7 +17,15 @@ using PowerModels
 using Random
 using SDDP
 using Statistics
-using Wandb, Dates
+using Dates
+
+# Weights & Biases is OPTIONAL telemetry, and it is loaded lazily on purpose.
+# `Wandb` pulls in PythonCall/CondaPkg, which builds a Python environment on
+# first use; importing it unconditionally would make merely REPRODUCING the
+# published numbers depend on that build succeeding. `DR_SDDP_WANDB=false` skips
+# it entirely.
+const ENABLE_WANDB = lowercase(get(ENV, "DR_SDDP_WANDB", "true")) in ("true", "1", "yes")
+ENABLE_WANDB && @eval using Wandb
 using CSV, DataFrames
 
 const SEED = parse(Int, get(ENV, "DR_SDDP_SEED", "1221"))
@@ -266,7 +274,7 @@ function main()
     mkpath(CUTS_DIR)
     alldata = load_case_data()
     lg = nothing
-    if lowercase(get(ENV, "DR_SDDP_WANDB", "true")) in ("true","1","yes")
+    if ENABLE_WANDB
       try
         lg = WandbLogger(;
         project="RL",

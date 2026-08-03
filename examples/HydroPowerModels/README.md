@@ -1,19 +1,14 @@
-# Bolivia long-term hydrothermal scheduling — JuMP engine
+# Bolivia hydro — JuMP engine
 
-The published case study: a strict TS-DDR policy, trained from random
-initialisation, operating the Bolivian interconnected system over 96 weekly
-stages under true AC power flow, compared against an SDDP baseline on the same
-500 inflow scenarios.
+Everything needed to reproduce the long-term hydrothermal planning case study:
+the case, the JuMP/MathOptFormat engine, the SDDP baseline, the paired
+evaluation, and the figures. The GPU trainer that produced the published policy
+lives in the companion package, `DecisionRulesExa.jl/examples/HydroPowerModels`.
 
-This directory holds the case, the JuMP/MathOptFormat engine, the SDDP baseline,
-the paired evaluation, and the figures. The GPU trainer that produced the
-published policy lives in the companion package,
-`DecisionRulesExa.jl/examples/HydroPowerModels`; the two share the case bytes,
-the protocol, and several source files byte for byte.
-
-Narrative and mathematics: [`docs/src/casestudies/hydro_problem.md`](../../docs/src/casestudies/hydro_problem.md)
-and [`hydro_bolivia.md`](../../docs/src/casestudies/hydro_bolivia.md). An
-executable walkthrough is [`docs/src/examples/hydro.jl`](../../docs/src/examples/hydro.jl).
+**The science is in the documentation**, under *Case studies → Long-term
+hydrothermal planning*: the problem, how each method values water, the measured
+comparison and its interpretation. This file is the operating manual — what the
+files are and what to run.
 
 ## The frozen case
 

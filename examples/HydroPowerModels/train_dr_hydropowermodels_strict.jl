@@ -21,6 +21,7 @@
 #                              demand, no 0.6 scaler; parity with DecisionRulesExa)
 #   DR_DEFICIT_COST=1e5        load-shedding cost per pu (paper recipe 1e5)
 #   DR_NUM_EPOCHS=80           number of epochs
+#   DR_NUM_BATCHES=100         gradient steps per epoch (total = epochs * batches)
 #   DR_ENCODER_LAYERS=128,128  recurrent inflow encoder sizes
 #   DR_HEAD_LAYERS=            nonrecurrent state-conditioned target head sizes
 #   DR_GRAD_CLIP=0             gradient clipping (0 = disabled)
@@ -85,7 +86,10 @@ model_dir = joinpath(HydroPowerModels_dir, case_name, formulation, "models")
 mkpath(model_dir)
 formulation_file = formulation * ".mof.json"
 num_epochs = parse(Int, get(ENV, "DR_NUM_EPOCHS", "80"))
-num_batches = 100
+# Gradient steps per epoch. Configurable so the documented smoke test is
+# genuinely small: the total update budget is num_epochs * num_batches, and with
+# this fixed at 100 a "2-epoch" run was still 200 updates.
+num_batches = parse(Int, get(ENV, "DR_NUM_BATCHES", "100"))
 # Trajectories sampled per gradient step; >1 averages the per-sample dual
 # gradients, reducing estimator variance at proportionally higher solve cost.
 _num_train_per_batch = parse(Int, get(ENV, "DR_NUM_TRAIN_PER_BATCH", "1"))

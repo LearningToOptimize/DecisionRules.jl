@@ -1,5 +1,5 @@
 {
-  "runtime_definition": "ACTIVE TIME = W&B run runtime of the stage process (problem construction + validation + training). Excludes Julia package instantiation, which precedes wandb.init.",
+  "runtime_definition": "ACTIVE TIME = wall time of the stage PROCESS from the start of problem construction to the end of training, i.e. construction + validation + the training loop. It excludes only Julia package instantiation, which precedes it. Reported per stage and summed over the SELECTED ancestry; the rejected C2 branch is accounted separately.",
   "selected_ancestry": [
     "random initialisation",
     "coldB",
@@ -33,8 +33,6 @@
         "training_loop_seconds": 15579.7,
         "init_and_validation_seconds": 324.8,
         "selected": true,
-        "wandb_run_id": "h364qc5f",
-        "job": 11595955,
         "md5": "6cb72daa5e8a",
         "stage_updates": 390
       },
@@ -43,8 +41,6 @@
         "training_loop_seconds": 14872.681457996368,
         "init_and_validation_seconds": 238.4,
         "selected": true,
-        "wandb_run_id": "9vuhk57k",
-        "job": 11608337,
         "md5": "f8f285dd44a8f6bbf565f26fd4ed8449",
         "stage_updates": 400
       },
@@ -53,8 +49,6 @@
         "training_loop_seconds": 2832.7296900749207,
         "init_and_validation_seconds": 229.7,
         "selected": false,
-        "wandb_run_id": "6u1vylu7",
-        "job": 11610556,
         "md5": null,
         "stage_updates": null
       },
@@ -63,12 +57,11 @@
         "training_loop_seconds": 7782.14440202713,
         "init_and_validation_seconds": 683.9,
         "selected": true,
-        "wandb_run_id": "dcxnau0l",
-        "job": 11612961,
         "md5": "d875a27371b272e1badbeb23f0ca0a01",
         "stage_updates": 100
       }
     }
   },
-  "selected_lineage_updates_total": 890
+  "selected_lineage_updates_total": 890,
+  "note": "Cluster job ids and W&B run ids have been removed: they identify runs on the machine this was produced on and mean nothing elsewhere. Everything needed to reproduce the lineage is in lineage_from_scratch.json and the checkpoint hashes below."
 }

@@ -213,12 +213,18 @@ else
             # PowerModels stores per bus, and the same ones HydroPowerModels'
             # own `constraint_mod_deficit` uses to insert the load-shedding
             # variable, so the sign convention is the package's own.
-            :price_active => sp -> SOLUTION_DUMP ?
-                Float64[JuMP.dual(b[:lam_kcl_r])
-                        for b in PowerModels.sol(sp.ext[:pm], 0, :bus)] : Float64[],
-            :price_reactive => sp -> SOLUTION_DUMP ?
-                Float64[JuMP.dual(b[:lam_kcl_i])
-                        for b in PowerModels.sol(sp.ext[:pm], 0, :bus)] : Float64[],
+            # `PowerModels.sol(pm, 0, :bus)` is a Dict keyed by BUS INDEX, so it
+            # is indexed by id — iterating it would yield Pairs and, worse, in an
+            # unspecified order, which would silently scramble the prices across
+            # buses.
+            :price_active => sp -> SOLUTION_DUMP ? begin
+                buses = PowerModels.sol(sp.ext[:pm], 0, :bus)
+                Float64[JuMP.dual(buses[b][:lam_kcl_r]) for b in 1:length(buses)]
+            end : Float64[],
+            :price_reactive => sp -> SOLUTION_DUMP ? begin
+                buses = PowerModels.sol(sp.ext[:pm], 0, :bus)
+                Float64[JuMP.dual(buses[b][:lam_kcl_i]) for b in 1:length(buses)]
+            end : Float64[],
         ),
     )
     Dict{Symbol,Any}(
