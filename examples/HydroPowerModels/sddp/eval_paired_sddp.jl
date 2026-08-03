@@ -27,6 +27,9 @@ const NUM_STAGES = REPORT_STAGES + RM_STAGES
 const FORMULATION = ACPPowerModel
 const FORMULATION_B = SOCWRConicPowerModel
 
+include(joinpath(HYDRO_DIR, "hydro_solution_schema.jl"))
+using .HydroSolutionSchema
+
 # The frozen case has DETERMINISTIC demand: `0.6 x PowerModels.json` active and
 # reactive load at every stage, and inflow as the only uncertainty. This is
 # asserted rather than assumed — a demand file appearing in the case directory
@@ -130,6 +133,23 @@ sampling_scheme = SDDP.Historical(historical_scenarios)
 # already solved — no extra solve, and the recorded costs are bit-identical to
 # the un-instrumented run (verified against the existing shard costs).
 const PHYSICAL_AUDIT = get(ENV, "DR_PHYSICAL_AUDIT", "0") == "1"
+# `DR_SOLUTION_DUMP=1` additionally records the FULL physical solution of every
+# simulated stage — every named primal variable plus the nodal prices — in the
+# shared long format of `hydro_solution_schema.jl`, together with the decision
+# trace (incoming state, realized inflow, outgoing reservoir level).
+#
+# This is the only path by which per-bus physics leaves the solver. The four
+# aggregate CSVs above answer "how much thermal, how much water, was any load
+# shed"; they cannot answer "what was energy worth at bus 14 in week 62", which
+# is a dual and exists nowhere else. The stagewise and price figures are built
+# from this dump.
+const SOLUTION_DUMP = get(ENV, "DR_SOLUTION_DUMP", "0") == "1"
+SOLUTION_DUMP && !PHYSICAL_AUDIT &&
+    error("DR_SOLUTION_DUMP=1 requires DR_PHYSICAL_AUDIT=1 (it rides on the same recorders)")
+# Stages whose full solution is dumped. Defaults to the whole simulated horizon,
+# not the reported window: the look-ahead stages are part of the trajectory even
+# though no cost is reported from them.
+const SOLUTION_DUMP_STAGES = parse(Int, get(ENV, "DR_SOLUTION_DUMP_STAGES", string(NUM_STAGES)))
 println("\nSimulating $n_sim scenarios with SDDP.Historical...")
 results = if !PHYSICAL_AUDIT
     HydroPowerModels.simulate(m, n_sim; sampling_scheme=sampling_scheme)
@@ -169,6 +189,36 @@ else
             ),
             # ── solve status of the stage subproblem ───────────────────────
             :status => sp -> string(JuMP.termination_status(sp)),
+            # ── FULL primal solution, by variable NAME ─────────────────────
+            # Every named variable of the solved stage. Recorded only under
+            # DR_SOLUTION_DUMP because it is one entry per variable per stage.
+            # Reading them by their serialized names — the same names
+            # `export_subproblem_mof.jl` writes — is what lets this solution be
+            # compared, plotted or replayed elsewhere without re-deriving an
+            # index convention.
+            :named_solution => sp -> SOLUTION_DUMP ?
+                Dict{String,Float64}(
+                    JuMP.name(v) => JuMP.value(v) for v in JuMP.all_variables(sp)
+                    if !isempty(JuMP.name(v))
+                ) : Dict{String,Float64}(),
+            # ── NODAL PRICES ───────────────────────────────────────────────
+            # The dual of each bus's active-power balance is the locational
+            # marginal price of energy at that bus (USD per pu per stage); the
+            # reactive balance gives the price of reactive support. These are
+            # the economic read-out of the dispatch — what the policy's water
+            # decisions are worth to the network — and they exist only as duals,
+            # so no primal recording can substitute for them.
+            #
+            # `lam_kcl_r` / `lam_kcl_i` are the constraint references
+            # PowerModels stores per bus, and the same ones HydroPowerModels'
+            # own `constraint_mod_deficit` uses to insert the load-shedding
+            # variable, so the sign convention is the package's own.
+            :price_active => sp -> SOLUTION_DUMP ?
+                Float64[JuMP.dual(b[:lam_kcl_r])
+                        for b in PowerModels.sol(sp.ext[:pm], 0, :bus)] : Float64[],
+            :price_reactive => sp -> SOLUTION_DUMP ?
+                Float64[JuMP.dual(b[:lam_kcl_i])
+                        for b in PowerModels.sol(sp.ext[:pm], 0, :bus)] : Float64[],
         ),
     )
     Dict{Symbol,Any}(
@@ -337,10 +387,9 @@ if PHYSICAL_AUDIT
     CSV.write(joinpath(audit_dir, "$(tag)_stage.csv"), stage_rows)
     CSV.write(joinpath(audit_dir, "$(tag)_scenario.csv"), scen_rows)
 
-    # ── FULL-SOLUTION DUMP ────────────────────────────────────────────────
-    # Every named primal variable of every simulated stage, plus the decision
-    # trace (incoming state, realized inflow, and the OUTGOING reservoir level
-    # the cut policy chose — which is what a strict replay pins as its target).
+    # ── FULL PHYSICAL SOLUTION ────────────────────────────────────────────
+    # Every named primal variable and both nodal prices, per stage, plus the
+    # decision trace that reproduces the trajectory.
     if SOLUTION_DUMP
         verify_index_convention(CASE_DIR, JSON.parsefile)
         writer = SolutionWriter(joinpath(audit_dir, "$(tag)_solution.csv"))
@@ -354,21 +403,22 @@ if PHYSICAL_AUDIT
             cumulative = 0.0
             for t in 1:n_dump
                 rec = results[:simulations][i][t]
-                named = rec[:named_solution]
-                for (name, value) in named
+                for (name, value) in rec[:named_solution]
                     mapped = solution_class(name, orientation)
                     mapped === nothing && continue
                     record!(writer, s, t, mapped[1], mapped[2], value)
                 end
+                record_vector!(writer, s, t, "price_active", rec[:price_active])
+                record_vector!(writer, s, t, "price_reactive", rec[:price_reactive])
                 cumulative += rec[:stage_objective]
                 record_scalar!(writer, s, t, "stage_objective", rec[:stage_objective])
                 record_scalar!(writer, s, t, "cum_objective", cumulative)
                 for r in 1:nhyd
                     state_in = rec[:reservoirs][:reservoir][r].in
                     state_out = rec[:reservoirs][:reservoir][r].out
-                    # The cut policy's decision IS the outgoing level, so it is
-                    # also what a strict replay must be told to hit; recording it
-                    # as `target` keeps one trace schema for both policies.
+                    # The cut policy's DECISION is the outgoing level, so it is
+                    # also what a strict replay would be told to hit; recording
+                    # it as `target` keeps one trace schema for both policies.
                     record!(writer, s, t, "target", r, state_out)
                     push!(trace_rows, (s, t, r, state_in, state_out, rec[:inflow_r][r]))
                 end
@@ -379,6 +429,7 @@ if PHYSICAL_AUDIT
         println("  Full solution + trace: $audit_dir/$(tag)_{solution,trace}.csv " *
                 "($(n_dump) stages per scenario)")
     end
+
     println("\n" * "=" ^ 60)
     println("PHYSICAL LOAD-SHEDDING AUDIT  (deficit[b], tol=$AUDIT_TOL pu)")
     println("=" ^ 60)
