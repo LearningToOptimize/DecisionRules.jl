@@ -1,0 +1,74 @@
+{
+  "runtime_definition": "ACTIVE TIME = W&B run runtime of the stage process (problem construction + validation + training). Excludes Julia package instantiation, which precedes wandb.init.",
+  "selected_ancestry": [
+    "random initialisation",
+    "coldB",
+    "C1",
+    "C3"
+  ],
+  "rejected_branch": {
+    "stage": "C2",
+    "parent": "C1",
+    "why": "produced no valid best; stopped by the two-barren-evaluation rule inside a high-LR restart transient. Not an ancestor of C3."
+  },
+  "primary_from_scratch_time_to_policy_seconds": 39481.6,
+  "primary_from_scratch_time_to_policy_hours": 10.9671,
+  "total_campaign_compute_including_C2_seconds": 42544.0,
+  "total_campaign_compute_including_C2_hours": 11.8178,
+  "discarded_search_work_seconds": 3062.4,
+  "components": {
+    "selected": {
+      "training_loop_seconds": 38234.5,
+      "init_and_validation_seconds": 1247.1,
+      "active_seconds": 39481.6
+    },
+    "all_including_C2": {
+      "training_loop_seconds": 41067.3,
+      "init_and_validation_seconds": 1476.7,
+      "active_seconds": 42544.0
+    },
+    "per_stage": {
+      "coldB": {
+        "active_seconds": 15904.5,
+        "training_loop_seconds": 15579.7,
+        "init_and_validation_seconds": 324.8,
+        "selected": true,
+        "wandb_run_id": "h364qc5f",
+        "job": 11595955,
+        "md5": "6cb72daa5e8a",
+        "stage_updates": 390
+      },
+      "C1": {
+        "active_seconds": 15111.1,
+        "training_loop_seconds": 14872.681457996368,
+        "init_and_validation_seconds": 238.4,
+        "selected": true,
+        "wandb_run_id": "9vuhk57k",
+        "job": 11608337,
+        "md5": "f8f285dd44a8f6bbf565f26fd4ed8449",
+        "stage_updates": 400
+      },
+      "C2": {
+        "active_seconds": 3062.4,
+        "training_loop_seconds": 2832.7296900749207,
+        "init_and_validation_seconds": 229.7,
+        "selected": false,
+        "wandb_run_id": "6u1vylu7",
+        "job": 11610556,
+        "md5": null,
+        "stage_updates": null
+      },
+      "C3": {
+        "active_seconds": 8466.0,
+        "training_loop_seconds": 7782.14440202713,
+        "init_and_validation_seconds": 683.9,
+        "selected": true,
+        "wandb_run_id": "dcxnau0l",
+        "job": 11612961,
+        "md5": "d875a27371b272e1badbeb23f0ca0a01",
+        "stage_updates": 100
+      }
+    }
+  },
+  "selected_lineage_updates_total": 890
+}

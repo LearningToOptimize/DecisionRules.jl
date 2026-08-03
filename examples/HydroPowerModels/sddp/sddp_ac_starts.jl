@@ -83,8 +83,8 @@ callback escalates through:
 
 Rung 3 exists because rungs 1 and 2 are numerically IDENTICAL — same tolerances,
 same regularization — so a solve that fails on a knife-edge reproduces the same
-failure on both. Diagnosis of the v67damp node-122 `ALMOST_OPTIMAL` abort
-(PROJECT.md §19.12/R1) showed the failure is a narrow, instance-specific
+failure on both. Diagnosis of a node-122 `ALMOST_OPTIMAL` abort observed on one
+Bolivia-scale conic subproblem showed the failure is a narrow, instance-specific
 resonance of the cut-augmented KKT system: on that exact instance
 `static_regularization_constant` values of 1e-11, 3e-11, 3e-10 and 1e-9 all
 terminate literal `OPTIMAL` while 1e-10 alone returns `ALMOST_OPTIMAL`, and the

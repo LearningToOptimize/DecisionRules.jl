@@ -166,8 +166,48 @@ scen_ids   = scen_first:min(scen_last, num_scenarios)
 nshard     = length(scen_ids)
 println("  Shard: scenarios $(first(scen_ids))..$(last(scen_ids))  ($nshard of $num_scenarios)")
 
+"""
+    accepted(model) -> Bool
+
+Whether a JuMP solve converged to a usable point.
+
+`LOCALLY_SOLVED` is the normal Ipopt outcome for this nonconvex ACP problem;
+`OPTIMAL` and `ALMOST_LOCALLY_SOLVED` are accepted for the same reason MadNLP's
+acceptable level is accepted on the ExaModels side.
+"""
+accepted(model) = JuMP.termination_status(model) in (
+    MOI.LOCALLY_SOLVED, MOI.OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED,
+)
+
+"""
+    solve_stage!(model) -> (ok::Bool, retried::Bool, status)
+
+Solve one stage subproblem, retrying ONCE from a cold start if the first attempt
+does not converge.
+
+The retry clears every variable's start value, so the second attempt does not
+inherit the failed iterate. A stage that fails twice is REPORTED — the scenario
+is marked unsolved rather than having a meaningless `objective_value` folded
+into the mean.
+"""
+function solve_stage!(model)
+    optimize!(model)
+    accepted(model) && return (true, false, JuMP.termination_status(model))
+    for variable in JuMP.all_variables(model)
+        JuMP.set_start_value(variable, nothing)
+    end
+    optimize!(model)
+    return (accepted(model), true, JuMP.termination_status(model))
+end
+
+# Per-scenario cost AND per-scenario solve provenance. A scenario is never
+# dropped or renumbered: `scen_done` carries the GLOBAL protocol column id for
+# every scenario attempted, and `scen_solved` says whether its cost is usable.
 costs = Float64[]
 scen_done = Int[]
+scen_solved = Bool[]
+scen_retried = Int[]        # stages that needed the cold retry
+scen_status = String[]      # terminal status of the first failing stage, or ""
 vol_trajectories = zeros(num_eval_stages, nshard)
 gen_trajectories = zeros(num_eval_stages, nshard)
 
@@ -177,6 +217,9 @@ for (i, s) in enumerate(scen_ids)
 
     state = Float64.(initial_state)
     scenario_cost = 0.0
+    scenario_ok = true
+    scenario_retries = 0
+    scenario_status = ""
 
     for t in 1:num_eval_stages
         for (j, param) in enumerate(state_params_in[t])
@@ -196,7 +239,18 @@ for (i, s) in enumerate(scen_ids)
             set_parameter_value(target_param, Float64(x_hat[j]))
         end
 
-        optimize!(subproblems[t])
+        ok, retried, status = solve_stage!(subproblems[t])
+        retried && (scenario_retries += 1)
+        if !ok
+            # A non-converged stage makes every later stage of this scenario
+            # meaningless, so the rollout stops here and the scenario is
+            # recorded as unsolved. Its cost is retained for inspection but is
+            # excluded from every statistic below.
+            scenario_ok = false
+            scenario_status = string(status)
+            @warn "Stage solve failed after cold retry" scenario = s stage = t status
+            break
+        end
         scenario_cost += objective_value(subproblems[t])
 
         for j in 1:num_hydro
@@ -211,20 +265,40 @@ for (i, s) in enumerate(scen_ids)
 
     push!(costs, scenario_cost)
     push!(scen_done, s)
+    push!(scen_solved, scenario_ok)
+    push!(scen_retried, scenario_retries)
+    push!(scen_status, scenario_status)
     if i % 10 == 0 || i == nshard
-        println("  [$i/$nshard] (scen $s) cost = $(round(scenario_cost; digits=1)), running mean = $(round(mean(costs); digits=1))")
+        solved_costs = costs[scen_solved]
+        running = isempty(solved_costs) ? NaN : round(mean(solved_costs); digits=1)
+        println("  [$i/$nshard] (scen $s) cost = $(round(scenario_cost; digits=1))" *
+                (scenario_ok ? "" : " [UNSOLVED]") * ", running mean = $running")
     end
 end
 
 # ── Report results ─────────────────────────────────────────────────────────
+# Statistics are computed over SOLVED scenarios only, and the count is printed
+# next to them, so a partial evaluation can never be read as a complete one.
+solved_costs = costs[scen_solved]
+n_solved = length(solved_costs)
+n_retried = count(>(0), scen_retried)
 println("\n" * "=" ^ 60)
-println("Results: Paired TS-DDR Strict ($num_eval_stages stages, $num_scenarios scenarios)")
+println("Results: Paired TS-DDR Strict ($num_eval_stages stages, shard $(first(scen_ids)):$(last(scen_ids)))")
 println("=" ^ 60)
-println("  Mean cost:   $(round(mean(costs); digits=1))")
-println("  Std:         $(round(std(costs); digits=1))")
-println("  Min:         $(round(minimum(costs); digits=1))")
-println("  Max:         $(round(maximum(costs); digits=1))")
-println("  Median:      $(round(median(costs); digits=1))")
+println("  Solved:      $n_solved / $nshard" *
+        (n_solved == nshard ? "  (COMPLETE)" : "  ** INCOMPLETE — statistics are over a SUBSET **"))
+n_retried == 0 || println("  Retried:     $n_retried scenario(s) needed a cold retry")
+if n_solved < nshard
+    println("  Unsolved:    $(scen_done[.!scen_solved])")
+    println("  Statuses:    $(scen_status[.!scen_solved])")
+end
+if n_solved > 0
+    println("  Mean cost:   $(round(mean(solved_costs); digits=1))")
+    println("  Std:         $(round(std(solved_costs); digits=1))")
+    println("  Min:         $(round(minimum(solved_costs); digits=1))")
+    println("  Max:         $(round(maximum(solved_costs); digits=1))")
+    println("  Median:      $(round(median(solved_costs); digits=1))")
+end
 println("  Violation:   0.0% (strict mode)")
 println("=" ^ 60)
 
@@ -238,7 +312,15 @@ const COL_NAME = "TS-DDR (strict, paired)"
 is_shard = !(scen_first == 1 && last(scen_ids) == num_scenarios)
 shard_suffix = is_shard ? "_s$(first(scen_ids))_$(last(scen_ids))" : ""
 costs_file = joinpath(out_dir, "paired_costs$(tag_suffix)$(shard_suffix).csv")
-df = DataFrame(:scenario => collect(scen_done), Symbol(COL_NAME) => costs)
+# Solve provenance travels WITH the cost: a merge downstream can then reject an
+# incomplete set instead of averaging a garbage objective from a failed solve.
+df = DataFrame(
+    :scenario => collect(scen_done),
+    Symbol(COL_NAME) => costs,
+    :all_stages_solved => scen_solved,
+    :stages_retried => scen_retried,
+    :failure_status => scen_status,
+)
 CSV.write(costs_file, df)
 println("Saved: $costs_file")
 

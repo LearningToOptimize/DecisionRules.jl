@@ -21,7 +21,7 @@ using Ipopt
 using DiffOpt
 using Statistics
 
-const HYDRO_DIR = dirname(@__FILE__)
+const HYDRO_DIR = dirname(dirname(@__FILE__))   # examples/HydroPowerModels
 include(joinpath(HYDRO_DIR, "load_hydropowermodels.jl"))
 include(joinpath(HYDRO_DIR, "hydro_reachable_policy.jl"))
 

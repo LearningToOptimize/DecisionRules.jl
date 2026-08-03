@@ -75,8 +75,9 @@ lower_r = \\max(min\\_vol_r,\\;  x_r + K \\cdot w_r - K \\cdot max\\_turn_r - sp
 When `spill_max === nothing` (unlimited spillage), `lower_r = min_vol_r` since the
 reservoir can always be emptied to its physical minimum.
 
-The bounds are marked `@non_differentiable` — gradients flow only through the sigmoid
-path `σ(z_r)`, not through the bounds themselves.
+The bounds are DIFFERENTIABLE: gradient flows both through the sigmoid path
+`σ(z_r)` and through the endpoints' affine dependence on `x_prev`, which is what
+carries the adjoint recursion across stages.
 
 # Cascade-aware target clamping
 
@@ -95,8 +96,8 @@ R_u = K \\cdot w_u + x_u - \\hat{x}_u
 - **Turn-only connection**: max contribution = ``\\min(K \\cdot max\\_turn_u, \\max(0, R_u))``
 
 The downstream target is clamped: ``\\hat{x}_r ← \\min(\\hat{x}_r, true\\_upper_r)``.
-This clamping is `@non_differentiable` — gradient flows through when not active,
-zero when clamped (correct projected-gradient signal).
+This clamping is DIFFERENTIABLE — when the clamp binds, the downstream target
+inherits the upstream target's influence through ``R_u``.
 
 # Strict-mode guarantee
 
@@ -157,8 +158,29 @@ clamped to `max_vol`. The lower bound is the minimum volume achievable: current
 volume plus inflow minus maximum turbine outflow minus maximum spill, clamped
 to `min_vol`.
 
-Marked `@non_differentiable` — gradients do not flow through the bounds. The gradient
-path is solely through the sigmoid-scaled output `σ(z_r)`.
+# Differentiability
+
+This function is DIFFERENTIABLE in `x_prev`, and that term is load-bearing. The
+emitted target is ``\\hat{x}_t = l_t + (u_t - l_t) \\odot y_t`` with both endpoints
+affine in the previous state, so
+
+```math
+\\frac{\\partial \\hat{x}_t}{\\partial x_{t-1}} = \\operatorname{diag}(y_t)
+```
+
+wherever the upper bound is off its `max_vol` ceiling (plus
+``\\operatorname{diag}(1 - y_t)`` on coordinates whose lower bound is the
+spill-limited `lower_raw`). Since the TS-DDR actor loss ``\\langle \\lambda,
+\\hat{x}(\\theta) \\rangle`` feeds ``\\hat{x}_{t-1}`` back as the next stage's state
+input, suppressing this term truncates the adjoint recursion at EVERY stage, not
+only where a constraint binds, and the error compounds with the horizon.
+
+A `ChainRulesCore.@non_differentiable` declaration used to sit here. Measured on
+the shared production operating point (Bolivia, ``T = 126``, `min_turn` ≡ 0) it
+dropped the term on 34.6% of (stage, reservoir) pairs and left the applied update
+at cosine 0.673 / norm ratio 0.059 against the true gradient — ~48° off-direction
+at 6% magnitude — while the differentiable form matches finite differences to six
+digits. It is therefore removed here and in DecisionRulesExa.jl's copy.
 
 # Arguments
 - `policy::HydroReachablePolicy`: policy containing hydro bounds and parameters
@@ -200,47 +222,93 @@ function _hydro_reachable_bounds(policy::HydroReachablePolicy, inflow, x_prev)
 
     return lower, upper
 end
-# Gradients do not flow through the bounds — only through σ(z)
-ChainRulesCore.@non_differentiable _hydro_reachable_bounds(::Any, ::Any, ::Any)
 
 """
     _cascade_upper_bounds(policy, target, inflow, x_prev)
 
 Compute the true reachable upper bound for downstream units given the actual
 upstream targets. Returns a vector of upper bounds (Inf for units with no
-upstream connections). Marked `@non_differentiable`.
+upstream connections).
 
 # Documented assumptions
 - **Single-level cascades**: the implied upstream release
   ``R_u = K w_u + x_u - \\hat{x}_u`` omits the upstream unit's own incoming
   cascade contribution, which is conservative (underestimates the release)
   for multi-level chains.
-- **No gradient through binding clamps**: this function is
-  `@non_differentiable`, so when the resulting clamp binds, the dependence of
-  the downstream target on the upstream target is not differentiated.
+- **Gradient through binding clamps**: this function is DIFFERENTIABLE, so a
+  binding clamp propagates ``\\partial / \\partial \\hat{x}_u = -1`` from the
+  implied release into the downstream target (turbine-only links additionally
+  pass through `min`, whose pullback selects the active branch). Units with no
+  incoming link take the constant `Inf` branch and carry no gradient, which is
+  exact because `min(raw_target, Inf) == raw_target`.
 """
 function _cascade_upper_bounds(policy::HydroReachablePolicy, target, inflow, x_prev)
     cascade = policy.cascade
     T = eltype(target)
     K = T(policy.K)
     n = length(target)
-    upper = fill(T(Inf), n)
-    for conn in cascade
-        u = conn.upstream
-        d = conn.downstream
-        R_u = K * inflow[u] + x_prev[u] - target[u]
-        if conn.turn_only
-            max_contrib = min(T(conn.K_max_turn), max(zero(T), R_u))
-        else
-            max_contrib = max(zero(T), R_u)
-        end
-        true_upper = x_prev[d] + K * inflow[d] - K * T(policy.min_turn[d]) + max_contrib
-        true_upper = min(T(policy.max_vol[d]), true_upper)
-        upper[d] = min(upper[d], true_upper)
-    end
-    return upper
+    isempty(cascade) && return fill(T(Inf), n)
+
+    # Constant link metadata, gathered once. `_cascade_link_meta` is
+    # `@non_differentiable` so this gather never enters the pullback.
+    up, dn, turn_only, k_max_turn = _cascade_link_meta(policy, T)
+    min_turn = T.(policy.min_turn)
+    max_vol = T.(policy.max_vol)
+
+    # Release implied by asking each upstream reservoir to end at its target.
+    release = K .* inflow[up] .+ x_prev[up] .- target[up]
+    positive_release = max.(zero(T), release)
+    # Turbine-only links cannot pass more than K·max_turn downstream.
+    max_contrib = ifelse.(turn_only, min.(k_max_turn, positive_release), positive_release)
+
+    # One upper bound per LINK, expressed for its downstream reservoir.
+    link_upper = min.(
+        max_vol[dn],
+        x_prev[dn] .+ K .* inflow[dn] .- K .* min_turn[dn] .+ max_contrib,
+    )
+
+    # Reduce link-wise bounds to one bound per reservoir WITHOUT mutation (the
+    # previous `upper[d] = min(...)` loop is unreachable for reverse-mode AD):
+    # build a links × reservoirs matrix that holds `link_upper` in the column of
+    # the link's downstream reservoir and `Inf` elsewhere, then take a column
+    # minimum. Reservoirs with no incoming link get an all-`Inf` column and are
+    # left unchanged by the caller's `min.(raw_target, cascade_upper)`.
+    link_by_reservoir = ifelse.(
+        reshape(dn, :, 1) .== reshape(1:n, 1, :),
+        reshape(link_upper, :, 1),
+        T(Inf),
+    )
+    return vec(minimum(link_by_reservoir; dims = 1))
 end
-ChainRulesCore.@non_differentiable _cascade_upper_bounds(::Any, ::Any, ::Any, ::Any)
+
+"""
+    _cascade_link_meta(policy, T) -> (upstream, downstream, turn_only, k_max_turn)
+
+Flatten `policy.cascade` into per-link index and constant vectors.
+
+# Arguments
+- `policy::HydroReachablePolicy`: policy carrying the cascade link list.
+- `T::Type`: element type to which the float constants are converted.
+
+# Returns
+- `(upstream, downstream, turn_only, k_max_turn)`: four length-`nlinks`
+  vectors — upstream/downstream reservoir positions, a turbine-only flag, and
+  the turbine-only contribution cap ``K \\cdot max\\_turn_u``.
+
+# Notes
+Frozen topology metadata, constant in every differentiated quantity, so it is
+declared `@non_differentiable` and never appears in the pullback of
+[`_cascade_upper_bounds`](@ref).
+"""
+function _cascade_link_meta(policy::HydroReachablePolicy, ::Type{T}) where {T}
+    return (
+        Int[c.upstream for c in policy.cascade],
+        Int[c.downstream for c in policy.cascade],
+        Bool[c.turn_only for c in policy.cascade],
+        T[c.K_max_turn for c in policy.cascade],
+    )
+end
+ChainRulesCore.@non_differentiable _cascade_link_meta(::Any, ::Any)
 
 """
     (m::HydroReachablePolicy)(x)
@@ -251,17 +319,17 @@ one-stage reachable reservoir targets.
 1. Split input into context, inflow, and previous state
 2. Encode `[context; inflow]` through recurrent encoder, carrying state across stages
 3. Combine encoder output with previous state via a sigmoid head → y_norm ∈ [0,1]
-4. Compute reachable bounds [lower, upper] from physics (no gradient)
+4. Compute reachable bounds [lower, upper] from physics (differentiable in `x_prev`)
 5. Scale: target = lower + (upper - lower) × y_norm
-6. Clamp downstream targets to cascade-aware upper bounds (no gradient through bounds)
+6. Clamp downstream targets to cascade-aware upper bounds (differentiable)
 
 # Documented assumptions
 - **Single-level cascades**: the cascade clamp uses the implied upstream release
   ``R_u = K w_u + x_u - \\hat{x}_u``, which omits the upstream unit's own
   incoming cascade contribution — conservative for multi-level chains.
-- **No gradient through binding clamps**: reachable bounds and cascade clamps
-  are `@non_differentiable`; when a clamp binds, the downstream target's
-  dependence on the upstream target is not differentiated.
+- **Gradient through binding clamps**: reachable bounds and cascade clamps are
+  DIFFERENTIABLE; the reachable interval's dependence on `x_prev` and a binding
+  clamp's dependence on the upstream target both carry gradient.
 - **Physically-infeasible edge case**: if the cascade upper bound falls below
   the reachable lower bound, the clamped target may fall below `lower`. No
   policy-level remedy exists in that case — the underlying problem is
@@ -294,7 +362,9 @@ function (m::HydroReachablePolicy)(x)
     # Raw output from combiner (sigmoid activation → values in [0, 1])
     y_norm = m.combiner(vcat(encoded, x_prev))
 
-    # Compute reachable bounds from current state and inflow (no gradient)
+    # Reachable interval from the current state and inflow. Both endpoints are
+    # affine in `x_prev`, and that dependence CARRIES GRADIENT — it is the term
+    # that propagates the adjoint from stage t back to stage t-1.
     lower, upper = _hydro_reachable_bounds(m, inflow, x_prev)
 
     # Scale normalized output to the reachable interval [lower, upper]

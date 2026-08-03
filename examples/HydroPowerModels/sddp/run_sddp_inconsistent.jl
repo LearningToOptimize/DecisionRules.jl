@@ -36,25 +36,27 @@ const QD_SCALER = parse(Float64, get(ENV, "DR_SDDP_QD_SCALER", "0.6"))
 const FORMULATION_BACKWARD = SOCWRConicPowerModel
 const FORMULATION_FORWARD = ACPPowerModel
 
-# Stochastic demand (bolivia/demand_scenarios.csv): overrides
-# HydroPowerModels.rainfall_noises with inflow × demand product atoms and
-# defines DEMAND_SPREAD / DEMAND_TAG. No-op (deterministic demand, original
-# method reproduced verbatim) when the file is absent. Must be included BEFORE
-# hydro_thermal_operation builds the policy graphs; the same override runs in
-# BOTH the SOCWRConic backward and the ACP forward graph builders.
-include(joinpath(@__DIR__, "sddp_demand_noise.jl"))
 # Robust flat-voltage primal starts for the ACP forward graph (vm = 0 default
 # start is singular for polar AC and crashes MadNLP at stressed load levels).
 include(joinpath(@__DIR__, "sddp_ac_starts.jl"))
 
-const save_file = "SDDP-$(CASE)-$(FORMULATION_FORWARD)-$(FORMULATION_BACKWARD)-h$(NUM_STAGES)$(DEMAND_TAG)-$(Dates.now())"
+# The frozen case has DETERMINISTIC demand and inflow-only uncertainty, so the
+# stage noise is HydroPowerModels' own `rainfall_noises` — no override, no
+# product atoms. A demand file appearing in the case directory would change the
+# stochastic program underneath the cuts, so its absence is asserted before any
+# model is built.
+for name in ("demand.csv", "demand_scenarios.csv", "demand_noise.csv")
+    isfile(joinpath(CASE_DIR, name)) && error(
+        "$name is present in $CASE_DIR. Cuts trained against a different " *
+        "stochastic program are not valid lower bounds for this one.",
+    )
+end
+
+const save_file = "SDDP-$(CASE)-$(FORMULATION_FORWARD)-$(FORMULATION_BACKWARD)-h$(NUM_STAGES)-$(Dates.now())"
 const CUTS_DIR = joinpath(CASE_DIR, string(FORMULATION_FORWARD))
-# DEMAND_TAG keeps demand-noise cuts in a separate file: cuts computed for the
-# deterministic-demand program are not valid lower bounds for the noisy one
-# (and vice versa), so they must never be warm-start-mixed.
 const CUTS_FILE = get(ENV, "DR_SDDP_CUTS_FILE", joinpath(
     CUTS_DIR,
-    string(FORMULATION_BACKWARD) * "-" * string(FORMULATION_FORWARD) * DEMAND_TAG * ".cuts.json",
+    string(FORMULATION_BACKWARD) * "-" * string(FORMULATION_FORWARD) * ".cuts.json",
 ))
 
 function clarabel_optimizer()
@@ -284,8 +286,7 @@ function main()
             "stat_replications" => STAT_REPLICATIONS,
             "stat_period" => STAT_PERIOD,
             "seed" => SEED,
-            # Demand-noise provenance: "none" = deterministic demand.
-            "demand_spread" => DEMAND_SPREAD === nothing ? "none" : DEMAND_SPREAD,
+            "demand" => "deterministic (0.6 x PowerModels.json, active and reactive)",
         ),
       )
       catch err; @warn "W&B init failed; stdout-only" err; lg=nothing; end

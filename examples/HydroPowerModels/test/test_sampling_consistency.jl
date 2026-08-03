@@ -31,13 +31,13 @@ using CSV, Tables, JSON
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-const SCRIPT_DIR = dirname(@__FILE__)
+const SCRIPT_DIR = dirname(dirname(@__FILE__))   # examples/HydroPowerModels
 const CASE_DIR = joinpath(SCRIPT_DIR, "bolivia")
 const INFLOW_FILE = joinpath(CASE_DIR, "inflows.csv")
 const HYDRO_FILE = joinpath(CASE_DIR, "hydro.json")
 
 const EXA_DIR = length(ARGS) >= 1 ? ARGS[1] :
-    joinpath(dirname(dirname(dirname(SCRIPT_DIR))),
+    joinpath(dirname(dirname(SCRIPT_DIR)),
              "..", "DecisionRulesExa.jl", "examples", "HydroPowerModels")
 
 # ── 1. Parse inflows with both loaders ───────────────────────────────────────
