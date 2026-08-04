@@ -130,17 +130,31 @@ cycle: TS-DDR prices energy **below** SDDP while the reservoirs are refilling,
 and **above** SDDP in the weeks just after each storage peak, when it is drawing
 down a stock it did not build as high.
 
+Every run of at least three consecutive stages of one sign, with its mean
+difference — shorter flips are sampling noise on a ten-scenario mean and are not
+listed:
+
 | stages | sign | mean difference |
 |---|---|---|
-| 1–15 | TS-DDR cheaper | −33.5 |
+| 1–5 | TS-DDR cheaper | −25.1 |
+| 7–15 | TS-DDR cheaper | −33.5 |
 | 20–30 | **TS-DDR dearer** | +14.0 |
-| 34–64 | TS-DDR cheaper | −11.4 to −38.8 |
+| 34–39 | TS-DDR cheaper | −11.9 |
+| 41–44 | TS-DDR cheaper | −20.0 |
+| 46–48 | TS-DDR cheaper | −11.4 |
+| 50–59 | TS-DDR cheaper | −38.8 |
+| 61–64 | TS-DDR cheaper | −29.7 |
 | 65–83 | **TS-DDR dearer** | +10.8 |
+| 88–90 | **TS-DDR dearer** | +12.8 |
 | 93–96 | **TS-DDR dearer** | +23.5 |
 
-Storage peaks near stages 15 and 63, and the dear bands open at 20 and 65 — just
-after each peak. The last band is both the largest and the final one, which is
-where the cumulative cost difference is actually paid.
+Reservoir storage peaks near stages 15 and 63, and the two long dear bands open
+at 20 and 65 — just after each peak, when the policy is drawing down a stock it
+did not build as high. The final band is the largest, and it is where the
+cumulative cost difference is actually paid.
+
+This table is printed by `plot_hydro_results.jl` alongside the figure, so it is
+regenerated from the evidence rather than transcribed once.
 
 The two price *levels* differ by well under a percent and are not distinguishable
 by eye, which is why the difference is drawn on its own axis below them rather
