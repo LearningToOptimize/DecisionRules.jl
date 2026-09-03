@@ -28,14 +28,14 @@ cluster scheduler and writes no telemetry.
 | owned by | what |
 |---|---|
 | PGLib.jl | the benchmark case and its parser |
-| PowerModels.jl | buses, generators, branches, voltage variables, reference angle, Ohm's law at both ends with taps and phase shifts, shunts, angle-difference limits, apparent-power limits at both ends, nodal active and reactive balances, generator bounds and costs, and the `ACPPowerModel` / `SOCWRConicPowerModel` formulations themselves |
+| PowerModels.jl | buses, generators, branches, voltage variables, reference angle, Ohm's law at both ends with taps and phase shifts, shunts, angle-difference limits, apparent-power limits at both ends, nodal active and reactive balances, generator bounds and costs, and the `ACPPowerModel` / `SOCWRConicPowerModel` / `DCPPowerModel` formulations themselves |
 | SDDP.jl | policy graph, state variables, sampling, cut generation, training, simulation |
 | Distributions.jl | the laws an authoring demand sampler is built from |
 | this example | batteries: energy state, charge/discharge, state transition, unity-power-factor injection, throughput cost, the strict outgoing-energy target equality, the two-sided nodal active-power recourse, and the demand parameterization |
 
-No AC trigonometry and no SOC-WR lifted branch equation is written here. The
-regression suite scans the model-building files and the diagnostics and fails if
-one appears.
+No AC trigonometry, no SOC-WR lifted branch equation and no DC susceptance-times-
+angle-difference flow is written here. The regression suite scans the
+model-building files and the diagnostics and fails if one appears.
 
 ## Files
 
@@ -48,9 +48,69 @@ one appears.
 | `battery_powermodels.jl` | the battery layer on top of PowerModels: the shared problem specification, stage-model construction, the strict stage solve with its multipliers, nodal prices, binding limits, solution extraction, and the runtime provenance assertion |
 | `battery_diagnostics.jl` | the diagnostic toolkit: incoming-energy sampling, the targetless probe, the fixed-outgoing-energy value curve, the multiperiod deterministic equivalent and the perfect-foresight panel |
 | `battery_analysis.jl` | tables and figures over the shared schema |
-| `battery_sddp.jl` | the SDDP baseline: SOC-WR backward graph, true-ACP forward graph, stock cuts, paired simulation on a protocol |
+| `battery_sddp.jl` | the SDDP baseline: a SELECTABLE convex backward graph (SOC-WR or DC), true-ACP forward graph, stock cuts, paired simulation on a protocol, the standard cost report, and the study's four method identifiers |
+| `battery_portfolio.jl` | the **preregistered PGLib panel**: hash-keyed storage placement, PTDF-sensitivity regions, the finite joint demand support, the ACP headroom calibration, and the manifest a reader regenerates every case from |
+| `battery_portfolio.json` | the frozen panel manifest. **Byte-identical copy in the Exa package.** |
+| `portfolio_runner.jl` | the production runner: one preemptible SEGMENT of one long SDDP run (`sddp_soc` or `sddp_dc`), with identity binding, verified checkpoints that embed the cuts, resume and a stop protocol |
 | `test/runtests.jl` | the consolidated regression suite |
 | `case/<name>/` | the constructed artifacts: `network.json`, `batteries.json`, `demand.json`, `case_manifest.json`. **Not committed** — see below. |
+
+
+## Running a long study: `portfolio_runner.jl`
+
+`train_battery_sddp` is one training call in one process. A study run is longer
+than any queue reservation and can be killed at any moment, so it is executed as
+a sequence of SEGMENTS, each a separate invocation of `portfolio_runner.jl` that
+continues the previous one from a verified checkpoint. The runner adds no
+science: the policy graphs, the stock `AlternativeForwardPass` /
+`AlternativePostIterationCallback` pair, the cuts, the cost and the paired
+protocol evaluation are the same objects `battery_sddp.jl` describes.
+
+```bash
+julia --project=. portfolio_runner.jl \
+    --case-manifest case/pglib_opf_case118_ieee/case_manifest.json \
+    --method        sddp_soc \
+    --config        config.toml \
+    --protocol      screening.toml \
+    --output        run/seg001 \
+    --resume-from   none
+```
+
+Those six flags are the whole contract; `--run-id`, `--segment`, `--attempt`,
+`--stop-file` and `--max-seconds` exist for an automated caller and all default.
+The protocol descriptor is written once per case with
+
+```julia
+include("portfolio_runner.jl")
+write_protocol_descriptor("case/pglib_opf_case118_ieee", "screening.toml")
+```
+
+and a descriptor naming the FINAL protocol is refused, both when writing one and
+when a run is launched against one — before any scenario is solved.
+
+**Continuation is the only path.** The runner trains in chunks of
+`checkpoint_every` iterations, and every chunk rebuilds both graphs from the
+frozen case and restores the previous chunk's cuts through
+`SDDP.read_cuts_from_file` — whether or not the process was ever interrupted. A
+resumed run therefore does not merely resemble the uninterrupted one, it takes
+the identical path. `train_battery_sddp` gained one keyword for this,
+`resume_cuts`, which reads a tagged cut file into the backward graph AND the ACP
+forward graph before the first iteration; a forward graph resumed without the
+cuts would decide against an empty cost-to-go. No solver object is serialized
+and no SDDP internal is parsed by hand.
+
+Sampling is made a function of the global iteration index the same way: each
+chunk's seed is derived from `(seed, iterations already completed)`.
+
+**What a segment writes.** `checkpoints/ck_XXXXXXXX.<tag>.json`, which embeds
+the cut set exactly as `SDDP.write_cuts_to_file` produced it together with the
+iteration count, the sampling position, the convergence and evaluation histories
+and the best admissible true-ACP forward result — plus a `.meta.toml` sidecar
+naming its digest, written second so no sidecar can vouch for an unfinished
+file. Then `history.csv`, `trajectory.csv`, `evaluation.csv`, `result.toml` and
+`identity.toml`. The arm's scalar travels with `bound_name` and
+`bound_bounds_acp` in every one of them, so the DC arm's number never acquires
+the word "bound" from a column heading.
 
 ---
 
@@ -404,7 +464,7 @@ different problem.
 ```julia
 trained = train_battery_sddp(case; num_stages = 30, iteration_limit = 300)
 trained.bound                      # over the SOC-WR relaxation, over 30 stages
-assert_graph_provenance(trained.backward, PowerModels.SOCWRConicPowerModel)
+assert_graph_provenance(trained.backward_graph, PowerModels.SOCWRConicPowerModel)
 assert_graph_provenance(trained.forward, PowerModels.ACPPowerModel)
 
 sims = simulate_battery_sddp_on(trained, proto;
@@ -413,18 +473,62 @@ costs = [sum(s[t][:stage_objective] for t in 1:30) for s in sims]
 paired_difference(costs, [panel.results[c].total_cost for c in 1:8])
 ```
 
-The backward pass is an actual `PowerModels.SOCWRConicPowerModel`, the forward
-pass an actual `PowerModels.ACPPowerModel`, and the two are joined by SDDP.jl's
-own `AlternativeForwardPass` / `AlternativePostIterationCallback`. No
+The backward pass is an actual convex PowerModels formulation, the forward pass
+an actual `PowerModels.ACPPowerModel`, and the two are joined by SDDP.jl's own
+`AlternativeForwardPass` / `AlternativePostIterationCallback`. No
 `duality_handler` is overridden and no cut is filtered, retried or reweighted.
-
-The bound is a bound on the **SOC-WR relaxation over the horizon it was trained
-on**. Quoting it beside a forward cost accumulated over a different number of
-stages compares two different quantities, and nothing here invites that.
 
 `simulate_battery_sddp_on` replays a fixed protocol through `SDDP.Historical`,
 which is what makes an SDDP cost **paired** with a perfect-foresight cost and,
 later, with a TS-DDR cost.
+
+### Two backward formulations, and what their scalars mean
+
+`backward = :soc` (the default) builds the backward nodes as
+`PowerModels.SOCWRConicPowerModel`; `backward = :dc` builds them as
+`PowerModels.DCPPowerModel`. That is the only thing the keyword changes: the
+forward pass, the demand support and its probabilities, the storage state, the
+battery layer, the generator data and the generator cost polynomials, the
+uncapped physical recourse and the SDDP machinery are shared, not duplicated.
+
+```julia
+dc = train_battery_sddp(case; backward = :dc, num_stages = 24, iteration_limit = 300,
+                        cut_path = sddp_cut_path("out", case, :dc))
+dc.backward                # :dc
+dc.backward_formulation    # PowerModels.DCPPowerModel
+dc.bound_name              # "DC-approximation training bound"
+dc.bound_bounds_acp        # false
+sddp_method_id(dc)         # :sddp_dc
+```
+
+The two SCALARS are not the same kind of object and this example never lets them
+be printed as if they were:
+
+| arm | scalar | is it a lower bound on the true ACP problem? |
+|---|---|---|
+| `:soc` | **SOC-WR relaxation bound** | **yes** — the relaxation lower-bounds ACP, so its bound does too |
+| `:dc` | **DC-approximation training bound** | **no** — the DC approximation drops the reactive balance and fixes voltage magnitudes, so it is neither a relaxation nor a restriction of ACP and its value bounds nothing in either direction |
+
+The DC scalar is the internal convergence scalar of the approximation the cuts
+came from, reported to say whether that training converged. It changes arithmetic
+in exactly one place: `cost_report`'s recoverable ceiling `f` drops the bound
+term from `max(bound, pf_mean)` on the DC arm, because a number that does not
+bound the best nonanticipative cost has no right to tighten a cap on it.
+
+Neither scalar is comparable to a forward objective accumulated over a different
+number of stages, and nothing here invites that.
+
+**The arms cannot be confused.** `backward`, `backward_formulation`, `bound_name`
+and `bound_bounds_acp` travel with every result; `cost_report` prints the method
+identifier and labels row `b` from `bound_name`; and a cut file must carry the
+arm's tag in its name — `sddp_cut_path` builds one and `train_battery_sddp`
+refuses a path that does not.
+
+The DC arm is validated against a **direct PowerModels DC oracle**: an ordinary
+`solve_opf(net, DCPPowerModel, …)` on a network with no storage table at all,
+whose per-bus load is the realized demand minus the battery's net injection. It
+must agree on generation, generation cost and every branch flow, and the DC nodal
+balance and line flows are recomputed independently from the reported angles.
 
 ## 13. Where strict TS-DDR enters
 
@@ -438,6 +542,133 @@ through the shared solution schema.
 
 ---
 
+# The preregistered PGLib portfolio
+
+Sections 1–13 are the toolkit. The **study** is not one case built by hand with
+it: it is a panel of canonical PGLib systems whose every construction choice is
+a documented function of the benchmark's own bytes. `battery_portfolio.jl` is
+that function, and `battery_portfolio.json` is what it produced.
+
+## Regenerating a case
+
+```bash
+julia --project=. battery_portfolio.jl --list                        # the panel
+julia --project=. battery_portfolio.jl --verify                      # check the manifest
+julia --project=. battery_portfolio.jl --case pglib_opf_case118_ieee --out /tmp/panel
+```
+
+The third command acquires the canonical PGLib case, recomputes the regions and
+the placement, rebuilds the frozen support at the recorded demand level, writes
+the four case artifacts into `/tmp/panel/pglib_opf_case118_ieee/`, and **fails
+closed** if the acquired network, the recomputed regions, the recomputed
+placement, the frozen support or any written artifact does not hash to what the
+manifest records. Add `--verify-all` to re-run the full `24 × 6` headroom gate
+as well. No private repository, no cluster scheduler and no pre-generated JSON
+is involved.
+
+## What is frozen, and how
+
+| choice | rule |
+|---|---|
+| horizon | `T = 24`, one hour per stage |
+| profile | one common normalized 24-value daily profile, multiplying `pd` AND `qd`, so every realization keeps each load's own power factor |
+| eligible buses | in service, positive nominal active demand, and reachable from the reference bus over in-service branches |
+| battery count | `min(#eligible, clamp(round(0.20 n_bus), 24, 240))` |
+| placement | weighted sampling without replacement, proportional to nominal active demand, with each bus's key drawn from `SHA-256(schema, "placement", seed, network digest, bus)` — no RNG, so the panel survives a reimplementation |
+| ratings | 10 % of the calibrated peak active demand, split by nominal demand capped at 3× the selected-bus median; 8 h duration, 5 % reserve, 50 % initial, 0.95/0.95 efficiency, 0.999 self-discharge, throughput cost 5.0 |
+| regions | six, **demand-balanced** assignment over unit-norm PTDF sensitivity signatures on the highest-reach rated corridors, relabelled by descending demand; each region carries 8–28 % of nominal demand |
+| uncertainty | six equiprobable joint atoms; atom `r` gives region `r` a multiplier of `1.15` and every other region `0.97`, so each region's support mean is exactly `(1.15 + 5×0.97)/6 = 1` and the regions are **negatively** correlated |
+| demand level | `κ_case = 0.95 κ_max`, where `κ_max` is the largest level in `[0.50, 1.25]` at which every atom of the peak-profile stage solves in base ACP, unmodified and battery-free, with residual ≤ 1e-7 and no meaningful recourse |
+| protocols | a 500-column final panel from one seed, and a 32-column screening panel from an independent seed, **repaired against the final one so the two share no scenario by construction** |
+
+The demand level is the only quantity the manifest carries that a reader cannot
+cheaply recompute — it costs a bisection plus a `24 × 6` verification of true-ACP
+solves per case — so it is recorded and `--verify-all` re-derives it on demand.
+Everything else in the manifest is a digest of something the reader regenerates.
+
+## Why the regions are balanced
+
+Six regions are six LEVERS only if they carry comparable demand. The atoms move
+demand by region, so a region holding 0.2 % of the load is an atom that moves
+nothing — and an unconstrained clustering does exactly that: on the first freeze
+it put 80.8 % of `case1951_rte`'s demand in one region and 61.5 % of
+`case300_ieee`'s, collapsing six atoms toward two directions.
+
+The assignment step is therefore an integer program (HiGHS, through JuMP) that
+keeps the same PTDF objective and adds the demand bounds:
+
+```math
+\min_x \sum_{i,r} w_i \lVert s_i - c_r \rVert^2 x_{ir}
+\quad\text{s.t.}\quad
+\sum_r x_{ir} = 1,\;
+0.08\,W \le \sum_i w_i x_{ir} \le 0.28\,W,\;
+x_{ir} \in \{0,1\},
+```
+
+refined over Lloyd sweeps so the bounds hold at every sweep rather than only at
+the end. A bus is indivisible, so if ONE bus alone exceeds 28 % the cap rises to
+exactly that bus's share and a `Σy ≤ 1` constraint lets a single region use it —
+the minimum necessary exception, recorded in the manifest.
+
+Balancing did not cost PTDF coherence. Measured over the panel, weighted
+within-region signature dispersion went to 0.79–1.10× of the unconstrained
+value — better on seven cases — because both are local searches and solving each
+assignment step to global optimality lands in a better basin. Both numbers are
+recorded per case so the tradeoff is visible rather than assumed.
+
+## The reported cost is not the solver's objective
+
+An interior-point method does not leave a nonnegative variable at zero; it
+leaves it a barrier tolerance away, and the sign depends on the solver. The
+recourse price is 1e5–1e6 per pu, so 1e-8 pu on a couple of thousand buses is
+tens of cost units of pure numerical residue — on a stage where neither engine
+used any recourse at all.
+
+`physical_stage_cost`, in the byte-identical `battery_solution_schema.jl`, is the
+only function either engine may use to produce a headline cost:
+
+```julia
+c = physical_stage_cost(sol, case.recourse)
+c.raw          # the solver's own objective, preserved for diagnostics
+c.corrected    # generation + throughput + recourse actually charged
+c.correction   # the barrier artifact, reported rather than discovered
+c.admissible   # false if any element exceeded the physical tolerance
+```
+
+Every recourse element within `PHYSICAL_RECOURSE_TOL = 1e-6` pu of zero is
+projected to exactly zero, element by element. An element OUTSIDE it is not
+projected: the solve is marked inadmissible and the caller rejects it. The
+projection changes what is reported, never what was solved — the stage problem
+still carries the recourse at full price.
+
+> **The margin is not a knob.** `0.95` is a constant of `battery_portfolio.jl`,
+> fixed before any method was run, identical for every case. So is the bracket,
+> so is the tolerance, and so is the solver configuration: a case is never
+> "helped" to a higher level. A case whose unmodified base ACP fails at `0.50` is
+> **replaced** from a preregistered reserve list, and the replacement is recorded
+> in the manifest. A SOC, DC or method failure never causes a replacement.
+
+## Validating a frozen case
+
+```julia
+include("battery_portfolio.jl")
+case = materialize_portfolio_case("pglib_opf_case118_ieee"; dir = "/tmp/panel/c118")
+validate_portfolio_case(case; stages = 1:24, atoms = 1:1)   # strict-stage gate
+aggressive_charge_probe(case)                                # the diagnostic
+```
+
+`validate_portfolio_case` checks that every initial state is inside its bounds,
+that every reachable interval is nonempty, that the idle/hold target is feasible,
+that every strict ACP solve completes, that the independently recomputed physical
+residual is at most 1e-7 and that no solve uses meaningful recourse.
+
+`aggressive_charge_probe` is the opposite: it aims the whole fleet at the top of
+its reachable interval on one stage, which is an admissible target the network
+may not be able to serve. When it draws recourse, the right outcome is that
+admissibility **rejects** the solution — not that the case is changed.
+
+---
+
 ## Commands
 
 ```bash
@@ -445,15 +676,48 @@ through the shared solution schema.
 DR_BAT_MIRROR=/path/to/DecisionRulesExa.jl/examples/BatteryStorageOPF \
   julia --project=. build_battery_case.jl
 
+# the portfolio panel
+julia --project=. battery_portfolio.jl --list
+julia --project=. battery_portfolio.jl --verify
+julia --project=. battery_portfolio.jl --case <PGLIB CASE> --out <DIR>
+
 # re-verify a frozen case in place: hashes, schemas, stage duration, support, protocol
 julia --project=. build_battery_case.jl --verify
 
 # stock SDDP: SOC-WR backward, true-ACP forward, construction smoke
 julia --project=. battery_sddp.jl
 
+# the same smoke with DC backward nodes
+DR_BAT_SDDP_BACKWARD=dc julia --project=. battery_sddp.jl
+
 # the consolidated regression suite
 julia --project=. test/runtests.jl
 ```
+
+## The study's four method identifiers
+
+`BATTERY_METHODS` carries the four the study compares, with the same rows and the
+same invariant fields in **both** public engines:
+
+| identifier | engine | what varies |
+|---|---|---|
+| `tsddr_nonlinear` | the Exa engine | LSTM encoder, nonlinear head |
+| `tsldr_recurrent_linear` | the Exa engine | affine recurrence, affine head |
+| `sddp_soc` | this one | `SOCWRConicPowerModel` backward cuts |
+| `sddp_dc` | this one | `DCPPowerModel` backward cuts |
+
+```julia
+battery_method(:sddp_dc)                 # the descriptor and the shared invariants
+run_battery_method(:sddp_dc, case; num_stages = 24, iteration_limit = 300)
+run_battery_method(:tsddr_nonlinear, case)   # refused here: it is the Exa engine's
+```
+
+Every row declares the same horizon (24), protocol (screening), strict target
+semantics, recourse and admissibility rule, cost contract
+(`physical_stage_cost`) and comparison path (true ACP on paired protocol
+columns), and each suite asserts it. `run_battery_method` is a dispatch layer,
+not a campaign runner: it selects an implementation and forwards keyword
+arguments, and it schedules nothing.
 
 ## Environment variables
 
@@ -470,8 +734,8 @@ Case construction (`build_battery_case.jl`):
 | `DR_BAT_PROTOCOL_SEED`, `DR_BAT_PROTOCOL_STAGES`, `DR_BAT_PROTOCOL_SCENARIOS` | the evaluation protocol the manifest records a digest for |
 | `DR_BAT_MIRROR` | Exa example directory to mirror the case and shared sources into |
 
-SDDP smoke (`battery_sddp.jl`): `DR_BAT_SDDP_STAGES` (3), `DR_BAT_SDDP_ITERATIONS`
-(10), `DR_BAT_SDDP_SIMS` (6).
+SDDP smoke (`battery_sddp.jl`): `DR_BAT_SDDP_BACKWARD` (`soc`),
+`DR_BAT_SDDP_STAGES` (3), `DR_BAT_SDDP_ITERATIONS` (10), `DR_BAT_SDDP_SIMS` (6).
 
 ## What the recourse variables are, and are not
 
@@ -492,8 +756,10 @@ reported.
 ## Expected outputs
 
 `build_battery_case.jl` prints the case summary and the artifact, support and
-protocol digests. `battery_sddp.jl` prints the SOC-WR bound over its own horizon,
-the number of stock cuts created, the true-ACP forward cost over the simulated
-paths, the worst recourse on any simulated stage, and one battery's energy
-trajectory. The bound and the forward cost are quoted over the SAME horizon; a
-bound never bounds a metric accumulated over a different number of stages.
+protocol digests. `battery_sddp.jl` prints the method identifier of the arm it
+ran, its backward scalar under that arm's own name together with whether that
+scalar bounds the true ACP problem, the number of stock cuts created, the
+true-ACP forward cost over the simulated paths, the worst recourse on any
+simulated stage, and one battery's energy trajectory. The scalar and the forward
+cost are quoted over the SAME horizon; a bound never bounds a metric accumulated
+over a different number of stages.

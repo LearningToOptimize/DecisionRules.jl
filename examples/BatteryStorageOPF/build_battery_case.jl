@@ -597,7 +597,19 @@ diagnostic, an engine — calls this rather than assuming someone checked one in
 """
 function ensure_case(dir::AbstractString = joinpath(@__DIR__, "case", DEFAULT_CASE);
                      quiet::Bool = true, kwargs...)
-    isfile(joinpath(dir, "case_manifest.json")) && return read_battery_case(dir)
+    if isfile(joinpath(dir, "case_manifest.json"))
+        # A case directory left over from an earlier revision of the contract
+        # cannot be read, and the right response is to rebuild it rather than to
+        # stop: the artifacts are a pure function of the builder, so there is
+        # nothing in them to lose. A rebuild that ALSO fails is a real error and
+        # is not caught here.
+        try
+            return read_battery_case(dir)
+        catch e
+            quiet || @warn "rebuilding $dir: it could not be read" exception = e
+            rm(dir; recursive = true, force = true)
+        end
+    end
     return build(; dir = dir, quiet = quiet, kwargs...)
 end
 

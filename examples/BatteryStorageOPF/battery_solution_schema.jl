@@ -307,3 +307,173 @@ function read_solution(path::AbstractString)
     end
     return out
 end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The physical cost contract
+#
+# An interior-point method does not leave a nonnegative variable AT zero. It
+# leaves it a barrier tolerance away, and the sign of that offset depends on the
+# solver's own bound handling — Ipopt parks the two nodal recourse injections at
+# exactly zero, MadNLP a bound-relaxation below it. On any one bus the
+# difference is about 1e-8 pu and physically nothing at all.
+#
+# The recourse PRICE, however, is chosen far above any generator, 1e5 to 1e6 per
+# pu. Multiply 1e-8 pu by 1e6 and sum over two thousand buses and the two
+# engines' reported stage objectives differ by tens of cost units on a problem
+# where neither used any recourse. That difference is a barrier artifact of the
+# solver, not a difference between two policies, and it must never reach a
+# training-selection metric or a paired cost comparison.
+#
+# So the reported cost is defined here, once, and both engines compute it with
+# THIS code:
+#
+#   * the raw solver objective is preserved, untouched, for diagnostics;
+#   * every recourse element within the declared physical tolerance of zero is
+#     projected to EXACTLY zero, element by element;
+#   * an element outside that tolerance is NOT projected. The solve is marked
+#     inadmissible and the caller rejects it — a policy that genuinely used
+#     recourse is rejected, never quietly priced.
+#
+# The projection changes what is REPORTED, never what was solved. The stage
+# problem still carries the recourse variables at their full price, which is
+# what makes a dynamically reachable target attainable; nothing here relaxes a
+# constraint, adds a penalty or rewrites an objective.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+The bound relaxation every TRUE-ACP solve of this study runs with.
+
+# Notes
+ONE value, shared by every ACP path on both engines: the JuMP/PowerModels/Ipopt
+ACP model, the ExaModels/MadNLP ACP model on CPU **and** on GPU, nonlinear
+TS-DDR, recurrent-linear TSLDR, the ACP forward evaluation of both the SOC-WR
+and the DC SDDP arms, and every deterministic-equivalent, perfect-foresight,
+diagnostic and cross-engine parity solve. It is stated explicitly at each site
+rather than inherited from a solver default, because the two solvers do not
+agree on what that default is and a study whose two engines relax bounds
+differently is not comparing like with like.
+
+An interior-point method relaxes every variable bound by this factor before
+solving, so the point it converges to may sit fractionally outside the declared
+box. That is why the study's guarantee is the residual RECOMPUTED from the
+reported solution — never the solver's own infeasibility report, which is the
+infeasibility of the relaxed problem.
+
+**It may not be set to zero.** Doing so was measured to break the CUDSS/GPU path
+outright: `RESTORATION_FAILED` at iteration 2 on every case and horizon tried
+(`case14` T=3 and T=24, `case118` T=24, `case1354_pegase` T=24), while the CPU
+path was unaffected — so a CPU-only validation cannot establish this setting.
+"""
+const ACP_BOUND_RELAX_FACTOR = 1e-8
+
+"""
+Largest transition-equality residual that still counts as exact, derived from
+[`ACP_BOUND_RELAX_FACTOR`](@ref) rather than fitted to an observation.
+
+# Notes
+The transition row carries BOTH controls,
+
+```math
+e_t - \\alpha e_{t-1} - \\eta^{ch}\\Delta t\\, p^{ch}_t
+    + (\\Delta t/\\eta^{dis})\\, p^{dis}_t = 0,
+```
+
+and an interior-point method may leave each control a bound relaxation outside
+its declared box. Projecting those deviations back onto the ORIGINAL feasible
+bounds contributes about
+
+```math
+\\Delta t\\,(\\eta^{ch}\\delta^{ch} + \\delta^{dis}/\\eta^{dis}),
+```
+
+which at `ACP_BOUND_RELAX_FACTOR = 1e-8` is order `2e-8`. The factor five covers
+the known coefficients with margin while staying 100x tighter than the
+single-digit `1e-6` original-problem residual scale the study reports at.
+
+Checked PER TRANSITION ROW, so it does not accumulate with the horizon. The
+`max` with `1e-9` preserves the historical gate for any tighter relaxation.
+"""
+const TRANSITION_RESIDUAL_TOL = max(1e-9, 5 * ACP_BOUND_RELAX_FACTOR)
+
+"""
+Largest recourse injection, in pu, that still counts as none.
+
+# Notes
+The same constant on both sides of the study. It is well above any
+interior-point method's distance-to-bound — measured at about `1e-8` pu on both
+engines — and far below any quantity the network cares about.
+"""
+const PHYSICAL_RECOURSE_TOL = 1e-6
+
+"""
+    project_recourse(values, tol=PHYSICAL_RECOURSE_TOL) -> (projected, worst, admissible)
+
+Project a recourse map element by element.
+
+# Returns
+- `projected::Dict{Int,Float64}`: every element within `tol` of zero replaced by
+  exactly `0.0`, every other element kept verbatim.
+- `worst::Float64`: the largest absolute RAW value, before projection.
+- `admissible::Bool`: whether every element was within `tol`.
+
+# Notes
+Element by element, never in aggregate. A thousand buses each `1e-7` pu short sum
+to `1e-4` pu, which an aggregate test would wave through and which this rejects
+one element at a time — and, conversely, one bus genuinely short by `1` pu is
+caught even though the other thousand are clean.
+"""
+function project_recourse(values::AbstractDict, tol::Real = PHYSICAL_RECOURSE_TOL)
+    out = Dict{Int,Float64}()
+    worst = 0.0
+    admissible = true
+    for k in sort!(collect(keys(values)))
+        v = Float64(values[k])
+        worst = max(worst, abs(v))
+        if abs(v) <= tol
+            out[k] = 0.0
+        else
+            out[k] = v
+            admissible = false
+        end
+    end
+    return out, worst, admissible
+end
+
+"""
+    physical_stage_cost(sol, recourse; tol=PHYSICAL_RECOURSE_TOL) -> NamedTuple
+
+The stage cost this study reports, and the raw objective it came from.
+
+# Arguments
+- `sol`: any engine's stage solution, needing `cost_generation`,
+  `cost_throughput`, `deficit`, `surplus` and (optionally) `objective`.
+- `recourse::RecourseCosts`: the case's own frozen recourse prices.
+
+# Returns
+`(raw, corrected, generation, throughput, deficit, surplus, correction,
+worst_recourse, admissible)` — every field in the case's own objective units.
+
+# Notes
+`corrected` is the sum of the generation cost, the throughput cost and the
+recourse actually charged AFTER projection; `correction = raw - corrected` is
+the barrier artifact, reported so it can be inspected rather than discovered.
+
+This is the ONLY function either engine may use to produce a headline cost. The
+raw objective is a solver diagnostic and comparing two engines on it compares
+their barrier parameters.
+"""
+function physical_stage_cost(sol, recourse; tol::Real = PHYSICAL_RECOURSE_TOL)
+    d, worst_d, ok_d = project_recourse(sol.deficit, tol)
+    s, worst_s, ok_s = project_recourse(sol.surplus, tol)
+    cost_d = recourse.deficit * sum(values(d); init = 0.0)
+    cost_s = recourse.surplus * sum(values(s); init = 0.0)
+    gen = Float64(sol.cost_generation)
+    thr = Float64(sol.cost_throughput)
+    corrected = gen + thr + cost_d + cost_s
+    raw = hasproperty(sol, :objective) ? Float64(sol.objective) : NaN
+    return (raw = raw, corrected = corrected, generation = gen, throughput = thr,
+            deficit = cost_d, surplus = cost_s,
+            correction = isnan(raw) ? NaN : raw - corrected,
+            worst_recourse = max(worst_d, worst_s),
+            admissible = ok_d && ok_s)
+end

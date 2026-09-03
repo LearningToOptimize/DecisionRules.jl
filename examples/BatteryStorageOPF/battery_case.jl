@@ -52,7 +52,7 @@ using Printf
 const BATTERY_NETWORK_SCHEMA  = "battery_storage_opf/network/1"
 const BATTERY_BATTERY_SCHEMA  = "battery_storage_opf/batteries/2"
 const BATTERY_DEMAND_SCHEMA   = "battery_storage_opf/demand/2"
-const BATTERY_MANIFEST_SCHEMA = "battery_storage_opf/manifest/2"
+const BATTERY_MANIFEST_SCHEMA = "battery_storage_opf/manifest/3"
 
 """
     STAGE_AVAILABILITY_KEY
@@ -585,8 +585,8 @@ function support_digest(s::DemandSupport)
 end
 
 """
-    scenario_index_matrix(s::DemandSupport, num_stages, num_scenarios; seed=nothing)
-        -> Matrix{Int}
+    scenario_index_matrix(s::DemandSupport, num_stages, num_scenarios;
+                          seed=nothing, exclude=nothing) -> Matrix{Int}
 
 A paired evaluation protocol, reproduced by construction rather than stored.
 
@@ -601,6 +601,10 @@ A paired evaluation protocol, reproduced by construction rather than stored.
   and selecting checkpoints, and a final one no policy was ever selected on.
   Taking the screening set as a prefix of the final one would make the final
   protocol not fresh, which is the whole property it exists to have.
+- `exclude`: an iterable of length-`num_stages` integer columns this protocol may
+  not contain. Passing the FINAL protocol's columns here is what makes a
+  screening protocol disjoint from it BY CONSTRUCTION rather than by the
+  probabilistic argument that a collision is unlikely — see the notes.
 
 # Returns
 - `Matrix{Int}` of size `(num_stages, num_scenarios)`; entry `[t, s]` is the
@@ -618,9 +622,19 @@ Because each stage's support size ``K_t`` may differ, a scenario-major order
 would make the stream position depend on the horizon; stage-major keeps a
 protocol of `num_scenarios` columns a prefix of a protocol of more columns only
 within a stage, which is the property shard boundaries rely on.
+
+The exclusion is applied as a REPAIR after that stage-major draw, never as a
+per-draw filter, precisely so the stage-major property survives it: the matrix is
+drawn exactly as it would have been without `exclude`, then any column that is
+banned or that repeats an earlier column of this same matrix is redrawn — in
+ascending column order, from the continuation of the same stream, retrying until
+the column is admissible. On a support with more paths than columns nothing is
+ever redrawn and the matrix is bit-identical to the unexcluded one; the repair
+exists so that "screening and final share no scenario" is a structural fact on
+a small support too, where a collision is not merely unlikely but certain.
 """
 function scenario_index_matrix(s::DemandSupport, num_stages::Integer, num_scenarios::Integer;
-                               seed = nothing)
+                               seed = nothing, exclude = nothing)
     num_stages >= 1 || throw(ArgumentError("num_stages must be positive"))
     num_scenarios >= 1 || throw(ArgumentError("num_scenarios must be positive"))
     num_stages <= s.horizon ||
@@ -633,11 +647,52 @@ function scenario_index_matrix(s::DemandSupport, num_stages::Integer, num_scenar
             m[t, c] = rand(rng, 1:K)
         end
     end
+    exclude === nothing && return m
+
+    # The banned set: the columns the caller forbids, plus — as they are
+    # accepted — the columns of this protocol itself, so a repaired protocol
+    # never contains the same scenario twice either.
+    banned = Set{Vector{Int}}()
+    for col in exclude
+        v = Int.(collect(col))
+        length(v) == num_stages ||
+            throw(ArgumentError("excluded column has $(length(v)) stages, expected $num_stages"))
+        push!(banned, v)
+    end
+    # The support has ∏_t K_t distinct paths; asking for more admissible columns
+    # than exist is a specification error, not something to discover by looping.
+    capacity = prod(BigInt(num_atoms(s, t)) for t in 1:num_stages)
+    capacity >= length(banned) + num_scenarios ||
+        throw(ArgumentError("the support has $capacity distinct $num_stages-stage paths, " *
+                            "which cannot supply $num_scenarios columns disjoint from " *
+                            "$(length(banned)) excluded ones"))
+    for c in 1:num_scenarios
+        col = Int[m[t, c] for t in 1:num_stages]
+        while col in banned
+            for t in 1:num_stages
+                col[t] = rand(rng, 1:num_atoms(s, t))
+            end
+        end
+        for t in 1:num_stages
+            m[t, c] = col[t]
+        end
+        push!(banned, col)
+    end
     return m
 end
 
 """
-    protocol_digest(s::DemandSupport, num_stages, num_scenarios; seed=nothing) -> String
+    protocol_columns(m::AbstractMatrix{<:Integer}) -> Vector{Vector{Int}}
+
+The columns of a protocol index matrix, in the form
+[`scenario_index_matrix`](@ref) accepts as `exclude`.
+"""
+protocol_columns(m::AbstractMatrix{<:Integer}) =
+    [Int[m[t, c] for t in 1:size(m, 1)] for c in 1:size(m, 2)]
+
+"""
+    protocol_digest(s::DemandSupport, num_stages, num_scenarios;
+                    seed=nothing, exclude=nothing) -> String
 
 SHA-256 of the protocol index matrix, in a fixed textual encoding.
 
@@ -646,10 +701,15 @@ The digest, not the matrix, is what the manifest stores. Both engines recompute
 the matrix from the seed and must obtain this digest; a mismatch means the two
 engines are not evaluating the same scenarios and no comparison between them is
 meaningful.
+
+The digest is of the MATRIX, so it says nothing about how the matrix was
+repaired: two calls that produce the same columns hash the same whether or not an
+exclusion set was in force. What records the exclusion is the manifest field that
+names it, which is also what a reader needs in order to regenerate the matrix.
 """
 function protocol_digest(s::DemandSupport, num_stages::Integer, num_scenarios::Integer;
-                         seed = nothing)
-    m = scenario_index_matrix(s, num_stages, num_scenarios; seed = seed)
+                         seed = nothing, exclude = nothing)
+    m = scenario_index_matrix(s, num_stages, num_scenarios; seed = seed, exclude = exclude)
     io = IOBuffer()
     println(io, "battery_storage_opf/protocol/2")
     println(io, num_stages, " ", num_scenarios, " ",
@@ -1303,22 +1363,29 @@ function write_battery_case(dir::AbstractString;
         ),
         # The FINAL paired protocol. Generated from the support's own seed and
         # hashed here; a phase that must not evaluate on it can still record what
-        # it will be.
+        # it will be. It is generated FIRST and depends on nothing else, which is
+        # what keeps it independent of every screening decision.
         "protocol" => Dict{String,Any}(
             "seed" => demand.protocol_seed,
             "num_stages" => protocol_stages,
             "num_scenarios" => protocol_scenarios,
             "sha256" => protocol_digest(demand, protocol_stages, protocol_scenarios),
         ),
-        # The SCREENING protocol, drawn from an INDEPENDENT seed. Everything a
-        # case-selection or checkpoint-selection decision may look at comes from
-        # here, which is what leaves the final protocol fresh.
+        # The SCREENING protocol, drawn from an INDEPENDENT seed and repaired
+        # against the final protocol's columns, so the two panels share no
+        # scenario BY CONSTRUCTION. Everything a case-selection or
+        # checkpoint-selection decision may look at comes from here, which is what
+        # leaves the final protocol fresh.
         "screening" => screening_seed === nothing ? nothing : Dict{String,Any}(
             "seed" => Int(screening_seed),
             "num_stages" => protocol_stages,
             "num_scenarios" => Int(screening_scenarios),
+            "excludes" => "protocol",
             "sha256" => protocol_digest(demand, protocol_stages, Int(screening_scenarios);
-                                        seed = Int(screening_seed)),
+                                        seed = Int(screening_seed),
+                                        exclude = protocol_columns(
+                                            scenario_index_matrix(demand, protocol_stages,
+                                                                  protocol_scenarios))),
         ),
         "artifacts" => Dict{String,Any}(
             "network.json" => network_sha,
@@ -1453,8 +1520,19 @@ function read_battery_case(dir::AbstractString; verify::Bool = true)
         scr = get(manifest, "screening", nothing)
         if scr !== nothing
             wants = scr["sha256"]
+            # The screening protocol is regenerated exactly as it was written:
+            # from its own seed, excluding the final protocol's columns when the
+            # record says it does. Regenerating it without the exclusion would
+            # silently pass on every case where no repair was needed and fail
+            # only on the small supports where the property actually bites.
+            ex = get(scr, "excludes", nothing) == "protocol" ?
+                 protocol_columns(scenario_index_matrix(demand,
+                                                        Int(manifest["protocol"]["num_stages"]),
+                                                        Int(manifest["protocol"]["num_scenarios"]))) :
+                 nothing
             gots = protocol_digest(demand, Int(scr["num_stages"]),
-                                   Int(scr["num_scenarios"]); seed = Int(scr["seed"]))
+                                   Int(scr["num_scenarios"]); seed = Int(scr["seed"]),
+                                   exclude = ex)
             gots == wants ||
                 error("regenerated screening digest $gots does not match the manifest's $wants")
         end
@@ -1522,4 +1600,59 @@ function describe(case::BatteryCase)
                 b.self_discharge, b.throughput_cost)
     end
     return String(take!(io))
+end
+
+"""
+    evaluation_protocol(case) -> (matrix, kind)
+
+The protocol a policy may be SELECTED on, and which one it is.
+
+# Returns
+- `matrix::Matrix{Int}`: the `(stages × scenarios)` atom-index matrix.
+- `kind::Symbol`: `:screening` when the case declares a screening protocol,
+  `:sole` when it declares only one protocol and therefore has no final/screening
+  split at all.
+
+# Notes
+**Selection may never touch the final protocol.** A case of the study's panel
+declares two: a large final one, drawn from the support's own `protocol_seed`
+and evaluated ONCE after every selection is made, and a small screening one from
+an independent seed, repaired against the final one so the two share no scenario
+by construction. Regenerating the screening protocol therefore has to regenerate
+the final one's COLUMNS as the exclusion set — which is index arithmetic on the
+frozen support, exactly what `read_battery_case` already does on every load, and
+not an evaluation of anything.
+
+An earlier revision of this file read `manifest["protocol"]` here. That is the
+FINAL protocol, so checkpoint selection was scoring policies on the very panel
+that exists to be fresh. The defect was silent — the columns solve, the costs are
+finite and the numbers look like a panel — which is why the protocol's kind is
+returned beside the matrix, recorded in the checkpoint and printed by the
+trainer, rather than left as something a reader has to re-derive.
+
+`:sole` is reachable only on a case built without a screening protocol at all —
+the small correctness fixture this package's regression suite runs on. Every
+panel case has the split, so a study run cannot land there. The digest is
+re-verified against the manifest either way.
+"""
+function evaluation_protocol(case::BatteryCase)
+    scr = get(case.manifest, "screening", nothing)
+    if scr === nothing
+        stages = Int(case.manifest["protocol"]["num_stages"])
+        scen = Int(case.manifest["protocol"]["num_scenarios"])
+        m = scenario_index_matrix(case.demand, stages, scen)
+        protocol_digest(case.demand, stages, scen) == case.manifest["protocol"]["sha256"] ||
+            error("regenerated protocol digest does not match the manifest's")
+        return m, :sole
+    end
+    ex = get(scr, "excludes", nothing) == "protocol" ?
+         protocol_columns(scenario_index_matrix(case.demand,
+                                                Int(case.manifest["protocol"]["num_stages"]),
+                                                Int(case.manifest["protocol"]["num_scenarios"]))) :
+         nothing
+    stages, scen, seed = Int(scr["num_stages"]), Int(scr["num_scenarios"]), Int(scr["seed"])
+    m = scenario_index_matrix(case.demand, stages, scen; seed = seed, exclude = ex)
+    protocol_digest(case.demand, stages, scen; seed = seed, exclude = ex) == scr["sha256"] ||
+        error("regenerated screening digest does not match the manifest's")
+    return m, :screening
 end

@@ -67,7 +67,8 @@ PowerModels.silence()
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    acp_optimizer(; tol=1e-10, max_iter=3000) -> JuMP optimizer factory
+    acp_optimizer(; tol=1e-10, constr_viol_tol=1e-10, max_iter=3000)
+        -> JuMP optimizer factory
 
 Interior-point NLP solver for the true-ACP model.
 
@@ -76,11 +77,40 @@ Tolerance is tightened well below the physical tolerances the study reports at,
 because a variable parked a solver tolerance below its bound shifts a
 positively-priced objective by a near-constant amount every stage, which then
 looks like a systematic model difference between two engines.
+
+`constr_viol_tol` is set explicitly and is NOT implied by `tol`. Ipopt's `tol`
+governs the SCALED NLP error, while `constr_viol_tol` — default `1e-4` — is the
+absolute cap on constraint violation, and the gap between them is visible in the
+physical residuals: measured on `case240_pserc`, `case179_goc` and
+`case162_ieee_dtc` at two demand levels each, `tol = 1e-10` alone leaves the
+apparent-power limits violated by `8e-7` to `2e-6` pu and the voltage bounds by
+`1.1e-8` (Ipopt's `bound_relax_factor`), while every equation the network is
+actually built from — Ohm's law, both nodal balances, the battery transition —
+already sits at `1e-11` or below. Adding `constr_viol_tol = 1e-10` moves the
+limit violations to `1e-11` and the bound violations to `1e-10`, and on the
+slowest of those solves it was eighteen times FASTER rather than slower.
+
+One setting, measured once, used for every case and every demand level of the
+portfolio. It is not a per-case adjustment and there is no retry ladder: a solve
+that does not converge under it is reported as it stands. Turning scaling off
+entirely and zeroing `bound_relax_factor` drives the residuals to exact zeros but
+made `case179_goc` fail outright at a demand level it otherwise solves, so it was
+rejected.
 """
-acp_optimizer(; tol::Real = 1e-10, max_iter::Integer = 3000) =
+acp_optimizer(; tol::Real = 1e-10, constr_viol_tol::Real = 1e-10,
+                bound_relax_factor::Real = ACP_BOUND_RELAX_FACTOR,
+                max_iter::Integer = 3000) =
     JuMP.optimizer_with_attributes(Ipopt.Optimizer,
                                    "print_level" => 0,
                                    "tol" => tol,
+                                   "constr_viol_tol" => constr_viol_tol,
+                                   # Stated explicitly, and shared with the Exa
+                                   # engine, so both engines' ACP solves relax
+                                   # bounds by the SAME amount. Ipopt's own
+                                   # default happens to equal it; MadNLP's does
+                                   # not, and an inherited default is not a
+                                   # cross-engine agreement.
+                                   "bound_relax_factor" => Float64(bound_relax_factor),
                                    "max_iter" => Int(max_iter),
                                    "sb" => "yes")
 
@@ -173,6 +203,31 @@ socwr_optimizer(; tol::Real = 1e-8, equilibrate::Bool = true,
                                    "tol_feas" => tol,
                                    "equilibrate_enable" => equilibrate,
                                    "max_iter" => Int(max_iter))
+
+"""
+    dc_optimizer(; tol=1e-8, equilibrate=true, max_iter=10_000)
+        -> JuMP optimizer factory
+
+Solver for the DC-approximation backward model.
+
+# Notes
+The SAME solver and the SAME frozen settings as [`socwr_optimizer`](@ref), and
+that is deliberate rather than lazy. With `DCPPowerModel` the network equations
+are linear and the only nonlinearity left is the generators' own quadratic cost
+polynomial, which PGLib supplies and which this study does not touch — so the
+backward subproblem is a convex quadratic program, a special case of what that
+configuration already solves.
+
+Introducing a second solver here would make the SOC and DC arms of the study
+differ by SOLVER as well as by formulation, and the whole point of the DC arm is
+to isolate what changes when the backward cuts come from a different
+approximation of the same physics. It is given its own name rather than being
+reached for as `socwr_optimizer` at a DC call site, so that a future measurement
+that does have to move it can move it for DC alone.
+"""
+dc_optimizer(; tol::Real = 1e-8, equilibrate::Bool = true,
+               max_iter::Integer = 10_000) =
+    socwr_optimizer(; tol = tol, equilibrate = equilibrate, max_iter = max_iter)
 
 const ACCEPTED_STATUSES = (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
 
@@ -827,6 +882,60 @@ function solve_strict_stage(case::BatteryCase, model_type::Type;
 end
 
 """
+    stage_cost_decomposition(pm) -> NamedTuple
+
+The five quantities a stage objective decomposes into, read off a solved model:
+`(cost_generation, cost_throughput, deficit, surplus, cost_deficit,
+cost_surplus, objective)`.
+
+# Returns
+`deficit` and `surplus` are the PER-BUS raw recourse values keyed by bus id, in
+the network's own ordering — not their sums. The sums are returned beside them
+as `cost_deficit`/`cost_surplus` for the callers that only need the aggregate,
+but the per-bus maps are the load-bearing part: the shared cost contract
+projects and validates recourse ELEMENT BY ELEMENT, and an aggregate cannot be
+un-summed. A thousand buses each `+1e-7` and a thousand each `−1e-7` cancel to
+exactly zero in a total while every one of them is a real, if tiny, violation of
+nothing — and one bus genuinely short by `1` pu can hide inside a total that
+other buses' surpluses cancel.
+
+# Notes
+The generator polynomial is the case's own, through `_polynomial_cost`, and the
+three remaining components are built from the case's own prices, so all four are
+in the units of the objective they must sum to. Nothing is rescaled anywhere.
+
+This function exists so that `extract_stage_solution` and the SDDP simulation
+recorders decompose a cost the SAME way. It is the only decomposition in this
+repository; a second one would be a second cost convention.
+"""
+function stage_cost_decomposition(pm::PowerModels.AbstractPowerModel)
+    model = pm.model
+    bat = pm.ext[:battery]
+    case = bat[:spec].case
+    Δt = bat[:Δt]
+    buses = bat[:buses]
+    ids = bat[:ids]
+    ok = JuMP.termination_status(model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
+
+    cost_generation = 0.0
+    for g in sort!(collect(PowerModels.ids(pm, :gen)))
+        gen = PowerModels.ref(pm, :gen, g)
+        cost_generation += _polynomial_cost(gen, JuMP.value(PowerModels.var(pm, :pg, g)))
+    end
+    cost_throughput = sum(bat[:byid][k].throughput_cost * Δt *
+                          (JuMP.value(bat[:p_ch][k]) + JuMP.value(bat[:p_dis][k]))
+                          for k in ids; init = 0.0)
+    d = Dict{Int,Float64}(i => JuMP.value(bat[:d][i]) for i in buses)
+    s = Dict{Int,Float64}(i => JuMP.value(bat[:s][i]) for i in buses)
+    return (cost_generation = cost_generation,
+            cost_throughput = cost_throughput,
+            deficit = d, surplus = s,
+            cost_deficit = case.recourse.deficit * sum(values(d); init = 0.0),
+            cost_surplus = case.recourse.surplus * sum(values(s); init = 0.0),
+            objective = ok ? JuMP.objective_value(model) : NaN)
+end
+
+"""
     extract_stage_solution(pm) -> NamedTuple
 
 Read every physical quantity of a solved stage model, keyed by network id.
@@ -861,44 +970,68 @@ function extract_stage_solution(pm::PowerModels.AbstractPowerModel)
     gen_ids = sort!(collect(PowerModels.ids(pm, :gen)))
     branch_ids = sort!(collect(PowerModels.ids(pm, :branch)))
 
+    # Which voltage quantities EXIST is a property of the formulation, and a
+    # quantity a formulation does not model is reported as absent rather than
+    # invented. Polar forms carry the magnitude and the angle; the W-space
+    # relaxation carries |V|² and no angle; the DC approximation carries the
+    # angle and no magnitude at all.
     vm = Dict{Int,Float64}()
     va = Dict{Int,Float64}()
-    if haskey(PowerModels.var(pm), :vm)
-        # Polar forms carry the magnitude directly.
+    vars = PowerModels.var(pm)
+    if haskey(vars, :vm)
         for i in buses
             vm[i] = val(PowerModels.var(pm, :vm, i))
             va[i] = val(PowerModels.var(pm, :va, i))
         end
-    else
-        # W-space forms (SOC-WR) carry |V|²; the angle is not a variable there.
+    elseif haskey(vars, :w)
         for i in buses
             vm[i] = sqrt(max(val(PowerModels.var(pm, :w, i)), 0.0))
             va[i] = NaN
         end
+    else
+        for i in buses
+            vm[i] = NaN
+            va[i] = val(PowerModels.var(pm, :va, i))
+        end
     end
 
+    # Active-power-only formulations declare no reactive variable at all:
+    # `variable_gen_power_imaginary` and `variable_branch_power_imaginary` are
+    # no-ops there. The reactive maps come back EMPTY rather than zero-filled,
+    # because "this formulation does not model it" and "this formulation says it
+    # is zero" are different statements and only the first one is true.
+    reactive = haskey(vars, :qg)
     pg = Dict{Int,Float64}(g => val(PowerModels.var(pm, :pg, g)) for g in gen_ids)
-    qg = Dict{Int,Float64}(g => val(PowerModels.var(pm, :qg, g)) for g in gen_ids)
+    qg = reactive ? Dict{Int,Float64}(g => val(PowerModels.var(pm, :qg, g)) for g in gen_ids) :
+                    Dict{Int,Float64}()
     pg_bus = Dict{Int,Float64}(i => 0.0 for i in buses)
-    qg_bus = Dict{Int,Float64}(i => 0.0 for i in buses)
+    qg_bus = reactive ? Dict{Int,Float64}(i => 0.0 for i in buses) : Dict{Int,Float64}()
     for g in gen_ids
         b = Int(PowerModels.ref(pm, :gen, g)["gen_bus"])
         pg_bus[b] += pg[g]
-        qg_bus[b] += qg[g]
+        reactive && (qg_bus[b] += qg[g])
     end
 
     p_fr = Dict{Int,Float64}(); q_fr = Dict{Int,Float64}()
     p_to = Dict{Int,Float64}(); q_to = Dict{Int,Float64}()
+    branch_reactive = haskey(vars, :q)
     for l in branch_ids
         br = PowerModels.ref(pm, :branch, l)
         f = (l, Int(br["f_bus"]), Int(br["t_bus"]))
         t = (l, Int(br["t_bus"]), Int(br["f_bus"]))
-        p_fr[l] = val(PowerModels.var(pm, :p, f)); q_fr[l] = val(PowerModels.var(pm, :q, f))
-        p_to[l] = val(PowerModels.var(pm, :p, t)); q_to[l] = val(PowerModels.var(pm, :q, t))
+        p_fr[l] = val(PowerModels.var(pm, :p, f))
+        p_to[l] = val(PowerModels.var(pm, :p, t))
+        if branch_reactive
+            q_fr[l] = val(PowerModels.var(pm, :q, f))
+            q_to[l] = val(PowerModels.var(pm, :q, t))
+        end
     end
 
-    d = Dict{Int,Float64}(i => val(bat[:d][i]) for i in buses)
-    s = Dict{Int,Float64}(i => val(bat[:s][i]) for i in buses)
+    # The per-bus recourse maps and the cost decomposition come from the SAME
+    # call, so this function and the SDDP recorders cannot drift apart.
+    dec = stage_cost_decomposition(pm)
+    d = dec.deficit
+    s = dec.surplus
     pd = Dict{Int,Float64}(i => bat[:pd_real][i] for i in buses)
     qd = Dict{Int,Float64}(i => bat[:qd_real][i] for i in buses)
 
@@ -936,29 +1069,33 @@ function extract_stage_solution(pm::PowerModels.AbstractPowerModel)
     # price — is ∂obj/∂p^d_i = −λ. The sign is derived here once rather than
     # guessed, and it is checked in the regression suite against a finite
     # difference of the realized demand.
+    #
+    # An active-power-only formulation writes no reactive balance, and
+    # PowerModels records `NaN` under `:lam_kcl_i` there rather than omitting
+    # the key — so the key's PRESENCE is not evidence that a row exists, and the
+    # stored value is checked to be an actual constraint reference before a dual
+    # is asked for. Reading it as if it were one raises far from its cause.
     price_active = Dict{Int,Float64}()
     price_reactive = Dict{Int,Float64}()
     if JuMP.has_duals(model)
         for i in buses
             bus_sol = PowerModels.sol(pm, :bus, i)
-            haskey(bus_sol, :lam_kcl_r) && (price_active[i] = -JuMP.dual(bus_sol[:lam_kcl_r]))
-            haskey(bus_sol, :lam_kcl_i) && (price_reactive[i] = -JuMP.dual(bus_sol[:lam_kcl_i]))
+            r = get(bus_sol, :lam_kcl_r, nothing)
+            im = get(bus_sol, :lam_kcl_i, nothing)
+            r isa JuMP.ConstraintRef && (price_active[i] = -JuMP.dual(r))
+            im isa JuMP.ConstraintRef && (price_reactive[i] = -JuMP.dual(im))
         end
     end
 
     # ── Cost decomposition ───────────────────────────────────────────────────
-    # `ref` holds the case's own polynomial and the three remaining components
-    # are built from the case's own prices, so all four are in the same units as
-    # the objective they must sum to.
-    cost_generation = 0.0
-    for g in gen_ids
-        gen = PowerModels.ref(pm, :gen, g)
-        cost_generation += _polynomial_cost(gen, pg[g])
-    end
-    cost_throughput = sum(bat[:byid][k].throughput_cost * Δt * (p_ch[k] + p_dis[k])
-                          for k in ids; init = 0.0)
-    cost_deficit = case.recourse.deficit * sum(values(d); init = 0.0)
-    cost_surplus = case.recourse.surplus * sum(values(s); init = 0.0)
+    # Computed by `stage_cost_decomposition`, the ONE place this repository
+    # decomposes a stage objective. It is factored out because the SDDP
+    # simulation recorders need exactly these five quantities per stage and must
+    # not obtain them a second way.
+    cost_generation = dec.cost_generation
+    cost_throughput = dec.cost_throughput
+    cost_deficit = dec.cost_deficit
+    cost_surplus = dec.cost_surplus
 
     return (
         status = status, solved = ok,
@@ -999,8 +1136,15 @@ A vector of `(kind, index, side, value, limit, slack)` rows, sorted by slack, fo
 - generator active and reactive bounds (pu);
 - bus voltage magnitude bounds (pu);
 - branch apparent-power limits at BOTH ends (pu, compared on ``|S|`` rather than
-  on ``|S|^2`` so the tolerance means the same thing on every branch);
+  on ``|S|^2`` so the tolerance means the same thing on every branch). Where the
+  formulation carries no reactive flow the reactive term is absent and ``|S|``
+  reduces to ``|p|``, which is exactly the quantity that formulation's own
+  thermal limit constrains;
 - branch angle-difference limits (rad), where the formulation has angles.
+
+A voltage-magnitude row is skipped where the formulation has no magnitude: `vm`
+comes back `NaN` there, and a `NaN` slack is never within tolerance, so the row
+drops out on its own rather than through a special case.
 
 # Notes
 This answers "what stopped the network from delivering the energy" — the question
@@ -1036,8 +1180,8 @@ function binding_constraints(pm::PowerModels.AbstractPowerModel, sol; tol::Real 
         br = PowerModels.ref(pm, :branch, l)
         rate = Float64(get(br, "rate_a", Inf))
         isfinite(rate) || continue
-        push_row!("thermal", l, "from", hypot(sol.p_fr[l], sol.q_fr[l]), rate)
-        push_row!("thermal", l, "to", hypot(sol.p_to[l], sol.q_to[l]), rate)
+        push_row!("thermal", l, "from", hypot(sol.p_fr[l], get(sol.q_fr, l, 0.0)), rate)
+        push_row!("thermal", l, "to", hypot(sol.p_to[l], get(sol.q_to, l, 0.0)), rate)
         if !isnan(sol.va[Int(br["f_bus"])])
             θ = sol.va[Int(br["f_bus"])] - sol.va[Int(br["t_bus"])]
             push_row!("angle", l, "min", θ, Float64(get(br, "angmin", -pi)))
@@ -1128,14 +1272,24 @@ intended PowerModels one.
 This is the runtime half of the provenance gate. Numerical agreement with a
 handwritten model is explicitly NOT an acceptable substitute: the claim the
 study makes is that SDDP's backward pass is an actual
-`PowerModels.SOCWRConicPowerModel` and its forward pass an actual
-`PowerModels.ACPPowerModel`, and only the type of the instantiated object can
-establish that.
+`PowerModels.SOCWRConicPowerModel` or an actual `PowerModels.DCPPowerModel`, and
+its forward pass an actual `PowerModels.ACPPowerModel`, and only the type of the
+instantiated object can establish that.
 
 Beyond the type, the assertion checks that the model carries the variables the
-intended formulation is defined by — `vm`/`va` for the polar AC form, the lifted
-`w`/`wr`/`wi` for the SOC-WR form — so that a type that had been made to alias
-something else would still be caught.
+intended formulation is DEFINED by, so that a type that had been made to alias
+something else would still be caught:
+
+| formulation | must carry | must NOT carry |
+|---|---|---|
+| `ACPPowerModel` | `vm`, `va` | — |
+| `SOCWRConicPowerModel` | `w`, `wr`, `wi` | — |
+| `DCPPowerModel` | `va`, `p` | `vm`, `w`, `q` |
+
+The DC row is stated in both directions on purpose. What distinguishes the DC
+approximation is as much what it LACKS — a voltage magnitude and any reactive
+quantity — as what it has, and a positive-only check would pass on a model that
+had quietly acquired them.
 """
 function assert_powermodels_provenance(pm::PowerModels.AbstractPowerModel, expected::Type)
     typeof(pm) === expected ||
@@ -1149,6 +1303,13 @@ function assert_powermodels_provenance(pm::PowerModels.AbstractPowerModel, expec
     elseif expected === PowerModels.SOCWRConicPowerModel
         (:w in vars && :wr in vars && :wi in vars) ||
             error("SOCWRConicPowerModel is missing its lifted voltage variables")
+    elseif expected === PowerModels.DCPPowerModel
+        (:va in vars && :p in vars) ||
+            error("DCPPowerModel is missing its angle or active-flow variables")
+        (:vm in vars || :w in vars) &&
+            error("DCPPowerModel carries a voltage-magnitude variable; it is not the DC approximation")
+        (:q in vars || :qg in vars) &&
+            error("DCPPowerModel carries a reactive variable; it is not the DC approximation")
     end
     return nothing
 end
