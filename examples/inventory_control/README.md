@@ -68,6 +68,52 @@ subproblems. Two strategies are available:
 For the relaxed formulation (no integer variables), `NoIntegerStrategy`
 is used — subproblems are solved and duals read as-is.
 
+## Strict Mode (reachable policy, no penalty tuning)
+
+The `strict` and `strict_integer` variants replace the L1 target penalty with
+the hard equality `s_mid == s_target` — no deficit variable, no penalty
+hyperparameter, and the target-constraint dual is the pure shadow price
+(the same construction as the hydro strict mode).
+
+Strict mode requires every target to be one-stage feasible. Here the exact
+reachable set is a one-liner: with realized incoming inventory `s` and order
+`q ∈ [0, Q_max]`, the order-up-to position satisfies
+
+```
+s_mid = s + q  ∈  [s, s + Q_max]
+```
+
+and nothing else constrains it (`s_out` is free; the hold/backlog split is
+always feasible). `InventoryReachablePolicy` maps the network output onto
+exactly this interval. Three design points, each load-bearing:
+
+1. **Boundary attainment.** With fixed ordering cost `K`, "do not order"
+   (`q = 0`) is an essential decision at the interval boundary. The policy
+   uses `hardsigmoid` (attains 0 and 1 exactly on finite inputs) instead of
+   `sigmoid` (strictly interior) — a strict-sigmoid policy would be forced
+   to pay `K` every period. In the hydro case the boundary is economically
+   irrelevant and this distinction does not matter; here it is first-order.
+2. **Pass-through state components.** The demand-history entries of the
+   state have singleton reachable sets (the observed demands): the policy
+   passes them through deterministically, and the stage models leave their
+   target parameters unconstrained.
+3. **Stage-wise training only.** Strict variants train on the stage-wise
+   subproblems (closed loop). The target (`s_mid`, pre-demand) and the
+   carried state (`s_out = s_mid − d`, post-demand) are different
+   quantities, so the deterministic equivalent's target-feedback recursion
+   would hand the policy the wrong state for its reachable bounds — unlike
+   hydro, where target and state are the same reservoir volume and the
+   strict regular DE is safe by induction.
+
+Run them like any other variant (one tag per invocation):
+
+```bash
+julia --project=examples/inventory_control \
+    examples/inventory_control/train_dr_inventory.jl strict
+julia --project=examples/inventory_control \
+    examples/inventory_control/train_dr_inventory.jl strict_integer
+```
+
 ## Score-Function Gradient Mixing
 
 `ScoreFunctionConfig` adds a REINFORCE-style correction to the dual

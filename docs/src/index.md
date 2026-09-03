@@ -4,27 +4,61 @@
 CurrentModule = DecisionRules
 ```
 
-DecisionRules.jl trains parametric decision rules through multi-stage optimization,
-implementing the **Two-Stage Deep Decision Rules (TS-DDR)** framework from
-[arXiv:2405.14973](https://arxiv.org/abs/2405.14973).
+DecisionRules.jl trains parametric decision rules — from affine policies
+to deep recurrent networks — for multistage stochastic optimization
+problems whose actions come from constrained optimization subproblems
+(optimal power flow, MPC, inventory control, …). It implements the
+**Two-Stage Deep Decision Rules (TS-DDR)** framework of
+[arXiv:2405.14973](https://arxiv.org/abs/2405.14973): the policy outputs
+**target states**, a projection subproblem restores exact feasibility, and
+Lagrange duals (with implicit differentiation via
+[DiffOpt.jl](https://github.com/jump-dev/DiffOpt.jl) where needed) provide
+the end-to-end training gradient — no differentiation through solver
+iterations, no feasibility violations at deployment.
 
-## How it works
+In the **strict** formulation, the target constraints are hard equalities
+and the policy is built to emit only reachable targets: no slack, no
+penalty hyperparameter, and the dual ``\lambda_t`` is the pure shadow
+price of the target. A GPU companion package,
+[DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl),
+trains the same policies through full-horizon deterministic equivalents
+with ExaModels + MadNLP/cuDSS.
 
-In multi-stage stochastic control, the feasible action at each stage comes from solving
-a constrained optimization problem (OPF, MPC, hydrothermal dispatch, …). Rather than
-outputting actions directly, the neural-network policy outputs **target states**.
-An optimization subproblem then projects these targets onto the feasible set defined by
-dynamics and constraints. Lagrange duals and implicit differentiation (via
-[DiffOpt.jl](https://github.com/jump-dev/DiffOpt.jl)) provide the gradient signal to
-update the policy end-to-end.
+## The documentation
 
-Three training formulations are supported:
+**Theory.** The
+[multistage stochastic optimization problem](@ref "Multistage stochastic optimization")
+and where decision rules sit among solution methods;
+[the TS-DDR framework](@ref "The TS-DDR framework") — target-state
+policies, dual gradients, the training formulations, and strict mode with
+its reachability-based feasibility guarantee;
+[stochastic dual dynamic programming](@ref "Stochastic dual dynamic programming"),
+including the inconsistent-formulation variant for nonconvex stage problems and
+the bound-versus-forward gap; and
+[extensions](@ref "Extensions: mixed gradients, critics, and risk") —
+score-function corrections for integer decisions, control-variate
+critics, risk-averse objectives.
 
-| Formulation | Horizon coupling | Gradient source |
-|:---|:---|:---|
-| **Deterministic Equivalent** | Full horizon, one large NLP | Duals on the coupled problem |
-| **Stage-wise (single shooting)** | Sequential rollout | Duals + DiffOpt per stage |
-| **Multiple Shooting** | Windowed sub-horizons | DiffOpt per window, continuity penalties |
+**Package guide.** [Getting started](@ref);
+[uncertainty sampling formats](@ref "Uncertainty Sampling");
+[gradient fallback](@ref "Gradient Fallback");
+[GPU acceleration](@ref "GPU Acceleration with DecisionRulesExa.jl");
+[API Reference](@ref).
+
+**Case studies.** The flagship is
+[stochastic battery-storage AC optimal power flow](@ref "Stochastic battery-storage AC optimal power flow"), which defines the
+PGLib case generator, demand information pattern, battery physics, strict and
+soft target projections, true ACP model, SOC-WR backward relaxation, and paired
+PF/SDDP/TS-DDR evaluation protocol. [Long-term hydrothermal planning](@ref) asks whether a learned policy can
+value water as well as a method built to do exactly that: on a real grid under
+full AC physics, a policy trained from random initialisation in eleven GPU-hours,
+with no value function and no convex relaxation anywhere in its path, operates
+the system within **0.152%** of a converged SDDP baseline over 500 shared inflow
+scenarios — close, measurably more expensive, and diagnosably so. Two further
+studies,
+[rocket control](@ref "Rocket Control") and
+[stochastic lot-sizing](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs"),
+exercise continuous control and mixed-integer recourse.
 
 ## Installation
 
@@ -33,32 +67,8 @@ using Pkg
 Pkg.add("DecisionRules")
 ```
 
-## Quick start
-
-```julia
-using DecisionRules, JuMP, DiffOpt, Flux, Ipopt
-
-# Build per-stage subproblems in JuMP (DiffOpt-enabled)
-# subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state = ...
-
-# Define a policy: maps [uncertainty; state] → target state
-policy = Chain(
-    Dense(policy_input_dim(num_uncertainties, num_states), 64, relu),
-    Dense(64, num_states),
-)
-
-# Train via stage-wise decomposition
-train_multistage(
-    policy, initial_state, subproblems,
-    state_params_in, state_params_out, uncertainty_samples;
-    num_batches=100, optimizer=Flux.Adam(1e-3),
-)
-```
-
-See the [Algorithm](@ref) page for the mathematical formulation, the
-[Uncertainty Sampling](@ref) guide for how to prepare your scenario data, the
-[GPU Acceleration with DecisionRulesExa.jl](@ref) page for GPU-accelerated training,
-and the examples for complete worked problems.
+[Getting started](@ref) covers solver requirements, a quick-start example,
+and how to choose among the training formulations.
 
 ## Citation
 

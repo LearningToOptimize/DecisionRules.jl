@@ -58,6 +58,10 @@ and the mixed gradient is
 - `perturbation_std::Real`: Gaussian standard deviation ``\\sigma``.
 - `num_rollouts::Integer`: number of perturbed rollouts ``M`` per sample.
 - `baseline::Symbol`: either `:mean` for mean-centering costs or `:none`.
+  Mean-centering reduces variance but, because the baseline is computed from the
+  same ``M`` rollouts, it introduces a small ``O(1/M)`` bias (effectively scaling
+  the estimator by ``(M-1)/M``) that vanishes as `num_rollouts` grows; a
+  leave-one-out baseline would be exactly unbiased.
 
 # Examples
 ```julia
@@ -509,7 +513,10 @@ function _center_rollout_costs(
     costs::AbstractVector{<:Real},
     baseline::Symbol,
 )
-    # A mean baseline reduces variance without changing the expected gradient.
+    # A mean baseline computed from the SAME rollouts reduces variance but adds a
+    # small O(1/M) bias (the estimator is effectively scaled by (M-1)/M); the bias
+    # vanishes as the rollout count grows. A leave-one-out baseline would be
+    # exactly unbiased; mean-centering is kept for its simplicity.
     baseline_value = baseline === :mean ? mean(costs) : 0.0
 
     return Float64.(costs) .- baseline_value

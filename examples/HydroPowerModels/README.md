@@ -1,148 +1,155 @@
-# HydroPowerModels — Long-Term Hydrothermal Dispatching (Bolivia LTHD)
+# Bolivia hydro — JuMP engine
 
-This directory contains the primary application from the paper: training
-Two-Stage Deep Decision Rules (TS-DDR) for the Bolivia Long-Term
-Hydrothermal Dispatching problem with 10 hydro units, 96 monthly stages,
-and AC/SOC/DC power-flow formulations.
+Everything needed to reproduce the long-term hydrothermal planning case study:
+the case, the JuMP/MathOptFormat engine, the SDDP baseline, the paired
+evaluation, and the figures. The GPU trainer that produced the published policy
+lives in the companion package, `DecisionRulesExa.jl/examples/HydroPowerModels`.
 
-## Problem overview
+**The science is in the documentation**, under *Case studies → Long-term
+hydrothermal planning*: the problem, how each method values water, the measured
+comparison and its interpretation. This file is the operating manual — what the
+files are and what to run.
 
-The Bolivia LTHD problem couples hydro reservoir dynamics (water balance)
-with a power network dispatch (OPF) at each stage.  Stochastic inflows
-drive reservoir levels; the decision rule maps (inflow history, current
-state) to reservoir-level targets, and an NLP optimizer dispatches
-generation to meet those targets at minimum cost.
+## The frozen case
 
-## Training scripts
+| | |
+|---|---|
+| network, generators, costs, limits, nominal load | `bolivia/PowerModels.json` |
+| hydro topology, bounds, production factors, `stage_hours` | `bolivia/hydro.json` |
+| historical inflow scenarios | `bolivia/inflows.csv` |
+| machine-readable contract and its verifier | `bolivia/case_manifest.json`, `generate_canonical_case_artifacts.jl` |
 
-### TS-DDR (Deep Decision Rules — LSTM policy)
+- 28 buses, 31 branches, 34 generators, 11 hydro units.
+- Weekly stages: `stage_hours = 168`, so the water balance converts flow to
+  volume with `K = 0.0036 × 168 = 0.6048`. A run that leaves `stage_hours` at
+  its default of 1 silently models a week as an hour; both the manifest verifier
+  and the stage-model loader fail closed on that.
+- Demand is **deterministic**: `0.6 ×` the `PowerModels.json` active *and*
+  reactive load at every stage. There are no demand atoms and no demand file —
+  the verifier fails if one appears.
+- Uncertainty is **inflow only**.
+- Reservoirs start **empty**. `hydro.json` carries denormal `initial_volume`
+  values near `9e-316`; both engines clamp the initial state into
+  `[min_volume, max_volume]` and evaluate it at working precision, which leaves
+  every reservoir at zero. That is the state the published result was produced
+  from, and the input bytes are not repaired.
+- Physical load shedding is the per-bus active-balance slack `deficit[b]`,
+  priced at `6000` per pu per stage (`cost_deficit = 60 × baseMVA = 100`).
+  The case files do not declare a currency for their cost coefficients, so costs
+  and prices are reported in objective units here and in the figures rather than
+  named as a currency. `case_manifest.json` still records the derivation in the
+  upstream form (`60 USD/MWh × 100`), because the manifest is a frozen artifact
+  that is verified by hash and is not edited for presentation.
+  Reactive balance is **hard** — there is no reactive slack anywhere.
+- 126 stages are simulated; costs are reported over the first 96. The 30-stage
+  tail is a look-ahead buffer that keeps the reported window free of
+  end-of-horizon reservoir dumping.
+- The paired protocol is reproducible by construction rather than stored:
+  entry `[t, s]` of `rand(StableRNG(20260706), 1:nCen, 126, 500)` is the inflow
+  scenario realized at stage `t` of paired column `s`. The manifest records a
+  SHA-256 of that index matrix.
 
-| Script | Decomposition | Reference |
-|--------|--------------|-----------|
-| `train_dr_hydropowermodels.jl` | Deterministic equivalent (GPU-enabled) | Extension §1 |
-| `train_dr_hydropowermodels_subproblems.jl` | Stage-wise (single shooting) | Extension §2 |
-| `train_dr_hydropowermodels_multipleshooting.jl` | Windowed (multiple shooting) | Extension §3 |
+## Layout
 
-These use a `StateConditionedPolicy` (LSTM encoder + state-conditioned dense
-layers, `[128, 128]`, sigmoid activation).
+| file | role |
+|---|---|
+| `generate_canonical_case_artifacts.jl` | the frozen-case contract and its verifier; writes `bolivia/case_manifest.json`; byte-identical in both packages |
+| `export_subproblem_mof.jl` | the ONLY supported producer of `bolivia/*.mof.json` — builds the case through HydroPowerModels and serializes one stage subproblem per formulation |
+| `load_hydropowermodels.jl` | reads a serialized stage model per stage and re-parameterizes it into incoming state, inflow and target; the JuMP engine's model builder |
+| `hydro_reachable_policy.jl` | the feasibility-guaranteeing policy: LSTM encoder over inflow, state-conditioned head, targets mapped into the one-stage reachable interval |
+| `hydro_solution_schema.jl` | the long format in which both engines write a full physical solution; byte-identical in both packages |
+| `train_dr_hydropowermodels_strict.jl` | strict TS-DDR training on CPU (the smoke path; the published policy was trained with the GPU engine) |
+| `eval_paired_tsddr.jl` | paired evaluation of a checkpoint through the JuMP stage models |
+| `eval_jump_de.jl` | full-horizon deterministic-equivalent cross-check |
+| `plot_hydro_results.jl` | the publication figures, from `results/` |
+| `sddp/run_sddp_inconsistent.jl` | the SDDP baseline: SOC-WR backward, true-ACP forward |
+| `sddp/eval_paired_sddp.jl` | paired evaluation of the frozen cut policy |
+| `sddp/merge_sddp_shards.jl` | shard merge; refuses gaps, duplicates and partial sets |
+| `sddp/sddp_ac_starts.jl` | non-singular voltage starts for the ACP forward graph |
+| `results/` | the compact published evidence the figures and the documentation are built from |
 
-### TS-LDR (Linear Decision Rules — linear policy)
+## Commands
 
-| Script | Decomposition | Reference |
-|--------|--------------|-----------|
-| `train_ldr_hydropowermodels.jl` | Deterministic equivalent (GPU-enabled) | §3 |
+Every command below is run from this directory. `--project=.` uses
+`Project.toml`; the SDDP scripts use `--project=sddp`, which additionally
+carries HydroPowerModels, PowerModels, SDDP and Clarabel.
 
-TS-LDR uses `dense_multilayer_nn` with identity activation — a composition
-of linear layers that is equivalent to a single linear map from
-(uncertainties, state) to targets.  Same training pipeline as TS-DDR; the
-only difference is the policy architecture.
-
-All training scripts share the data loader (`load_hydropowermodels.jl`),
-log to Weights & Biases, and save the best model to JLD2.
-
-### GPU training
-
-`train_dr_hydropowermodels.jl` auto-detects CUDA and switches to
-MadNLP+CUDSS on GPU when available.  Submit via:
-
-```bash
-cd examples/HydroPowerModels
-mkdir -p logs
-sbatch run_train_deteq_gpu.sbatch
-```
-
-### Penalty schedule
-
-All training scripts support `:default_annealed` penalty schedules that
-gradually increase target-violation penalties during training, improving
-convergence on the nonconvex AC formulation.
-
-### Rollout metrics
-
-For deterministic-equivalent training, `metrics/loss` is computed on the same
-target-state history produced by the policy. The matching held-out metric is
-`metrics/rollout_objective_no_deficit`, which now uses `RolloutEvaluation(...;
-policy_state=:target)` in `train_dr_hydropowermodels.jl`.
-
-The same script also logs
-`metrics/rollout_realized_objective_no_deficit` with `policy_state=:realized`.
-That is the closed-loop deployment diagnostic: each stage passes the optimizer's
-realized reservoir state back to the policy. It can be harder than the target-state
-metric, especially while the policy is trained through the deterministic equivalent.
-
-All rollout objective metrics exclude the target-slack/deficit penalty term. Track
-the paired target-violation share and `metrics/target_penalty_multiplier` to see
-whether a low operational objective is coming from feasible targets or from the
-policy relying on slack.
-
-## Evaluation and baselines
-
-| Script | Purpose |
-|--------|---------|
-| `evaluate_hydro_policies.jl` | Load all trained TS-DDR and TS-LDR models and evaluate on a common out-of-sample scenario set using stage-wise ACP rollout; writes `eval_costs.csv` |
-| `eval_jump_de.jl` | Solve the DE with a constant policy and save a reference solution (JLD2) for cross-validation with ExaModels |
-| `check_consistent_state_paths.jl` | Verify that stage-wise, deterministic equivalent, and multiple-shooting decompositions produce identical state trajectories under the same policy and inflows |
-
-## SDDP baselines
-
-These scripts use a dedicated Julia environment in `sddp/`. The inconsistent
-SOC-backward/AC-forward baseline uses
-[HydroPowerModels.jl](https://github.com/LAMPSPUC/HydroPowerModels.jl), SDDP.jl,
-Clarabel for the SOC backward pass, and MadNLP for the AC forward pass. Training
-runs log iteration and final simulation metrics to Weights & Biases using the
-same keys as the DR runs: `metrics/loss` is the SDDP bound, and
-`metrics/rollout_realized_objective_no_deficit` is the SDDP forward-pass
-objective. SDDP iterations are logged as `batch` so W&B plots can share the same
-x-axis as the DR training runs. Because SDDP solves the forward policy
-stage-wise, that forward-pass objective is already the no-target-penalty
-objective.
-
-| Script | Description |
-|--------|-------------|
-| `sddp/run_sddp.jl` | Train SDDP with a consistent convex (SOCWRConic) formulation |
-| `sddp/run_sddp_inconsistent.jl` | Train SDDP with SOCWRConic backward pass and ACP forward pass |
-| `sddp/run_sddp_inconsistent.sbatch` | Submit the SOC-backward/AC-forward run with a 12-hour wall time |
-| `sddp/simulate_sddp_policy.jl` | Simulate a pre-trained SDDP policy under ACP and produce comparison plots |
-
-## Learning-to-Optimize (L2O) pipeline
-
-| Script | Description |
-|--------|-------------|
-| `gen_inputs_l2O_hydropowermodels.jl` | Generate input datasets for the L2O supervised pipeline (requires [L2O.jl](https://github.com/andrewrosemberg/L2O.jl)) |
-| `train_dr_l2O_supervised.jl` | Supervised pre-training of a decision rule from L2O-generated optimal solutions |
-
-## Subproblem export (generating `.mof.json` files)
-
-The training pipeline (`load_hydropowermodels.jl`) reads pre-exported `.mof.json`
-subproblem templates rather than depending on HydroPowerModels.jl at training time.
-These files already ship with the repository:
-
-```
-bolivia/ACPPowerModel.mof.json
-bolivia/SOCWRConicPowerModel.mof.json
-bolivia/DCPPowerModel.mof.json
-case3/ACPPowerModel.mof.json
-```
-
-To regenerate them (e.g. after updating HydroPowerModels data or adding a new
-formulation), use `export_subproblem_mof.jl`:
+**1. Verify the case and regenerate the stage models.**
 
 ```bash
-julia export_subproblem_mof.jl bolivia ACPPowerModel
-julia export_subproblem_mof.jl bolivia SOCWRConicPowerModel
+julia --project=. generate_canonical_case_artifacts.jl --verify
+julia --project=sddp export_subproblem_mof.jl \
+    --exa-root=/path/to/DecisionRulesExa.jl
 ```
 
-This builds the full SDDP model via HydroPowerModels.jl, extracts one stage's
-subproblem from the policy graph, removes the unnamed slack variable that
-HydroPowerModels adds, and writes a clean JuMP `.mof.json` to disk.  Requires
-HydroPowerModels.jl and a solver (Mosek by default).
+The exporter verifies the three input hashes, applies the 0.6 load factor at
+model construction, passes `stage_hours` into HydroPowerModels, re-reads each
+serialized model and asserts its invariants (including `K = 0.6048`), rewrites
+the manifest from the generated bytes, and mirrors the whole case into the other
+engine. It is byte-reproducible: two runs produce identical files.
 
-## Data
+**2. Small CPU smoke test** — a few stages, a few updates, no GPU:
 
-- `bolivia/` — Bolivia case: `hydro.json` (10 hydro units), `inflows.csv` (historical scenarios), `ACPPowerModel.mof.json` / `SOCWRConicPowerModel.mof.json` / `DCPPowerModel.mof.json` (subproblem templates)
-- `case3/` — Small 3-bus test case for development
+```bash
+DR_NUM_STAGES=4 DR_NUM_EPOCHS=2 DR_NUM_BATCHES=5 \
+  julia --project=. train_dr_hydropowermodels_strict.jl
+```
 
-## Dependencies
+**3. SDDP baseline.** Training writes cuts to
+`bolivia/ACPPowerModel/SOCWRConicPowerModel-ACPPowerModel.cuts.json`:
 
-See `Project.toml` in this directory.  Key packages: DecisionRules, DiffOpt,
-Ipopt+HSL, MadNLP+MadNLPGPU+CUDA (GPU), Flux, JuMP, Wandb.
+```bash
+julia --project=sddp -t auto sddp/run_sddp_inconsistent.jl
+```
+
+**4. Paired evaluation of the frozen SDDP policy** (shardable; ids are GLOBAL
+protocol columns, so shards and a full run agree exactly):
+
+```bash
+DR_SCENARIO_FIRST=1 DR_SCENARIO_LAST=25 DR_PHYSICAL_AUDIT=1 \
+  julia --project=sddp -t auto sddp/eval_paired_sddp.jl
+julia --project=sddp sddp/merge_sddp_shards.jl \
+    --dir=bolivia/ACPPowerModel --first=1 --last=500
+```
+
+**5. Paired evaluation of a TS-DDR checkpoint through the JuMP stage models:**
+
+```bash
+julia --project=. -t auto eval_paired_tsddr.jl /path/to/checkpoint.jld2
+```
+
+**6. Figures:**
+
+```bash
+julia --project=. plot_hydro_results.jl
+```
+
+## Recording the full physical solution
+
+The four aggregate CSVs the evaluators always write answer *how much* thermal,
+*how much* water, and *was any load shed*. They cannot answer what energy was
+worth at a given bus in a given week — that is a dual, and it exists nowhere
+else.
+
+`DR_SOLUTION_DUMP=1` therefore makes either evaluator additionally write the
+FULL physical solution of every stage, in the long format of
+`hydro_solution_schema.jl`:
+
+```
+scenario,stage,class,index,value
+```
+
+with one row per scalar: reservoir storage in and out, target, inflow, turbine
+outflow, spill, thermal active and reactive dispatch, bus voltage magnitudes and
+angles, branch flows at both ends, load shedding, the strict target multipliers,
+and — from the JuMP/SDDP evaluator, which has the duals — the **nodal prices**
+`price_active` and `price_reactive`. A companion `*_trace.csv` records the
+decision trajectory (incoming state, realized inflow, outgoing reservoir level)
+that reproduces it.
+
+```bash
+DR_SCENARIO_FIRST=2 DR_SCENARIO_LAST=2 DR_PHYSICAL_AUDIT=1 DR_SOLUTION_DUMP=1 \
+  julia --project=sddp -t auto sddp/eval_paired_sddp.jl
+```
+
+This is what the stagewise and price figures are built from.
