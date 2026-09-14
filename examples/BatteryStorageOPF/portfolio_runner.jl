@@ -37,6 +37,8 @@
 #   --attempt <int>        (default 1)
 #   --stop-file <path>     (default <output>/STOP)
 #   --max-seconds <float>  (default 1e9)
+#   --final-evaluation     (default false) measure the panel once at the last
+#                          completed index, for a run being retired on budget
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # THE FROZEN CONFIGURATION  (`--config`, TOML)
@@ -717,6 +719,9 @@ function run_segment(a::AbstractDict)
     attempt   = parse(Int, get(a, "attempt", "1"))
     stop_file = abspath(get(a, "stop-file", joinpath(output, "STOP")))
     max_secs  = parse(Float64, get(a, "max-seconds", "1e9"))
+    # See the Exa runner: a terminal measurement the caller asks for once when
+    # retiring a run. Default off.
+    final_eval = get(a, "final-evaluation", "false") in ("true", "1")
 
     # ---- method ownership, before anything is loaded -----------------------
     if !(method in RUNNER_METHODS)
@@ -744,6 +749,12 @@ function run_segment(a::AbstractDict)
     eval_columns    = _int_list(get(conf, "eval_columns", [1, 2, 3, 4]))
     seed            = Int(get(conf, "seed", 20260804))
     max_recourse    = Float64(get(conf, "max_recourse", 1e-6))
+    # OPT-IN, default FALSE. A lineage that does not ask for it behaves exactly
+    # as it always has, byte for byte; only a config that sets it true gets the
+    # canonicalized cut representation. With `checkpoint_every = 1` the chunk is
+    # one iteration, so every cut is canonicalized before the next iteration can
+    # read it.
+    canonicalize_cuts = Bool(get(conf, "canonicalize_cuts", false))
 
     # ---- the frozen case, its protocol, and the identity -------------------
     case_dir = dirname(manifest_path)
@@ -848,7 +859,8 @@ function run_segment(a::AbstractDict)
                                      print_level = 0,
                                      resume_cuts = cur_cuts,
                                      cut_path = joinpath(output, "checkpoints",
-                                                         "chunk.$(spec.tag).cuts.json"))
+                                                         "chunk.$(spec.tag).cuts.json"),
+                                     canonicalize_cuts = canonicalize_cuts)
         training_seconds += time() - _t_train
         bound = trained.bound
 
@@ -875,14 +887,18 @@ function run_segment(a::AbstractDict)
         # ---- fixed-panel evaluation and checkpoint selection ---------------
         panel_value = NaN
         selected = false
-        if eval_every > 0 && (idx % eval_every == 0 || idx == stop_target)
+        # SEGMENTATION-INVARIANT SCHEDULE — see the Exa runner: the panel is
+        # measured at the global indices the config names and at the target,
+        # never because this process reached its segment cap.
+        if eval_every > 0 && (idx % eval_every == 0 || idx == target_index ||
+                              (final_eval && idx == stop_target))
             _t_eval = time()
             ev = evaluate_acp_panel(case, trained, eval_matrix, eval_columns;
                                     max_recourse = max_recourse)
             evaluation_seconds += time() - _t_eval
             panel_value = ev.mean_cost
             worst_recourse_seen = max(worst_recourse_seen, ev.worst_recourse)
-            selected = ev.complete && ev.mean_cost < best_cost
+            selected = ev.complete && improves(ev.mean_cost, best_cost)
             selected && (best_cost = ev.mean_cost; best_index = idx)
             row = Dict{String,Any}(
                 "index" => idx, "protocol" => String(protocol_kind),
@@ -937,11 +953,17 @@ function run_segment(a::AbstractDict)
     close(hist_io)
 
     # ---- the richer local artifacts ----------------------------------------
-    ma = moving_average(forward_costs, ma_window)
+    # Cumulative global history, not this segment's rows — the window must not
+    # restart at a resume.
+    conv_costs = [Float64(c["forward_cost"]) for c in convergence]
+    conv_index = [Int(c["iteration"]) for c in convergence]
+    ma_all = moving_average(conv_costs, ma_window)
+    ma_by_index = Dict(conv_index[k] => ma_all[k] for k in eachindex(conv_index))
     open(joinpath(output, "trajectory.csv"), "w") do io
         println(io, "index,forward_cost,forward_cost_ma$(ma_window),bound,wall_seconds")
-        for (k, r) in enumerate(traj_rows)
-            @printf(io, "%d,%.10f,%.10f,%.10f,%.3f\n", r[1], r[2], ma[k], r[3], r[4])
+        for r in traj_rows
+            @printf(io, "%d,%.10f,%.10f,%.10f,%.3f\n", r[1], r[2],
+                    get(ma_by_index, r[1], NaN), r[3], r[4])
         end
     end
     open(joinpath(output, "evaluation.csv"), "w") do io

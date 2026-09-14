@@ -477,3 +477,64 @@ function physical_stage_cost(sol, recourse; tol::Real = PHYSICAL_RECOURSE_TOL)
             worst_recourse = max(worst_d, worst_s),
             admissible = ok_d && ok_s)
 end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpoint selection at machine resolution
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+Half-width, in Float64 ULPs, of the band in which two panel costs are treated as
+EQUIVALENT for checkpoint ordering.
+
+# Notes
+Two runs of the same policy can report panel costs differing in the last bits
+without differing scientifically: a resumed segment builds fresh solver handles,
+so the identical scenario is solved by a different solver instance. Measured on
+the certified parallel gate, that distance is 1 ULP.
+
+This band governs ORDERING ONLY. It never touches physical admissibility, the
+recourse tolerance, or the precision of any stored or reported value — those
+remain exactly as computed.
+"""
+const SELECTION_TIE_ULPS = 2
+
+"""
+    ulp_distance(a, b) -> Int
+
+The number of representable Float64 values between `a` and `b`.
+
+# Notes
+Computed on the ordered integer encoding, which is exact and has no tolerance of
+its own. `Inf` distance is returned when either input is not finite, so a `NaN`
+or an uninitialised incumbent can never look "close".
+"""
+function ulp_distance(a::Real, b::Real)
+    (isfinite(a) && isfinite(b)) || return typemax(Int)
+    a == b && return 0
+    ia = reinterpret(Int64, Float64(a)); ia < 0 && (ia = typemin(Int64) - ia)
+    ib = reinterpret(Int64, Float64(b)); ib < 0 && (ib = typemin(Int64) - ib)
+    d = abs(widen(ia) - widen(ib))
+    return d > typemax(Int) ? typemax(Int) : Int(d)
+end
+
+"""
+    improves(candidate, incumbent; ulps=SELECTION_TIE_ULPS) -> Bool
+
+Does `candidate` beat `incumbent` by MORE than the tie band?
+
+# Notes
+A bare `candidate < incumbent` is not deterministic at machine resolution: two
+segmentations of one run can order the same two policies differently when their
+panel costs differ in the last bit, and the selected checkpoint would then depend
+on where the run happened to be cut. Requiring strict improvement beyond
+`ulps` makes the ordering identical under any segmentation, and the caller keeps
+the EARLIER global index on a tie, so the tie-break is deterministic too.
+
+An unset incumbent (`Inf`) is always improved upon.
+"""
+function improves(candidate::Real, incumbent::Real; ulps::Integer = SELECTION_TIE_ULPS)
+    isfinite(candidate) || return false
+    isfinite(incumbent) || return true
+    candidate < incumbent || return false
+    return ulp_distance(candidate, incumbent) > ulps
+end

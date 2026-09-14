@@ -47,6 +47,7 @@ using JuMP
 using PowerModels
 using Ipopt
 using Clarabel
+using HiGHS
 using LinearAlgebra
 using Printf
 import MathOptInterface as MOI
@@ -205,29 +206,45 @@ socwr_optimizer(; tol::Real = 1e-8, equilibrate::Bool = true,
                                    "max_iter" => Int(max_iter))
 
 """
-    dc_optimizer(; tol=1e-8, equilibrate=true, max_iter=10_000)
-        -> JuMP optimizer factory
+    dc_optimizer() -> JuMP optimizer factory
 
-Solver for the DC-approximation backward model.
+Solver for the DC-approximation backward model: HiGHS, at its own defaults,
+with output suppressed.
 
 # Notes
-The SAME solver and the SAME frozen settings as [`socwr_optimizer`](@ref), and
-that is deliberate rather than lazy. With `DCPPowerModel` the network equations
-are linear and the only nonlinearity left is the generators' own quadratic cost
-polynomial, which PGLib supplies and which this study does not touch — so the
-backward subproblem is a convex quadratic program, a special case of what that
-configuration already solves.
+**What the DC backward subproblem actually is.** Under `DCPPowerModel` the
+network equations are linear, the battery transition and its bounds are linear,
+every state and control carries a finite bound, the emergency active recourse
+pair is unbounded above at a positive price, and the generator cost is the
+convex polynomial PGLib supplies. The subproblem is therefore a convex
+quadratic program with a linear feasible set — a mature QP/LP solver's home
+territory, not a conic one's.
 
-Introducing a second solver here would make the SOC and DC arms of the study
-differ by SOLVER as well as by formulation, and the whole point of the DC arm is
-to isolate what changes when the backward cuts come from a different
-approximation of the same physics. It is given its own name rather than being
-reached for as `socwr_optimizer` at a DC call site, so that a future measurement
-that does have to move it can move it for DC alone.
+**Why this is no longer `socwr_optimizer`.** Sharing one solver across both arms
+was chosen so the arms would differ only by FORMULATION. That reasoning bought
+nothing once measured: an interior-point conic solver run on this LP returned
+`INFEASIBLE`, `DUAL_INFEASIBLE`, `LOCALLY_INFEASIBLE` and `SLOW_PROGRESS` on
+nine of the ten portfolio cases, at stage nodes between 3 and 22, on subproblems
+whose own primal feasibility is not in question. The conditioning that provokes
+it is a right-hand-side range spanning roughly ten orders of magnitude — the
+reactive-demand deviations sit near `5e-4` while the recourse prices sit near
+`7e5` — which presolve and a simplex/QP basis absorb and an unpreconditioned
+conic IPM does not.
+
+The portfolio compares PRACTICAL, STRONG baselines. A DC-SDDP baseline that
+cannot finish an iteration is not the DC formulation's result, it is the
+solver's, and reporting it as the former would be wrong. So the DC arm gets the
+solver its problem class calls for, and the SOC arm keeps
+[`socwr_optimizer`](@ref) — the formulations still differ by exactly one thing,
+and now each is solved by something that can solve it.
+
+**Defaults, deliberately, and the same ones for every case.** Nothing here is
+tuned, and nothing here may be tuned per case: a solver setting chosen in
+response to one case's result is a free parameter fitted to that case. The only
+non-default is `output_flag`, which is presentation, not numerics.
 """
-dc_optimizer(; tol::Real = 1e-8, equilibrate::Bool = true,
-               max_iter::Integer = 10_000) =
-    socwr_optimizer(; tol = tol, equilibrate = equilibrate, max_iter = max_iter)
+dc_optimizer() = JuMP.optimizer_with_attributes(HiGHS.Optimizer,
+                                                "output_flag" => false)
 
 const ACCEPTED_STATUSES = (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
 

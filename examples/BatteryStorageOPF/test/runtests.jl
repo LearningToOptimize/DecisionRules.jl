@@ -1100,6 +1100,33 @@ const OPT = acp_optimizer()
     @testset "DC backward formulation" begin
         Δt = stage_hours(case)
         DCOPT = dc_optimizer()
+
+        # ── The DC arm's solver is its own, and it is HiGHS ──────────────────
+        # The DC backward subproblem is a convex QP over a linear feasible set,
+        # and it is solved as one. This is pinned because it is a scientific
+        # claim about the arm, not an implementation detail: the SOC and DC arms
+        # differ by formulation AND by the solver each formulation calls for,
+        # and neither is tuned per case.
+        @test occursin("HiGHS", string(DCOPT.optimizer_constructor))
+        dcattrs = Dict(a.name => v for (a, v) in DCOPT.params
+                       if a isa MOI.RawOptimizerAttribute)
+        # Defaults only. `output_flag` is presentation; anything else here would
+        # be a free parameter, and a second one would be a fitted one.
+        @test collect(keys(dcattrs)) == ["output_flag"]
+        @test dcattrs["output_flag"] === false
+        # It is NOT the conic factory any more, and the conic factory is
+        # untouched: the SOC arm keeps Clarabel at its frozen settings.
+        socattrs = Dict(a.name => v for (a, v) in socwr_optimizer().params
+                        if a isa MOI.RawOptimizerAttribute)
+        @test socattrs["tol_gap_abs"] == 1e-8
+        @test socattrs["equilibrate_enable"] === true
+        @test !haskey(dcattrs, "tol_gap_abs")
+        @test string(DCOPT.optimizer_constructor) !=
+              string(socwr_optimizer().optimizer_constructor)
+        # And the DC arm reaches it through `BACKWARD_SPECS`, not by a call site
+        # happening to name the right factory.
+        @test BACKWARD_SPECS[:dc].optimizer === dc_optimizer
+        @test BACKWARD_SPECS[:soc].optimizer === socwr_optimizer
         stage, atom = 17, 3
         ein = Dict(b.index => b.energy_initial for b in case.batteries)
         tgt = Dict{Int,Float64}()

@@ -16,3 +16,14 @@ SDDP.log
 # are only examples — so the name cannot be enumerated. Scoped to this example
 # directory, which tracks no image of its own.
 *.png
+
+# Output of the README's own commands, run from this directory: the protocol
+# descriptor `write_protocol_descriptor(…, "screening.toml")` writes, and the
+# segment tree `portfolio_runner.jl --output run/seg001` writes. Both are
+# regenerated per run.
+/screening.toml
+/run/
+
+# Machine-local package preferences, written by Preferences.jl on the user's
+# machine. Project.toml is the environment contract.
+LocalPreferences.toml

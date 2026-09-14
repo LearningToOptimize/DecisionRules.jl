@@ -47,6 +47,7 @@
 
 using SDDP
 using JuMP
+using JSON
 using PowerModels
 using Ipopt
 using Clarabel
@@ -357,6 +358,86 @@ function assert_graph_provenance(graph::SDDP.PolicyGraph, expected::Type)
 end
 
 """
+    canonicalize_cut_file!(path, case; coef_tol=1e-9, weaken_tol=1e-6) -> NamedTuple
+
+Rewrite an SDDP cut file so no cut carries a denormal state coefficient, without
+letting any cut rise anywhere in the state box.
+
+# The transformation
+A cut is `theta >= alpha + sum_i beta_i x_i` over storage states with known
+bounds `l_i <= x_i <= u_i`. Let `R = {i : |beta_i| < coef_tol}` and
+
+    W = sum_{i in R} |beta_i| (u_i - l_i).
+
+`R` is applied only when `W <= weaken_tol`. Then `beta_i := 0` for `i` in `R` and
+
+    alpha' = alpha + min_{x in [l,u]} sum_{i in R} beta_i x_i
+           = alpha + sum_{i in R} (beta_i > 0 ? beta_i l_i : beta_i u_i).
+
+# Why this is valid
+For every `x` in the box,
+`RHS(x) - RHS'(x) = sum_R beta_i x_i - min_y sum_R beta_i y_i >= 0`, so the
+canonicalized cut is NEVER above the original: it can only weaken, never cut off
+a point the original admitted, and therefore remains a valid lower bound on the
+value function. The weakening is bounded above by `W` and recorded per cut.
+
+# Why it is needed
+Accumulated cuts introduce coefficients of order 1e-14 into an otherwise
+ordinary LP — measured on `case588_sdet` node 16 at iteration 74: matrix range
+ratio 2.64e17, which HiGHS rejects at load with zero simplex iterations. The DC
+MODEL, the recourse prices, the solver and its settings are untouched; only the
+REPRESENTATION of the cuts changes.
+
+A cut whose removal set would exceed `weaken_tol` is left exactly as it was and
+counted in `refused`, so the allowance can never be silently exceeded.
+"""
+function canonicalize_cut_file!(path::AbstractString, case::BatteryCase;
+                                coef_tol::Real = 1e-9, weaken_tol::Real = 1e-6)
+    isfile(path) || return (changed = 0, removed = 0, refused = 0, max_weakening = 0.0)
+    raw = JSON.parsefile(path)
+    # Two shapes carry cuts here. `SDDP.write_cuts_to_file` emits a BARE LIST of
+    # node objects; this study's segment checkpoint wraps that same list under
+    # `"cuts"` alongside its bound and provenance. Both are canonicalized in
+    # place, and the wrapper is preserved untouched.
+    data = raw isa AbstractVector ? raw :
+           (raw isa AbstractDict && haskey(raw, "cuts") ? raw["cuts"] :
+            error("unrecognised cut file layout: $path"))
+    lo = Dict{String,Float64}(); hi = Dict{String,Float64}()
+    for b in case.batteries, key in (string("e[", b.index, "]"), string(b.index))
+        lo[key] = Float64(b.energy_min); hi[key] = Float64(b.energy_max)
+    end
+    changed = 0; removed = 0; refused = 0; maxW = 0.0
+    for node in data, key in ("single_cuts", "multi_cuts")
+        haskey(node, key) || continue
+        for cut in node[key]
+            haskey(cut, "coefficients") || continue
+            co = cut["coefficients"]
+            R = String[]; W = 0.0
+            for (k, v) in co
+                b = Float64(v)
+                (b != 0 && abs(b) < coef_tol) || continue
+                W += abs(b) * (get(hi, k, 0.0) - get(lo, k, 0.0)); push!(R, k)
+            end
+            isempty(R) && continue
+            if W > weaken_tol
+                refused += 1
+                continue
+            end
+            shift = 0.0
+            for k in R
+                b = Float64(co[k])
+                shift += b > 0 ? b * get(lo, k, 0.0) : b * get(hi, k, 0.0)
+                co[k] = 0.0
+            end
+            cut["intercept"] = Float64(cut["intercept"]) + shift
+            changed += 1; removed += length(R); maxW = max(maxW, W)
+        end
+    end
+    open(path, "w") do io; JSON.print(io, raw); end
+    return (changed = changed, removed = removed, refused = refused, max_weakening = maxW)
+end
+
+"""
     train_battery_sddp(case; backward=:soc, num_stages, iteration_limit,
                        time_limit, seed, print_level, backward_optimizer,
                        forward_optimizer, protocol, evaluate_columns,
@@ -439,7 +520,8 @@ function train_battery_sddp(case::BatteryCase;
                             evaluate_columns = nothing,
                             evaluate_every = nothing,
                             cut_path = nothing,
-                            resume_cuts = nothing)
+                            resume_cuts = nothing,
+                            canonicalize_cuts::Bool = false)
     spec = backward_spec(backward)
     # The tag must be a dot-delimited COMPONENT of the file name, not merely a
     # substring of it: a PGLib case name that happened to contain "dc" would
@@ -465,6 +547,9 @@ function train_battery_sddp(case::BatteryCase;
     # so `SDDP.train` sees a model it has never trained.
     if resume_cuts !== nothing
         isfile(String(resume_cuts)) || error("no cut file to resume from: $resume_cuts")
+        # RESTORED cuts get the same rule as newly generated ones, so a resumed
+        # lineage cannot reintroduce the denormals it exists to avoid.
+        canonicalize_cuts && canonicalize_cut_file!(String(resume_cuts), case)
         SDDP.read_cuts_from_file(backward_graph, String(resume_cuts))
         SDDP.read_cuts_from_file(forward, String(resume_cuts))
     end
@@ -510,7 +595,12 @@ function train_battery_sddp(case::BatteryCase;
     SDDP.train(backward_graph; kwargs...)
     elapsed = time() - t0
 
-    cut_path === nothing || SDDP.write_cuts_to_file(backward_graph, cut_path)
+    if cut_path !== nothing
+        SDDP.write_cuts_to_file(backward_graph, cut_path)
+        # Canonicalize on the way OUT too: with one-iteration segments this
+        # guarantees every cut is canonical before the next iteration reads it.
+        canonicalize_cuts && canonicalize_cut_file!(cut_path, case)
+    end
 
     return (backward_graph = backward_graph, forward = forward,
             status = SDDP.termination_status(backward_graph),

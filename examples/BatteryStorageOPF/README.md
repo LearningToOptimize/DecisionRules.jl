@@ -524,6 +524,30 @@ identifier and labels row `b` from `bound_name`; and a cut file must carry the
 arm's tag in its name — `sddp_cut_path` builds one and `train_battery_sddp`
 refuses a path that does not.
 
+### The two arms no longer share a solver
+
+`socwr_optimizer` (Clarabel, frozen at `tol = 1e-8` with equilibration on) solves
+the SOC-WR backward nodes. `dc_optimizer` is **HiGHS at its own defaults**, with
+output suppressed and nothing else set, for every case alike.
+
+They were the same factory until the portfolio measured what that cost. Under
+`DCPPowerModel` the backward subproblem is a convex QP over a *linear* feasible
+set — PowerModels' DC equations, the linear battery transition, finite state and
+control bounds, and uncapped positive-price active recourse. Handing that LP to
+an interior-point conic solver returned `INFEASIBLE`, `DUAL_INFEASIBLE`,
+`LOCALLY_INFEASIBLE` and `SLOW_PROGRESS` on nine of ten portfolio cases, at stage
+nodes between 3 and 22, on subproblems whose primal feasibility is not in
+question. The provocation is conditioning, not modelling: the right-hand side
+spans roughly ten orders of magnitude, from reactive-demand deviations near
+`5e-4` to recourse prices near `7e5`. Presolve and a simplex/QP basis absorb that
+range; an unpreconditioned conic IPM does not.
+
+Sharing one solver was meant to make the two arms differ only by FORMULATION.
+That is still what they differ by — a DC baseline that cannot finish an iteration
+measures the solver, not the DC approximation, and reporting it as the latter
+would be false. Each formulation is now solved by something that can solve it,
+with no per-case tuning on either side and no fallback anywhere.
+
 The DC arm is validated against a **direct PowerModels DC oracle**: an ordinary
 `solve_opf(net, DCPPowerModel, …)` on a network with no storage table at all,
 whose per-bus load is the realized demand minus the battery's net injection. It
