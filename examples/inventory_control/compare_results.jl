@@ -803,6 +803,7 @@ function relaxed_results()
     lstm_costs = optional_costs("relaxed_lstm", "dr")
     hp_costs = optional_costs("relaxed_hp", "dr")
     lstm_hp_costs = optional_costs("relaxed_lstm_hp", "dr")
+    strict_costs = optional_costs("strict", "dr")
 
     # Load scalar baseline metadata.
     base_stock_level = read_scalar(resolve_file("relaxed_basestock_S_star.txt"))
@@ -820,6 +821,8 @@ function relaxed_results()
         push!(results, MethodResult("TS-DDR Relaxed (LSTM)", lstm_costs))
     !isnothing(lstm_hp_costs) &&
         push!(results, MethodResult("TS-DDR Relaxed (LSTM+HP)", lstm_hp_costs))
+    !isnothing(strict_costs) &&
+        push!(results, MethodResult("TS-DDR Strict (Reachable)", strict_costs))
 
     # Append non-TS-DDR baselines.
     push!(results, MethodResult("SDDP (PAR)", sddp_costs))
@@ -834,6 +837,8 @@ function relaxed_results()
         push!(timing_tags, "relaxed_hp")
     !isnothing(resolve_file_optional("relaxed_lstm_hp_dr_timing.csv")) &&
         push!(timing_tags, "relaxed_lstm_hp")
+    !isnothing(resolve_file_optional("strict_dr_timing.csv")) &&
+        push!(timing_tags, "strict")
 
     return results, load_timing(timing_tags), base_stock_level, sddp_bound
 end
@@ -862,6 +867,7 @@ function integer_results()
     hp_costs = optional_costs("integer_hp", "dr")
     lstm_costs = optional_costs("integer_lstm", "dr")
     lstm_sf_costs = optional_costs("integer_lstm_sf", "dr")
+    strict_integer_costs = optional_costs("strict_integer", "dr")
 
     # Load scalar baseline metadata.
     base_stock_level = read_scalar(resolve_file("integer_basestock_S_star.txt"))
@@ -882,6 +888,8 @@ function integer_results()
         push!(results, MethodResult("TS-DDR (LSTM)", lstm_costs))
     !isnothing(lstm_sf_costs) &&
         push!(results, MethodResult("TS-DDR (LSTM+SF)", lstm_sf_costs))
+    !isnothing(strict_integer_costs) &&
+        push!(results, MethodResult("TS-DDR Strict (Reachable+Int)", strict_integer_costs))
 
     # Append non-TS-DDR baselines.
     push!(results, MethodResult("SDDP (MIP fwd)", sddp_mip_forward_costs))
@@ -891,7 +899,7 @@ function integer_results()
 
     # Collect timing tags for all present variants.
     timing_tags = ["integer", "integer_cr"]
-    for tag in ["integer_sf", "integer_hp", "integer_lstm", "integer_lstm_sf"]
+    for tag in ["integer_sf", "integer_hp", "integer_lstm", "integer_lstm_sf", "strict_integer"]
         !isnothing(resolve_file_optional("$(tag)_dr_timing.csv")) &&
             push!(timing_tags, tag)
     end

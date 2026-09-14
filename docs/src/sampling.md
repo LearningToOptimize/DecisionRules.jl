@@ -251,35 +251,36 @@ For callables, `sample(f::Function)` simply calls `f()`.
 
 ## Demonstrating the difference
 
-Consider 3 hydro reservoirs with 4 historical inflow scenarios:
+Consider 3 demand regions with 4 historical load-factor scenarios:
 
 ```
-Historical inflow data (columns = scenarios):
+Historical load factors (columns = scenarios):
 
          ω=1    ω=2    ω=3    ω=4
-Res 1:   10     20     15     25
-Res 2:   80    120     90    110
-Res 3:    5      8      6      9
+Reg 1:  0.90   1.00   0.95   1.10
+Reg 2:  0.85   1.15   0.90   1.05
+Reg 3:  0.92   1.08   0.97   1.12
 ```
 
 **Independent sampling** draws one value per row independently. A sample
-might be `(10, 120, 9)` — reservoir 1 from ω=1, reservoir 2 from ω=2,
-reservoir 3 from ω=4. This combination never occurred historically and
-may violate the drought-affects-all-basins correlation.
+might be `(0.90, 1.15, 1.12)` — region 1 from ω=1, region 2 from ω=2,
+region 3 from ω=4. This combination never occurred historically and
+may violate spatial demand correlation.
 
-**Joint sampling** picks one column: `(10, 80, 5)` or `(25, 110, 9)` —
+**Joint sampling** picks one column: `(0.90, 0.85, 0.92)` or
+`(1.10, 1.05, 1.12)` —
 always a historically observed combination.
 
 **Trajectory sampling** can additionally model temporal persistence:
-if ω=1 (dry year) was drawn at stage 1, the AR(1) sampler will likely
-produce below-average inflows at stage 2 as well.
+if a low-demand atom was drawn at stage 1, the AR(1) sampler will likely
+produce below-average demand at stage 2 as well.
 
 ```
 Joint sampling (k=4 possible outcomes per stage):
 
-    Res 1 ──┐
-    Res 2 ──┼── same ω ──→ one of 4 historical vectors
-    Res 3 ──┘
+    Reg 1 ──┐
+    Reg 2 ──┼── same ω ──→ one of 4 historical vectors
+    Reg 3 ──┘
 
 Independent sampling (k³=64 possible outcomes per stage):
 
@@ -307,7 +308,7 @@ maintainability.
   parameters from an uncertainty pool, discarding the scenario values.
   Used by `setup_shooting_windows` for multiple-shooting training.
 
-## API Reference
+## Docstrings
 
 ```@docs
 sample

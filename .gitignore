@@ -55,3 +55,7 @@ plan/
 *_cuts.json
 settings.json
 *.sh
+*-backup
+*.cuts.json.stale_stronggrid
+*strong.json
+.claude/settings.local.json

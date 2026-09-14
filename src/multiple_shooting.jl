@@ -33,6 +33,16 @@ Assumptions:
 using Base: accumulate
 using Zygote: Zygote
 
+"""
+    _print_window_status_and_params(window, status; context="")
+
+Print a diagnostic dump for a window solve that did not reach an optimal status.
+
+Outputs: a primal feasibility report for `window.model`, the solver `status`,
+the `window.stage_range`, and a sorted listing of every JuMP parameter in the
+window model with its current value. The optional `context` string is included
+in the header for traceability.
+"""
 function _print_window_status_and_params(window, status; context::AbstractString="")
     header = isempty(context) ? "solve_window status" : "solve_window status ($context)"
     println("=====")
@@ -92,6 +102,13 @@ function extract_uncertainty_params(window_uncertainties)
     end
 end
 
+"""
+    _param_init_value(src::JuMP.VariableRef) -> Float64
+
+Return the current parameter value of `src` if it is a JuMP `MOI.Parameter`;
+otherwise return `0.0`. Silently returns `0.0` if `parameter_value` throws
+(e.g., when the parameter has been deleted from the model).
+"""
 function _param_init_value(src::JuMP.VariableRef)
     if JuMP.is_parameter(src)
         try
@@ -103,6 +120,13 @@ function _param_init_value(src::JuMP.VariableRef)
     return 0.0
 end
 
+"""
+    _as_float64_vec(val) -> Vector{Float64}
+
+Coerce `val` to a `Vector{Float64}`. If `val` is already a `Vector{Float64}`,
+return it as-is; if it is another `AbstractVector`, convert element-wise; if it
+is a scalar, wrap it in a single-element vector.
+"""
 function _as_float64_vec(val)
     if val isa AbstractVector
         return val isa Vector{Float64} ? val : Float64.(val)
@@ -110,6 +134,16 @@ function _as_float64_vec(val)
     return [Float64(val)]
 end
 
+"""
+    _create_like_variable(m::JuMP.Model, src::JuMP.VariableRef, t::Int;
+                          force_parameter=false) -> JuMP.VariableRef
+
+Create a new variable in `m` that mirrors `src`. If `src` is a JuMP parameter
+(or `force_parameter` is `true`), the new variable is created as an
+`MOI.Parameter` initialized to [`_param_init_value`](@ref)`(src)`; otherwise a
+free decision variable is created. The variable is named via
+[`var_set_name!`](@ref) with stage suffix `t`.
+"""
 function _create_like_variable(
     m::JuMP.Model, src::JuMP.VariableRef, t::Int; force_parameter::Bool=false
 )
@@ -368,6 +402,15 @@ function solve_window(
     )
 end
 
+"""
+    _set_window_parameters!(window_state_in_params, window_state_out_params,
+                            s_in, targets) -> Nothing
+
+Write numeric initial-state and target values into the JuMP `MOI.Parameter`
+variables of a window model before solving. `s_in` is broadcast into
+`window_state_in_params`; each element of `targets` is broadcast into the
+corresponding stage's target parameters in `window_state_out_params`.
+"""
 function _set_window_parameters!(
     window_state_in_params,
     window_state_out_params,
