@@ -1,0 +1,85 @@
+# Regional demand variants of the frozen battery portfolio.
+#
+# A declarative recipe, read by `demand_variant_recipe` in battery_portfolio.jl.
+# Every choice that determines a variant's finite demand support is written here
+# or named here by rule; the code only evaluates the rules. The reference support
+# (`portfolio_support`, the one recorded in battery_portfolio.json) is NOT
+# described or changed by this file.
+#
+# Notation (all quantities per host, from the host's own frozen portfolio case):
+#   R1..R6   the portfolio regions in manifest order (descending nominal demand)
+#   D_r      nominal active demand of region r (pu), summed over its buses
+#   PROF_t   PORTFOLIO_PROFILE, t = 1..24;  kappa = the frozen kappa_case
+#
+# Realized demand of load j at a bus of region r, stage t, atom k:
+#   p_d = p0_j * kappa * PROF_t * m[r,t,k]    (q_d with the same factor)
+#   m[r,t,k] = (1 + a[p,t]) * (1 + sigma_r * u_r * s[p,k,t])
+# where p is the group of r. Loads at buses in no region keep multiplier 1.
+
+schema = "battery_storage_opf/demand_variants/1"
+recipe_version = 1
+# The reference manifest these variants are built on (battery_portfolio.json).
+reference_manifest_digest = "11c2f58fabbac489812d86fa2aef95833c54acaac12347337e54940a29ccb1d9"
+
+[groups]
+# Regions are paired by rank: largest with smallest, and so on.
+# pairs[p] = [first, partner]; sigma = +1 for first, -1 for partner.
+rule = "rank_pairs"
+pairs = [[1, 6], [2, 5], [3, 4]]
+
+[means]
+# a[p,t] = amplitude * ( cos(theta_t - phi_p) - beta_p ),
+# theta_t = 2*pi*(t - anchor_stage)/period.
+form = "centered_cosine"
+period = 24
+anchor_stage = 12
+# phi_1 = 0; phi_2 = pi - C with cos C = (G1^2 + G2^2 - G3^2)/(2 G1 G2);
+# phi_3 = arg(-G1 - G2*exp(i*phi_2)); G_p = D_first + D_partner.
+# Makes sum_p G_p exp(i phi_p) = 0 (stage totals preserved). Requires
+# max_p G_p < sum_p G_p / 2; otherwise the recipe fails for that host.
+phase_rule = "weighted_phasor_triangle"
+# beta_p = sum_t PROF_t cos(theta_t - phi_p) / sum_t PROF_t
+# (each region's daily expected energy preserved).
+centering = "profile_weighted_daily"
+# Tried in this order; the first admissible one is used (see [hosts]).
+amplitude_candidates = [0.15, 0.10, 0.05]
+
+[shocks]
+# delta^2 = the reference per-region variance, computed from the reference
+# constants: (1/n)(HIGH-1)^2 + ((n-1)/n)(LOW-1)^2 with n = PORTFOLIO_REGIONS.
+scale = "reference_region_variance"
+# u_r = delta * sqrt(D_partner / D_r): partners move equal and opposite MW,
+# and sum_r (D_r / sum D) u_r^2 = delta^2.
+allocation = "partner_equal_mw"
+probability = "uniform"
+
+[variants.A]
+# Group sign patterns s[p,k] for atoms k = 1..4 (rows), groups p = 1..3 (columns).
+# The same at every stage.
+signs = [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]]
+
+[variants.B]
+# Atom k of B equals atom k of A with group `overwrite`'s sign replaced by group
+# `keep`'s sign, inside each stage block. Means and shock scales are A's.
+base = "A"
+
+[[variants.B.blocks]]
+first = 1
+last = 8
+keep = 3
+overwrite = 1
+
+[[variants.B.blocks]]
+first = 9
+last = 16
+keep = 1
+overwrite = 2
+
+[[variants.B.blocks]]
+first = 17
+last = 24
+keep = 2
+overwrite = 3
+
+[hosts]
+# Calibrated amplitude per host, added only after a recorded calibration.

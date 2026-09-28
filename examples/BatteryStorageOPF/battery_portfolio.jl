@@ -40,6 +40,7 @@ using LinearAlgebra
 using Printf
 using SHA
 using Statistics
+using TOML
 import MathOptInterface as MOI
 
 @isdefined(acquire_pglib_case) || include(joinpath(@__DIR__, "build_battery_case.jl"))
@@ -2225,6 +2226,214 @@ function freeze_portfolio(; dir::AbstractString,
     length(hashes) == 1 ||
         error("the portfolio manifest was not written byte-identically to every location")
     return manifest
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# J — regional demand variants
+#
+# Experimental supports built ON a frozen portfolio case: the network, fleet,
+# κ, profile, seeds and stage duration are the case's own, and only the demand
+# multiplier changes. Every choice lives in `demand_variants.toml`; nothing in
+# this section alters `portfolio_support` or the reference manifest.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"Schema tag the variant recipe must carry."
+const DEMAND_VARIANT_SCHEMA = "battery_storage_opf/demand_variants/1"
+
+"Path of the variant recipe inside an example directory."
+demand_variant_recipe_path(dir::AbstractString = @__DIR__) = joinpath(dir, "demand_variants.toml")
+
+"""
+    demand_variant_recipe(path=demand_variant_recipe_path()) -> Dict{String,Any}
+
+Read the variant recipe and refuse any rule this code does not implement.
+
+# Notes
+The recipe names its rules (`rank_pairs`, `weighted_phasor_triangle`, …) rather
+than leaving them implicit, so a reader of the file alone knows what was built.
+The check below is what makes that naming binding: a recipe asking for a rule
+that is not implemented here is an error, never a silent substitution.
+"""
+function demand_variant_recipe(path::AbstractString = demand_variant_recipe_path())
+    r = TOML.parsefile(path)
+    r["schema"] == DEMAND_VARIANT_SCHEMA ||
+        error("variant recipe schema $(r["schema"]) is not $DEMAND_VARIANT_SCHEMA")
+    r["recipe_version"] == 1 || error("unsupported variant recipe_version $(r["recipe_version"])")
+    r["groups"]["rule"] == "rank_pairs" || error("unsupported grouping rule $(r["groups"]["rule"])")
+    m = r["means"]
+    (m["form"], m["phase_rule"], m["centering"]) ==
+        ("centered_cosine", "weighted_phasor_triangle", "profile_weighted_daily") ||
+        error("unsupported mean-modulation rules in the variant recipe")
+    s = r["shocks"]
+    (s["scale"], s["allocation"], s["probability"]) ==
+        ("reference_region_variance", "partner_equal_mw", "uniform") ||
+        error("unsupported shock rules in the variant recipe")
+    pairs = [Int.(p) for p in r["groups"]["pairs"]]
+    sort!(vcat(pairs...)) == collect(1:PORTFOLIO_REGIONS) ||
+        error("variant pairs must partition 1:$PORTFOLIO_REGIONS, got $pairs")
+    length(pairs) == 3 || error("the variant recipe implements exactly three groups")
+    return r
+end
+
+"""
+    variant_parameters(recipe, demand_pu) -> NamedTuple
+
+The host-dependent constants of the variant construction.
+
+# Arguments
+- `demand_pu::AbstractVector`: region nominal active demand ``D_r``, manifest order.
+
+# Returns
+`(pairs, group, sigma, G, phi, beta, delta, u)` with `group[r]` the group of
+region `r` and `sigma[r] = ±1` its sign inside the group.
+
+# Notes
+```math
+\\delta^2 = \\tfrac1n (H-1)^2 + \\tfrac{n-1}{n}(L-1)^2,\\qquad
+u_r = \\delta\\sqrt{D_{partner}/D_r},
+```
+so ``D_r u_r = D_{partner} u_{partner}`` and ``\\sum_r w_r u_r^2 = \\delta^2``.
+The phases close the triangle ``\\sum_p G_p e^{i\\phi_p} = 0``.
+"""
+function variant_parameters(recipe::AbstractDict, demand_pu::AbstractVector{<:Real})
+    n = PORTFOLIO_REGIONS
+    length(demand_pu) == n || error("expected $n region demands, got $(length(demand_pu))")
+    D = Float64.(demand_pu)
+    all(>(0), D) || error("every region must carry positive demand")
+    pairs = [Int.(p) for p in recipe["groups"]["pairs"]]
+    group = zeros(Int, n)
+    sigma = zeros(Float64, n)
+    for (p, (a, b)) in enumerate(pairs)
+        group[a] = p; sigma[a] = 1.0
+        group[b] = p; sigma[b] = -1.0
+    end
+    G = [D[a] + D[b] for (a, b) in pairs]
+    2 * maximum(G) < sum(G) ||
+        error("no phase triangle exists: the largest group mass $(maximum(G)) is at least half of $(sum(G))")
+    C = acos((G[1]^2 + G[2]^2 - G[3]^2) / (2 * G[1] * G[2]))
+    phi = [0.0, π - C, 0.0]
+    phi[3] = angle(-(G[1] + G[2] * cis(phi[2])))
+
+    m = recipe["means"]
+    P, t0 = Int(m["period"]), Int(m["anchor_stage"])
+    θ = [2π * (t - t0) / P for t in 1:PORTFOLIO_HORIZON]
+    beta = [sum(PORTFOLIO_PROFILE[t] * cos(θ[t] - phi[p]) for t in 1:PORTFOLIO_HORIZON) /
+            sum(PORTFOLIO_PROFILE) for p in 1:3]
+
+    delta = sqrt((1 / n) * (PORTFOLIO_REGION_HIGH - 1)^2 + ((n - 1) / n) * (PORTFOLIO_REGION_LOW - 1)^2)
+    u = zeros(Float64, n)
+    for (a, b) in pairs
+        u[a] = delta * sqrt(D[b] / D[a])
+        u[b] = delta * sqrt(D[a] / D[b])
+    end
+    return (pairs = pairs, group = group, sigma = sigma, G = G, phi = phi, beta = beta,
+            theta = θ, delta = delta, u = u)
+end
+
+"""
+    variant_mean_modulation(recipe, params, amplitude) -> Matrix{Float64}
+
+``a_{p,t}`` as a `3 × PORTFOLIO_HORIZON` matrix.
+"""
+variant_mean_modulation(recipe::AbstractDict, params, amplitude::Real) =
+    [Float64(amplitude) * (cos(params.theta[t] - params.phi[p]) - params.beta[p])
+     for p in 1:3, t in 1:PORTFOLIO_HORIZON]
+
+"""
+    variant_signs(recipe, variant, t) -> Matrix{Int}
+
+The `4 × 3` group sign matrix ``s_{p,k}(t)`` of `variant` (`"A"` or `"B"`) at
+stage `t`; rows are atoms, columns groups.
+"""
+function variant_signs(recipe::AbstractDict, variant::AbstractString, t::Integer)
+    A = reduce(vcat, [permutedims(Int.(row)) for row in recipe["variants"]["A"]["signs"]])
+    size(A) == (4, 3) || error("variant A must declare 4 atoms over 3 groups")
+    variant == "A" && return A
+    variant == "B" || error("unknown demand variant \"$variant\"")
+    recipe["variants"]["B"]["base"] == "A" || error("variant B must be based on A")
+    blocks = [b for b in recipe["variants"]["B"]["blocks"] if b["first"] <= t <= b["last"]]
+    length(blocks) == 1 || error("stage $t is covered by $(length(blocks)) blocks of variant B")
+    blk = only(blocks)
+    S = copy(A)
+    S[:, Int(blk["overwrite"])] .= A[:, Int(blk["keep"])]
+    return S
+end
+
+"""
+    variant_modes(recipe, variant, demand_pu, t; amplitude) -> Matrix{Float64}
+
+The `(regions × 4)` joint multiplier modes of `variant` at stage `t`:
+``m_{r,t,k} = (1 + a_{p,t})(1 + \\sigma_r u_r s_{p,k}(t))``.
+"""
+function variant_modes(recipe::AbstractDict, variant::AbstractString,
+                       demand_pu::AbstractVector{<:Real}, t::Integer; amplitude::Real)
+    par = variant_parameters(recipe, demand_pu)
+    a = variant_mean_modulation(recipe, par, amplitude)
+    S = variant_signs(recipe, variant, t)
+    return [(1 + a[par.group[r], t]) * (1 + par.sigma[r] * par.u[r] * S[k, par.group[r]])
+            for r in 1:PORTFOLIO_REGIONS, k in 1:4]
+end
+
+"""
+    portfolio_variant_sampler(regions, demand_pu, recipe, variant; amplitude) -> StageMultiplier
+
+The authoring sampler of a variant: one equiprobable four-atom
+[`JointRegionMultiplier`](@ref) per stage, applied by BUS exactly as the
+reference sampler is.
+"""
+function portfolio_variant_sampler(regions::AbstractVector, demand_pu::AbstractVector{<:Real},
+                                   recipe::AbstractDict, variant::AbstractString; amplitude::Real)
+    by_stage = [JointRegionMultiplier(regions,
+                                      variant_modes(recipe, variant, demand_pu, t; amplitude = amplitude),
+                                      fill(0.25, 4); by = :bus)
+                for t in 1:PORTFOLIO_HORIZON]
+    return StageMultiplier(by_stage)
+end
+
+"""
+    portfolio_variant_support(network, regions, demand_pu, κ, recipe, variant;
+                              amplitude, seed) -> DemandSupport
+
+Freeze a variant support with the reference's own profile, seed and stage
+duration.
+
+# Notes
+The freeze is the existing `:exact` path. Two properties are asserted HERE,
+locally to the variants, because the evaluation protocol draws atom indices
+uniformly: every stage has exactly four DISTINCT atoms (so duplicate merging
+cannot have reweighted anything) and exactly uniform probabilities.
+"""
+function portfolio_variant_support(network::AbstractDict, regions::AbstractVector,
+                                   demand_pu::AbstractVector{<:Real}, κ::Real,
+                                   recipe::AbstractDict, variant::AbstractString;
+                                   amplitude::Real, seed::Integer)
+    sampler = portfolio_variant_sampler(regions, demand_pu, recipe, variant; amplitude = amplitude)
+    support = freeze_demand_support(sampler, network, PORTFOLIO_HORIZON;
+                                    seed = Int(seed), method = :exact,
+                                    profile = Float64(κ) .* PORTFOLIO_PROFILE,
+                                    profile_period = length(PORTFOLIO_PROFILE),
+                                    protocol_seed = Int(seed),
+                                    stage_hours = PORTFOLIO_STAGE_HOURS)
+    for t in 1:support.horizon
+        num_atoms(support, t) == 4 ||
+            error("variant $variant stage $t has $(num_atoms(support, t)) atoms after freezing, expected 4")
+        all(==(0.25), atom_probabilities(support, t)) ||
+            error("variant $variant stage $t probabilities are not exactly uniform")
+        allunique(eachcol(support.atoms[t])) ||
+            error("variant $variant stage $t has duplicate atoms")
+    end
+    return support
+end
+
+"""
+    region_demand_pu(network, regions) -> Vector{Float64}
+
+Nominal active demand per region, summed in ascending bus order — the same
+quantity and order `portfolio_regions` records as `demand_pu`.
+"""
+function region_demand_pu(network::AbstractDict, regions::AbstractVector)
+    load_at = nominal_load_at_bus(network)
+    return [sum(load_at[b] for b in sort(collect(Int.(r))); init = 0.0) for r in regions]
 end
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1190,6 +1190,38 @@ function nominal_bus_demand(case::BatteryCase)
 end
 
 """
+    terminal_energy_floor(case) -> Union{Nothing,Dict{Int,Float64}}
+
+The per-battery lower bound on TERMINAL energy the case declares, or `nothing`
+when it declares none.
+
+# Returns
+`nothing` for every case whose manifest carries no `"boundary"` section — which
+is every case frozen before the boundary convention existed — and otherwise a
+map from battery identifier to the floor ``\\underline e^T_b`` in pu·h.
+
+# Notes
+The requirement lives in the CASE, not in the caller. A horizon solve, a policy
+layer and a comparator that each rebuilt the floor from a remembered fraction
+would be three chances to disagree about the boundary condition, and a boundary
+disagreement is indistinguishable in the reported cost from a difference in the
+policy. Reading it from one place is what makes "the same terminal condition"
+checkable rather than asserted.
+
+A case that declares the convention has already had its `energy_initial` set to
+the same value, so the usual contract is ``e^T_b \\ge e^0_b``; the floor is stored
+explicitly rather than derived from `energy_initial` so that a case may declare
+a different terminal level than its initial one without a new field.
+"""
+function terminal_energy_floor(case::BatteryCase)
+    b = get(case.manifest, "boundary", nothing)
+    b === nothing && return nothing
+    raw = get(b, "terminal_energy_min", nothing)
+    raw === nothing && return nothing
+    return Dict{Int,Float64}(parse(Int, string(k)) => Float64(v) for (k, v) in raw)
+end
+
+"""
     realized_bus_demand(case, t, atom) -> (pd::Dict{Int,Float64}, qd::Dict{Int,Float64})
 
 Per-bus demand realized at stage `t` under atom index `atom` (pu).
@@ -1265,7 +1297,9 @@ function write_battery_case(dir::AbstractString;
                             protocol_stages::Integer,
                             protocol_scenarios::Integer,
                             screening_seed::Union{Nothing,Integer} = nothing,
-                            screening_scenarios::Integer = 0)
+                            screening_scenarios::Integer = 0,
+                            boundary::Union{Nothing,AbstractDict} = nothing,
+                            variant::Union{Nothing,AbstractDict} = nothing)
     validate_support(demand)
     mkpath(dir)
 
@@ -1387,6 +1421,15 @@ function write_battery_case(dir::AbstractString;
                                             scenario_index_matrix(demand, protocol_stages,
                                                                   protocol_scenarios))),
         ),
+        # OPT-IN boundary convention. A case written without it carries no
+        # "boundary" key at all, which is what `terminal_energy_floor` reads to
+        # decide that the case imposes no terminal requirement — so every case
+        # frozen before this field existed keeps its free-terminal behaviour
+        # without a version check anywhere.
+        "boundary" => boundary === nothing ? nothing : Dict{String,Any}(boundary),
+        # OPT-IN provenance of a derived case: which recipe produced it, from
+        # which base case, and what it changed. Documentation, not data.
+        "variant" => variant === nothing ? nothing : Dict{String,Any}(variant),
         "artifacts" => Dict{String,Any}(
             "network.json" => network_sha,
             "batteries.json" => batteries_sha,

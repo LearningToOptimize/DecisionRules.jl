@@ -2033,3 +2033,6 @@ const OPT = acp_optimizer()
         end
     end
 end
+
+include(joinpath(@__DIR__, "demand_variants.jl"))
+include(joinpath(@__DIR__, "renewable_variant.jl"))

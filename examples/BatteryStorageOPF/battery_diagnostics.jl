@@ -631,6 +631,23 @@ function deterministic_equivalent(case::BatteryCase,
             pms[t - 1].ext[:battery][:e_out][b.index])
     end
 
+    # ...and the terminal requirement, when the CASE declares one. Written as an
+    # inequality: the convention is that the horizon may not end poorer than it
+    # began, not that it must end at exactly the opening level, so a schedule
+    # that finds it worth arriving with more is not forbidden. Imposed only over
+    # a path that reaches the case's own horizon — a truncated path has no
+    # terminal stage in the sense the convention means, and silently pinning its
+    # last stage would charge it for a boundary it was never meant to meet.
+    floor_T = terminal_energy_floor(case)
+    terminal = Dict{Int,Any}()
+    if floor_T !== nothing && T == horizon(case.demand)
+        for b in case.batteries
+            haskey(floor_T, b.index) || continue
+            terminal[b.index] = JuMP.@constraint(model,
+                pms[T].ext[:battery][:e_out][b.index] >= floor_T[b.index])
+        end
+    end
+
     JuMP.@objective(model, Min, sum(stage_obj))
     JuMP.optimize!(model)
     status = JuMP.termination_status(model)
@@ -662,7 +679,10 @@ function deterministic_equivalent(case::BatteryCase,
             cost_deficit = ok ? sum(s.cost_deficit for s in stages) : NaN,
             cost_surplus = ok ? sum(s.cost_surplus for s in stages) : NaN,
             atoms = collect(Int.(atoms)), horizon = T, model_type = model_type,
-            link = link, model = model)
+            terminal_floor = floor_T, terminal_binding = ok && !isempty(terminal) ?
+                Dict{Int,Float64}(k => stages[T].energy_out[k] - floor_T[k] for k in keys(terminal)) :
+                nothing,
+            link = link, terminal = terminal, model = model)
 end
 
 """
