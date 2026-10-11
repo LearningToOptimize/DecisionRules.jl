@@ -305,7 +305,11 @@ if PHYSICAL_AUDIT
     baseMVA = alldata[1]["powersystem"]["baseMVA"]
     audit_dir = joinpath(out_dir, "audit")
     isdir(audit_dir) || mkpath(audit_dir)
-    tag = "sddp_$(scen_first)_$(scen_last)"
+    # DR_OUTPUT_TAG keeps a second policy's shards (e.g. the DC-backward cuts) from
+    # overwriting the SOC shards in the same audit directory.
+    tag = let t = get(ENV, "DR_OUTPUT_TAG", "")
+        isempty(t) ? "sddp_$(scen_first)_$(scen_last)" : "sddp_$(t)_$(scen_first)_$(scen_last)"
+    end
 
     def_rows = DataFrame(
         scenario=Int[], stage=Int[], bus=Int[],
@@ -498,7 +502,7 @@ tag_suffix = let tag = get(ENV, "DR_OUTPUT_TAG", "")
 end
 isempty(tag_suffix) || println("Output tag suffix: $tag_suffix")
 
-const COL_NAME = "SDDP-SOC (paired)"
+const COL_NAME = get(ENV, "DR_COL_NAME", "SDDP-SOC (paired)")  # e.g. "SDDP-DC (paired)" for DC-backward cuts
 costs_file = joinpath(out_dir, "paired_costs$(tag_suffix).csv")
 if isfile(costs_file)
     df = CSV.read(costs_file, DataFrame)

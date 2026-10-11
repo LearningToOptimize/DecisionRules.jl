@@ -190,6 +190,14 @@ function make_robust_recovery(ac_optimizer::Function, conic_optimizer::Function;
             catch
             end
         end
+        # Keep the failing subproblem, incoming state and cuts included, so it can
+        # be re-solved with a second solver before any model-level explanation.
+        dump = joinpath(pwd(), "recovery_failed_node$(node.index)_$(get(ENV, "SLURM_JOB_ID", "local")).mof.json")
+        try
+            JuMP.write_to_file(sp, dump); println("[recovery] failing subproblem written to $dump")
+        catch err
+            println("[recovery] could not write the failing subproblem: ", sprint(showerror, err))
+        end
         error("strict numerical recovery failed at node $(node.index); aborting to preserve bound integrity")
     end
 end

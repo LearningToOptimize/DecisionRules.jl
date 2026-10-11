@@ -41,7 +41,14 @@ const STAT_PERIOD = parse(Int, get(ENV, "DR_SDDP_STAT_PERIOD", "200"))
 # Reactive-demand scaler (historical value 0.6; see load_case_data comment)
 const QD_SCALER = parse(Float64, get(ENV, "DR_SDDP_QD_SCALER", "0.6"))
 
-const FORMULATION_BACKWARD = SOCWRConicPowerModel
+# DR_SDDP_BACKWARD selects the relaxation the cuts are built on: "soc" (the
+# published baseline, SOC-WR, Clarabel) or "dc" (the linearised DC network, GUROBI
+# — the study's DC solver). The forward pass is AC either way. The cuts file name
+# carries the formulation, so the two never collide.
+const FORMULATION_BACKWARD = let b = lowercase(strip(get(ENV, "DR_SDDP_BACKWARD", "soc")))
+    b in ("soc", "dc") || error("DR_SDDP_BACKWARD must be soc or dc; got $b")
+    b == "dc" ? DCPPowerModel : SOCWRConicPowerModel
+end
 const FORMULATION_FORWARD = ACPPowerModel
 
 # Robust flat-voltage primal starts for the ACP forward graph (vm = 0 default
@@ -83,6 +90,16 @@ function clarabel_optimizer()
             get(ENV, "DR_SDDP_CLARABEL_STATREG", "1e-8")),
     )
 end
+
+# Gurobi is loaded ONLY for the DC run, so the published SOC run does not depend on
+# a Gurobi licence. One environment is shared by every subproblem, so the licence is
+# checked out once rather than once per stage model.
+if FORMULATION_BACKWARD === DCPPowerModel
+    @eval using Gurobi
+    @eval const GRB_ENV = Gurobi.Env()
+end
+"Gurobi for the DC backward problem (the study's DC solver), output off."
+gurobi_dc_optimizer() = (o = Gurobi.Optimizer(GRB_ENV); JuMP.MOI.set(o, JuMP.MOI.Silent(), true); o)
 
 function madnlp_optimizer()
     return MadNLP.Optimizer(;
@@ -219,7 +236,11 @@ function SDDP.convergence_test(
     rule::WandBLog,
 )
     mkpath(dirname(rule.cuts_file))
-    SDDP.write_cuts_to_file(policy, rule.cuts_file)
+    # Atomic: write a temporary file, then rename. A preemption during a direct write
+    # left a 0-byte cuts file and lost 511 iterations (job 13679704); a rename cannot
+    # leave a truncated file where the last valid checkpoint used to be.
+    SDDP.write_cuts_to_file(policy, rule.cuts_file * ".tmp")
+    mv(rule.cuts_file * ".tmp", rule.cuts_file; force = true)
     latest = log[end]
     gap = abs(latest.bound) > 0 ?
         100 * (latest.simulation_value - latest.bound) / abs(latest.bound) : NaN
@@ -265,7 +286,8 @@ function main()
     println("Run: ", save_file)
     println("Case directory: ", CASE_DIR)
     println("Stages: ", NUM_STAGES, " (reporting first ", NUM_STAGES - RM_STAGES, ")")
-    println("Backward formulation: ", FORMULATION_BACKWARD, " with Clarabel")
+    println("Backward formulation: ", FORMULATION_BACKWARD, " with ",
+            FORMULATION_BACKWARD === DCPPowerModel ? "Gurobi" : "Clarabel")
     println("Forward formulation: ", FORMULATION_FORWARD, " with MadNLP")
     println("Iteration limit: ", ITERATION_LIMIT)
     println("Simulations: ", NUM_SIMULATIONS)
@@ -285,7 +307,7 @@ function main()
             "training_method" => "sddp_inconsistent",
             "backward_formulation" => string(FORMULATION_BACKWARD),
             "forward_formulation" => string(FORMULATION_FORWARD),
-            "backward_solver" => "Clarabel",
+            "backward_solver" => FORMULATION_BACKWARD === DCPPowerModel ? "Gurobi" : "Clarabel",
             "forward_solver" => "MadNLP",
             "num_stages" => NUM_STAGES,
             "rm_stages" => RM_STAGES,
@@ -309,7 +331,7 @@ function main()
         model_constructor_grid=FORMULATION_BACKWARD,
         model_constructor_grid_forward=FORMULATION_FORWARD,
         post_method=PowerModels.build_opf,
-        optimizer=clarabel_optimizer,
+        optimizer=FORMULATION_BACKWARD === DCPPowerModel ? gurobi_dc_optimizer : clarabel_optimizer,
         optimizer_forward=madnlp_optimizer,
     )
 
@@ -323,7 +345,12 @@ function main()
     # a failed backward solve at a different regularization until one returns OPTIMAL
     # changes which cuts get built, i.e. it influences cut creation. Cut generation must
     # be stock SDDP behaviour, so the recovery is the historical 2-arg form only.
-    recovery = make_robust_recovery(madnlp_optimizer, clarabel_optimizer)
+    # DC backward: GUROBI ONLY (owner rule: Clarabel is never used for DC). The
+    # recovery ladder retries the failing subproblem with a reset and then a fresh
+    # Gurobi instance; there are no Clarabel rungs. The SOC run is unchanged.
+    recovery = FORMULATION_BACKWARD === DCPPowerModel ?
+        make_robust_recovery(madnlp_optimizer, gurobi_dc_optimizer) :
+        make_robust_recovery(madnlp_optimizer, clarabel_optimizer)
     model.forward_graph.ext[:numerical_difficulty_callback] = recovery
     model.backward_graph.ext[:numerical_difficulty_callback] = recovery
 
@@ -365,7 +392,8 @@ function main()
     println("Elapsed seconds: ", elapsed)
     println("Bound: ", bound)
 
-    SDDP.write_cuts_to_file(model.forward_graph, CUTS_FILE)
+    SDDP.write_cuts_to_file(model.forward_graph, CUTS_FILE * ".tmp")
+    mv(CUTS_FILE * ".tmp", CUTS_FILE; force = true)
     println("Saved cuts: ", CUTS_FILE)
 
     Random.seed!(SEED)
