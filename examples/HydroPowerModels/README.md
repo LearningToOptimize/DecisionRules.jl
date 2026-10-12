@@ -1,9 +1,12 @@
 # Bolivia hydro — JuMP engine
 
 Everything needed to reproduce the long-term hydrothermal planning case study:
-the case, the JuMP/MathOptFormat engine, the SDDP baseline, the paired
-evaluation, and the figures. The GPU trainer that produced the published policy
-lives in the companion package, `DecisionRulesExa.jl/examples/HydroPowerModels`.
+the case, the JuMP/MathOptFormat engine, the SDDP and reinforcement-learning
+baselines, the paired evaluation, and the figures. The GPU trainer of the TS-DDR
+and linear decision-rule policies lives in the companion package,
+`DecisionRulesExa.jl/examples/HydroPowerModels`. A run reproduces results of the
+same quality as the published ones, not the same numbers; the documentation page
+*Reproducing the study* explains why and how training is staged.
 
 **The science is in the documentation**, under *Case studies → Long-term
 hydrothermal planning*: the problem, how each method values water, the measured
@@ -61,18 +64,21 @@ files are and what to run.
 | `train_dr_hydropowermodels_strict.jl` | strict TS-DDR training on CPU (the smoke path; the published policy was trained with the GPU engine) |
 | `eval_paired_tsddr.jl` | paired evaluation of a checkpoint through the JuMP stage models |
 | `eval_jump_de.jl` | full-horizon deterministic-equivalent cross-check |
-| `plot_hydro_results.jl` | the publication figures, from `results/` |
-| `sddp/run_sddp_inconsistent.jl` | the SDDP baseline: SOC-WR backward, true-ACP forward |
+| `plot_hydro_results.jl` | the figures, from `results/`, written to `results/figures/` |
+| `sddp/run_sddp_inconsistent.jl` | the SDDP baseline: SOC-WR (default) or DC backward, true-ACP forward |
 | `sddp/eval_paired_sddp.jl` | paired evaluation of the frozen cut policy |
 | `sddp/merge_sddp_shards.jl` | shard merge; refuses gaps, duplicates and partial sets |
 | `sddp/sddp_ac_starts.jl` | non-singular voltage starts for the ACP forward graph |
+| `rl/hydro_rl_env.jl` | the reinforcement-learning environment: the strict stage problems and the reachable target map |
+| `rl/rl_algorithms.jl` | REINFORCE, PPO, TD3 and SAC on that environment, with one network and one reward |
+| `rl/train_rl.jl` | environment parity check, training and paired evaluation of one agent |
 | `results/` | the compact published evidence the figures and the documentation are built from |
 
 ## Commands
 
 Every command below is run from this directory. `--project=.` uses
 `Project.toml`; the SDDP scripts use `--project=sddp`, which additionally
-carries HydroPowerModels, PowerModels, SDDP and Clarabel.
+carries HydroPowerModels, PowerModels, SDDP, Clarabel and Gurobi.
 
 **1. Verify the case and regenerate the stage models.**
 
@@ -96,10 +102,14 @@ DR_NUM_STAGES=4 DR_NUM_EPOCHS=2 DR_NUM_BATCHES=5 \
 ```
 
 **3. SDDP baseline.** Training writes cuts to
-`bolivia/ACPPowerModel/SOCWRConicPowerModel-ACPPowerModel.cuts.json`:
+`bolivia/ACPPowerModel/SOCWRConicPowerModel-ACPPowerModel.cuts.json`;
+`DR_SDDP_BACKWARD=dc` builds the cuts on the DC network instead, solved with
+Gurobi, and writes `DCPPowerModel-ACPPowerModel.cuts.json`. Run it until the
+bound stops moving and the forward costs settle:
 
 ```bash
 julia --project=sddp -t auto sddp/run_sddp_inconsistent.jl
+DR_SDDP_BACKWARD=dc julia --project=sddp -t auto sddp/run_sddp_inconsistent.jl
 ```
 
 **4. Paired evaluation of the frozen SDDP policy** (shardable; ids are GLOBAL
@@ -118,7 +128,21 @@ julia --project=sddp sddp/merge_sddp_shards.jl \
 julia --project=. -t auto eval_paired_tsddr.jl /path/to/checkpoint.jld2
 ```
 
-**6. Figures:**
+**6. Reinforcement-learning baselines.** They run in `--project=rl`, which
+develops this package from the repository. Check the environment first: the
+parity mode replays a TS-DDR checkpoint through it and compares the cost of every
+selection-panel column with the costs `eval_paired_tsddr.jl` wrote for the same
+checkpoint. Then train each agent; a run whose checkpoint exists resumes from it.
+
+```bash
+DR_RL_MODE=parity DR_RL_TSDDR_CKPT=/path/to/checkpoint.jld2 \
+DR_RL_PARITY_CSV=bolivia/ACPPowerModel/paired_costs.csv DR_RL_OUT=rl_runs \
+  julia --project=rl rl/train_rl.jl
+DR_RL_ALGO=ppo DR_RL_OUT=rl_runs julia --project=rl rl/train_rl.jl
+DR_RL_MODE=eval DR_RL_ALGO=ppo DR_RL_OUT=rl_runs julia --project=rl rl/train_rl.jl
+```
+
+**7. Figures:**
 
 ```bash
 julia --project=. plot_hydro_results.jl

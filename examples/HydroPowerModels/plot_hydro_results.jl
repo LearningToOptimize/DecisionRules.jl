@@ -1,13 +1,12 @@
 #!/usr/bin/env julia
 
-# Publication figures for the Bolivia hydro case study.
+# Figures for the Bolivia hydro case study.
 #
-# Every figure is generated from the compact evidence committed under
-# `results/`, so `julia --project plot_hydro_results.jl` reproduces the
-# published assets deterministically without re-running training, evaluation, or
-# anything on a GPU.
+# Every figure is generated from the compact evidence under `results/`, so
+# `julia --project plot_hydro_results.jl` redraws them without re-running
+# training, evaluation, or anything on a GPU.
 #
-# Produces, in `docs/src/assets/`:
+# Produces, in `results/figures/` (or `DR_FIGURE_DIR`):
 #
 #   hydro_training_history.png       the from-scratch training run
 #   hydro_cost_distributions.png     absolute cost densities, both policies
@@ -58,7 +57,7 @@ using Statistics
 
 const HYDRO_DIR = @__DIR__
 const RESULTS = joinpath(HYDRO_DIR, "results")
-const ASSETS = normpath(joinpath(HYDRO_DIR, "..", "..", "docs", "src", "assets"))
+const ASSETS = get(ENV, "DR_FIGURE_DIR", joinpath(HYDRO_DIR, "results", "figures"))
 mkpath(ASSETS)
 
 # Okabe-Ito, a validated colour-vision-deficiency-safe set. The assignment

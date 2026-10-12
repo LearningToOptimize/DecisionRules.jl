@@ -25,7 +25,7 @@ using JuMP, Ipopt
 using Flux
 using JSON, JLD2, StableRNGs, Random, Statistics
 
-const HYDRO_DIR = joinpath(dirname(dirname(@__DIR__)), "examples", "HydroPowerModels")
+const HYDRO_DIR = dirname(@__DIR__)   # examples/HydroPowerModels
 include(joinpath(HYDRO_DIR, "load_hydropowermodels.jl"))
 include(joinpath(HYDRO_DIR, "hydro_reachable_policy.jl"))
 

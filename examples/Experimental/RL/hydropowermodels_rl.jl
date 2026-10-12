@@ -2,7 +2,7 @@ using Distributed
 using Random
 
 @everywhere rl_path = @__DIR__
-@everywhere dl_path = dirname(dirname(rl_path))
+@everywhere dl_path = dirname(dirname(dirname(rl_path)))
 
 @everywhere import Pkg
 @everywhere Pkg.activate(dl_path)
@@ -25,7 +25,7 @@ using Random
 @everywhere using CommonRLSpaces
 
 @everywhere using Ipopt, HSL_jll
-@everywhere HydroPowerModels_dir = joinpath(dirname(rl_path), "HydroPowerModels")
+@everywhere HydroPowerModels_dir = joinpath(dirname(dirname(rl_path)), "HydroPowerModels")
 @everywhere include(joinpath(HydroPowerModels_dir, "load_hydropowermodels.jl"))
 
 @everywhere case_name = "bolivia" # bolivia, case3

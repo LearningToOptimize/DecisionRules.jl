@@ -4,298 +4,199 @@
 CurrentModule = DecisionRules
 ```
 
-**Long-term hydrothermal dispatch (LTHD)** is the coordinated operation of
-hydro reservoirs and thermal generation on an AC transmission network over
-a multi-year horizon under inflow and demand uncertainty — an instance of
-the general problem of [Multistage stochastic optimization](@ref) with the
-state given by stored water, the uncertainty by river inflows, and the
-stage feasibility set by a nonconvex AC optimal power flow. The system the
-case study runs on is presented in
-[Results](@ref "Results: TS-DDR versus SDDP"); how each policy arrives at a price for water is
-[Valuing water: two approaches](@ref); a runnable version is
-[Walkthrough](@ref).
+Long-term hydrothermal dispatch determines, at weekly stages over a horizon of
+several years, the turbined outflow and spillage of every hydro plant and the
+dispatch of the thermal units, so as to minimize the expected operating cost
+subject to the reservoir dynamics, the network constraints and the uncertainty of
+inflows. Hydro generation has no direct cost. Its economic value is the
+opportunity cost of the stored water, the expected thermal cost that the water
+displaces in later stages, and this value depends on the distribution of future
+inflows and on the capacity of the network to deliver the energy to the loads.
 
-## Stages, state, uncertainty, decisions
+This page states the problem as the case study solves it: the reservoir dynamics,
+the conversion of water into power on an AC network, the planning problem and the
+value of water it defines, the stage problem that a target-state policy solves,
+and the instance. How each method values water is the subject of
+[Valuing water: two approaches](@ref).
 
-Time is discretized into **weekly stages** ``t = 1, \ldots, T`` (each stage
-the case study trains on ``T`` stages spanning several years, and reports over
-a shorter window so the reported horizon is free of end-of-horizon effects). At
-each stage:
+## Reservoirs and cascades
 
-- **State** — the vector of reservoir volumes
-  ``x_t = (v_{r,t})_{r \in \mathcal{R}} \in \mathbb{R}^{n_{\mathrm{hyd}}}``,
-  the only quantity carried between stages.
-- **Uncertainty** — the vector of river inflows
-  ``w_t = (w_{r,t})_{r \in \mathcal{R}}``, revealed at the start of the
-  stage. Inflows are strongly seasonal and spatially correlated across the
-  basin, so realizations are drawn as *joint* scenarios (see
-  [Uncertainty Sampling](@ref)). Demand follows a fixed profile: inflow is the
-  only uncertainty, which keeps the comparison a statement about how the two
-  methods value **water**.
-- **Decisions** — the stage dispatch ``u_t``: thermal generation
-  ``p_{g,t}`` (and reactive ``q_{g,t}``), turbined outflow ``q_{r,t}``,
-  spillage ``s_{r,t}``, load-shedding (deficit) variables, and the AC
-  power-flow variables (bus voltage magnitudes and angles).
-
-## Reservoir dynamics and cascades
-
-Volumes evolve by **water balance**. Rivers form **cascades**: water
-released by an upstream plant arrives at its downstream neighbour within
-the same weekly stage (travel times are short relative to the stage
-length). For each reservoir ``r``,
+Time is divided into weekly stages ``t = 1, \ldots, T``. The state is the vector
+of reservoir volumes ``x_t = (v_{r,t})_{r \in \mathcal{R}}``, and the uncertainty
+revealed at the start of each stage is the vector of river inflows
+``w_t = (w_{r,t})_{r \in \mathcal{R}}``. Within the stage the operator chooses
+the turbined outflow ``q_{r,t}`` and the spillage ``s_{r,t}`` of every plant, the
+thermal dispatch, and the operating point of the network. Rivers form cascades:
+the water released by an upstream plant reaches the plant below it within the
+same week, so the volume of each reservoir evolves by the water balance
 
 ```math
 v_{r,t} \;=\; v_{r,t-1}
-  + K \Bigl( w_{r,t} - q_{r,t}
-  + \sum_{u \in \mathcal{U}_r} q_{u,t} \Bigr)
+  + K \Bigl( w_{r,t} - q_{r,t} + \sum_{u \in \mathcal{U}_r} q_{u,t} \Bigr)
   - s_{r,t} + \sum_{u \in \mathcal{S}_r} s_{u,t},
 \qquad
-v_{r,t} \in [\underline{v}_r,\, \overline{v}_r],
+\underline{v}_r \le v_{r,t} \le \overline{v}_r ,
 ```
 
-where
+where ``\mathcal{U}_r`` and ``\mathcal{S}_r`` are the plants whose turbined and
+spilled water, respectively, flow into reservoir ``r``, and
+``\underline{q}_r \le q_{r,t} \le \overline{q}_r``, ``s_{r,t} \ge 0``. The factor
+``K`` converts a flow sustained over the stage into a volume and is proportional
+to the stage length; for a week of 168 hours it is ``K = 0.0036 \times 168 =
+0.6048``. Inflow and turbined flow are rates while spillage is carried as a
+volume, the convention of HydroPowerModels that every engine of the case study
+reproduces. The water balance is the only constraint that couples consecutive
+stages: everything else the operator faces is contained within the week.
 
-- ``K`` is the **flow-to-volume conversion factor**: the volume accumulated by
-  a unit flow sustained over one stage. It therefore scales with the stage
-  duration, which for long-term planning is long — the case study uses weekly
-  stages — and the whole water balance is proportional to it;
-- note that **turbine flow is scaled by ``K`` and spill is not**: inflow and
-  turbined outflow are rates (m³/s) while spill is already carried as a volume
-  in this formulation. The asymmetry is HydroPowerModels' convention and is
-  reproduced exactly by every engine here;
-- ``\mathcal{U}_r`` is the set of plants whose **turbined** water feeds
-  ``r``, and ``\mathcal{S}_r`` the set whose **spilled** water does — the
-  two sets need not coincide (some diversions bypass the downstream
-  turbine intake);
-- turbine flow and spill obey their own bounds,
-  ``q_{r,t} \in [\underline{q}_r, \overline{q}_r]`` and
-  ``s_{r,t} \ge 0``.
+## From water to electricity
 
-In the Bolivian system three cascade links are active: **COR → SIS**
-(turbine-only: only COR's turbined water reaches SIS) and
-**ZON → CHU** and **TAQ1 → TAQ2** (turbine *and* spill). COR is the
-system's one large seasonal reservoir; SIS, immediately downstream, is a
-run-of-river plant with negligible storage, so every hectometre COR
-releases is worth SIS's production factor *in addition to* COR's own —
-storage decisions at the head of a cascade are leveraged decisions.
+A hydro plant converts turbined flow into active power through its production
+factor, ``p_{r,t} = \rho_r\, q_{r,t}``. Production factors differ by nearly an
+order of magnitude across the plants of the case study, and a plant at the head
+of a cascade passes its released water to the plant below, which turbines it
+again. A volume of water therefore does not correspond to a fixed quantity of energy:
+its value depends on where it is stored and on the plants it will pass through.
 
-The water balance is the **only intertemporal coupling** in the problem:
-water not released this week is available next week. Everything else —
-power flow, generation limits — is contained within the stage.
-
-## Hydro-to-electric coupling
-
-A hydro plant converts outflow to active power through its
-**production factor** ``\rho_r`` (MW per unit of turbined flow):
-
-```math
-p_{r,t} \;=\; \rho_r \, q_{r,t},
-\qquad 0 \le p_{r,t} \le \rho_r\, \overline{q}_r .
-```
-
-The production factor differs by an order of magnitude across plants
-(in the case study from ``\rho = 1.2`` to ``9.7``), which is why *where*
-the system stores and releases water matters as much as *how much*: a
-hectometre of water is not a fungible commodity but a location- and
-plant-specific quantity of energy.
-
-## Network physics: AC optimal power flow
-
-Within each stage, the dispatch must satisfy the full **AC power-flow**
-equations on the transmission network ``(\mathcal{N}, \mathcal{E})``. In
-polar form, with complex voltage ``V_i = |V_i| e^{j\theta_i}`` at bus
-``i`` and admittances ``G, B``:
+Within each stage the dispatch satisfies the AC power-flow equations on the
+transmission network. With bus voltages ``|V_i| e^{j\varphi_i}`` and the
+conductance and susceptance ``G_{ik}, B_{ik}`` of the bus admittance matrix, the
+active and reactive balances at bus ``i`` read
 
 ```math
 \begin{aligned}
-&\sum_{g \in \mathcal{G}_i} p_{g,t} + \sum_{r \in \mathcal{R}_i} p_{r,t}
+\sum_{g \in \mathcal{G}_i} p_{g,t} + \sum_{r \in \mathcal{R}_i} p_{r,t}
   - P^{d}_{i,t} + \Delta_{i,t}
-  = |V_i| \sum_{k} |V_k| \bigl( G_{ik} \cos\theta_{ik} + B_{ik} \sin\theta_{ik} \bigr),
-  \\[2pt]
-&\sum_{g \in \mathcal{G}_i} q_{g,t} - Q^{d}_{i,t}
-  = |V_i| \sum_{k} |V_k| \bigl( G_{ik} \sin\theta_{ik} - B_{ik} \cos\theta_{ik} \bigr),
+  &= |V_i| \sum_{k} |V_k| \bigl( G_{ik} \cos\varphi_{ik} + B_{ik} \sin\varphi_{ik} \bigr), \\
+\sum_{g \in \mathcal{G}_i} q_{g,t} - Q^{d}_{i,t}
+  &= |V_i| \sum_{k} |V_k| \bigl( G_{ik} \sin\varphi_{ik} - B_{ik} \cos\varphi_{ik} \bigr),
 \end{aligned}
-\qquad \forall i \in \mathcal{N},
 ```
 
-with ``\theta_{ik} = \theta_i - \theta_k``, together with voltage bands
-``|V_i| \in [\underline{V}_i, \overline{V}_i]``, branch thermal (apparent
-power) limits, and generator capability bounds. ``P^d_{i,t}, Q^d_{i,t}``
-are the stage-``t`` bus loads and ``\Delta_{i,t} \ge 0`` is the **deficit**
-(unserved load) at bus ``i``.
+with ``\varphi_{ik} = \varphi_i - \varphi_k``, together with voltage bands,
+apparent-power limits at both ends of every branch, and generator capabilities.
+These equations are nonconvex in the voltages, and through them losses, reactive
+support and voltage limits make the cost of delivery depend on where power is
+produced and consumed. The variable ``\Delta_{i,t} \ge 0`` is the unserved load at
+bus ``i``, priced far above the most expensive generator. It gives every stage
+relatively complete recourse in the active-power balance: for every incoming
+state and every reachable target, the stage problem remains feasible.
+Spillage is unbounded, so no slack is needed on the other side. The reactive
+balance has no slack and is enforced exactly.
 
-These equations are **nonconvex** in the voltage variables. That single
-fact drives the methodological fork of this case study: the true cost of
-delivering power across a stressed network — losses, reactive support,
-voltage margin — is a property of this nonconvex set, and any method that
-replaces it with a convex surrogate is pricing delivery on a network that
-does not quite exist. We write the whole within-stage feasible set
-compactly as ``(x_t, u_t) \in \mathcal{F}_t(w_t)``.
+## The planning problem and the value of water
 
-## Stage cost and objective
-
-The stage cost is thermal fuel plus a penalty on unserved load:
+The stage cost is the fuel cost of the thermal units plus the cost of unserved
+load,
 
 ```math
-c_t(x_t, u_t) \;=\;
-\sum_{g \in \mathcal{G}} C_g\bigl(p_{g,t}\bigr)
-\;+\; C_{\Delta} \sum_{i \in \mathcal{N}} \Delta_{i,t},
+c_t(x_t, u_t) \;=\; \sum_{g \in \mathcal{G}} C_g\bigl(p_{g,t}\bigr)
+  + C_{\Delta} \sum_{i \in \mathcal{N}} \Delta_{i,t},
 ```
 
-with ``C_g`` the (convex, typically affine or quadratic) fuel cost of
-thermal unit ``g`` and ``C_\Delta`` the deficit cost, set well above the
-most expensive generator so that shedding load is always the last resort.
-Hydro production itself is free at the stage level — its cost is
-*opportunity cost*, visible only through the intertemporal coupling.
+and hydro generation costs nothing at the stage level. Its cost is the
+opportunity cost of the water withheld, which appears only through the
+intertemporal coupling. The planning problem is the instance of
+[Multistage stochastic optimization](@ref) in which the operator chooses a
+nonanticipative policy to minimize the expected total cost over the horizon,
+subject to the water balance and the AC equations at every stage. Its dynamic
+programming formulation defines a cost-to-go ``V_{t+1}(x_t)``, and the negative of
+its gradient with respect to the volume of reservoir ``r``,
+``-\partial\, \mathbb{E}[V_{t+1}] / \partial v_{r,t}``, is the marginal value of
+water in that reservoir.
 
-The planning problem is then exactly the general problem of
-[Multistage stochastic optimization](@ref):
+The water value has a temporal, a spatial and a stochastic component. Water
+released in one week is unavailable in later weeks, and when the demand peak
+falls in the dry season, as in the Bolivian system, the stages in which water is
+most valuable are those in which inflows are lowest. Through the production
+factors and the cascade topology, the same volume corresponds to different
+amounts of energy at different plants, and the network constraints determine how
+much of that energy reaches the loads. And every release is decided before the
+next inflow is observed, so an optimal policy hedges against the distribution of
+inflows rather than against a single forecast. A myopic policy, which assigns zero
+value to stored water, ignores all three components.
 
-```math
-\min_{\pi \in \Pi} \;\;
-\mathbb{E}_{w_{1:T}} \Bigl[ \sum_{t=1}^{T} c_t\bigl(x_t^\pi, u_t^\pi\bigr) \Bigr]
-\quad \text{s.t.} \quad
-\text{water balance},\;\;
-(x^\pi_t, u^\pi_t) \in \mathcal{F}_t(w_t) \;\; \forall t,
-```
+## The policy implementation problem
 
-over nonanticipative policies ``\pi``.
+A target-state policy does not decide releases. At every stage it emits a target
+``\hat v_{r,t}`` for the end-of-week volume of every reservoir, and the stage
+problem dispatches the system with the volume pinned to that target,
+``v_{r,t} = \hat v_{r,t}``. The multiplier ``\lambda_{r,t}`` of this equality is
+the sensitivity of the stage cost to the target, a price for water read directly
+from the AC problem; [Valuing water: two approaches](@ref) explains how it trains
+the policy. The equality is well posed only if the target can actually be reached
+in one week from the incoming volume, so the policy must emit targets inside the
+one-stage reachable set.
 
-## Why this is a planning problem: the value of water
+### One-stage reachable sets
 
-The economics of LTHD are concentrated in one quantity: the marginal
-**value of water**,
-``-\partial\, \mathbb{E}[V_{t+1}]/\partial v_{r,t}`` — the expected future
-fuel cost avoided by holding one more unit of volume in reservoir ``r``
-now. A *myopic* (greedy) operator, minimizing each week in isolation,
-implicitly sets this value to zero and fails in three distinct ways:
-
-1. **Water has a time value.** Free hydro spent to shave this week's fuel
-   bill is hydro missing at the seasonal demand peak, when its replacement
-   is the most expensive thermal unit on the system. When the demand peak
-   falls in the *dry* season — as in the Bolivian case — the mistake is
-   maximal: the water most tempting to spend is exactly the water that
-   will be scarcest when needed.
-2. **Relief is locational.** Stored hydro relieves network stress only if
-   it is stored *upstream of the right plants* and released *in the right
-   weeks*; through the production factors and the cascade topology, the
-   same volume is worth different energy in different places. A greedy
-   dispatch cannot see the future congestion it should be positioning
-   against.
-3. **The forecast is a fan.** Each release is committed before the next
-   inflow is known. A planning policy hedges across the scenario
-   distribution; a greedy rule effectively bets on a point forecast and
-   is caught out by dry sequences.
-
-The case study does not train a greedy baseline — these failure modes are
-structural, not empirical claims — but they explain what any competent
-method must accomplish: **bank wet-season inflow, carry it across the
-network, and release it against the dry-season peak, hedged across
-scenarios.**
-
-## One-stage reachable sets
-
-A concept used throughout the strict TS-DDR formulation
-(see [Strict mode: penalty-free gradient signal](@ref)) is the
-**one-stage reachable set** of the water balance: the set of next-stage
-volume vectors attainable from state ``x_{t-1}`` under inflow ``w_t`` by
-*some* admissible choice of turbine flows and spills,
+The water balance is linear in the releases, so the set of volumes that reservoir
+``r`` can reach in one stage is an interval, obtained by setting the releases at
+their bounds:
 
 ```math
-R(x_{t-1}, w_t) \;=\;
-\Bigl\{ x_t \;:\; \exists\, (q_t, s_t) \in
-  [\underline{q}, \overline{q}] \times [0, \overline{s}]
-  \;\text{ s.t. water balance holds and } x_t \in [\underline{v}, \overline{v}]
-\Bigr\}.
-```
-
-Because the water balance is *linear* in ``(q_t, s_t)``, the per-reservoir
-reachable set is an interval whose endpoints follow from substituting the
-extreme releases — the property that makes penalty-free (strict) training
-practical for hydro.
-
-### Per-unit reachable bounds
-
-For reservoir ``r`` at state ``v_{r}`` under inflow ``w_{r}``, the highest
-attainable next volume corresponds to minimum outflow plus the worst-case
-(maximal) upstream contribution, and the lowest to maximum outflow:
-
-```math
-u_r \;=\; \min\Bigl(\overline{v}_r,\;
-    v_r + K w_r - K \underline{q}_r
-    + \sum_{u \in \mathcal{U}_r} K \overline{q}_u\Bigr),
+u_r = \min\Bigl(\overline{v}_r,\;
+    v_r + K w_r - K \underline{q}_r + \sum_{u \in \mathcal{U}_r} K \overline{q}_u\Bigr),
 \qquad
-\ell_r \;=\; \max\bigl(\underline{v}_r,\;
-    v_r + K w_r - K \overline{q}_r - \overline{s}_r\bigr),
+\ell_r = \max\bigl(\underline{v}_r,\; v_r + K w_r - K \overline{q}_r - \overline{s}_r\bigr),
 ```
 
-with ``\overline{s}_r`` the spill bound; when spillage is unbounded,
-``\ell_r = \underline{v}_r`` — the reservoir can always be drawn down to its
-physical minimum. A policy that must emit attainable targets therefore has a
-natural construction available: squash an unconstrained output into this
-interval,
+with ``\ell_r = \underline{v}_r`` when spillage is unbounded, since a reservoir
+can always be drawn down to its minimum. The policy maps an unconstrained output
+``z_r`` of the network into this interval,
+``\hat v_r = \ell_r + (u_r - \ell_r)\,\sigma(z_r)``. The bounds depend on the
+incoming volume and on the realized inflow, and because the incoming volume is the
+previous stage's target, they are part of what couples the stages in the policy's
+gradient.
+
+The upper bound assumes that every upstream plant releases at its turbine
+capacity. When an upstream reservoir holds water back, less reaches the reservoir
+below, and a downstream target computed from the capacity bound could be
+unreachable. The policy therefore processes the reservoirs in topological order
+along each cascade. For a link ``u \to d``, the release implied by the upstream
+target is ``R_u = K w_u + v_u - \hat v_u``; the contribution reaching ``d`` is
+``\max(0, R_u)`` when both turbined and spilled water flow downstream, and
+``\min(K \overline{q}_u, \max(0, R_u))`` when only turbined water does; and the
+downstream target is limited to
 
 ```math
-\hat{v}_r \;=\; \ell_r + (u_r - \ell_r)\,\sigma(z_r),
+\hat v_d \;\le\; \min\bigl(\overline{v}_d,\;
+    v_d + K w_d - K \underline{q}_d + \text{contribution}_{u \to d}\bigr).
 ```
 
-The bounds ``\ell_r, u_r`` are functions of the incoming state and the realized
-inflow, and they **are differentiated**. An earlier implementation declared them
-non-differentiable, which silently truncated ``\partial \hat v_r / \partial
-v_r`` to the ``\sigma`` term alone; measured against finite differences over the
-full 126-stage horizon, that truncated gradient carried 5.9% of the true
-magnitude and pointed 48 degrees away from it, and the error compounds with the
-horizon. Restoring the path through ``\ell_r`` and ``u_r`` reproduces the finite
-difference to `cos = 1.000000` and `‖AD‖/‖FD‖ = 1.000000`. See
-[The gradient must flow through the reachable map](@ref).
-
-### Cascade-aware clamping
-
-The fixed upstream term ``\sum_u K \overline{q}_u`` in ``u_r`` is an
-**overestimate** whenever an upstream unit stores water: its actual release
-is then smaller than ``K \overline{q}_u``, so the fixed bound can exceed the
-true reachable set and render a strict subproblem infeasible. After
-computing the raw sigmoid targets for all units, the policy therefore clamps
-downstream targets against the release actually implied upstream. For each
-cascade link ``u \to d``, the implied upstream release is
-
-```math
-R_u \;=\; K w_u + v_u - \hat{v}_u ,
-```
-
-and the maximum contribution reaching ``d`` is ``\max(0, R_u)`` for
-turbine-plus-spill links and ``\min(K \overline{q}_u,\, \max(0, R_u))`` for
-turbine-only links. The downstream target is clamped to
-
-```math
-\hat{v}_d \;\le\; \min\bigl(\overline{v}_d,\;
-    v_d + K w_d - K \underline{q}_d + \text{max\_contrib}\bigr).
-```
-
-Two assumptions are documented for this scheme:
-
-- **Single-level cascades**: the release formula ``R_u`` omits the upstream
-  unit's own incoming cascade contribution, which is conservative
-  (underestimates the release) for multi-level chains — and exact for the
-  Bolivian topology, whose three links are all single-level.
-- **The clamp is a real dependence, not a projection.** Where it binds, the
-  downstream reachable set genuinely moves with the upstream decision — one more
-  unit released above is one more unit the unit below can hold — and where the
-  turbine cap binds instead, it does not. Both branches matter to any method that
-  differentiates through this map; see
-  [Valuing water: two approaches](@ref "The gradient must flow through the reachable map").
-
-With these bounds and clamps, a target chosen inside the interval is reachable in
-one stage from the state it was conditioned on — the condition under which a hard
-target equality is well posed at all (see
+This construction is exact for cascades of one level, the topology of the
+Bolivian system, and conservative for longer chains. With it, every target the
+policy emits is reachable from the state it was conditioned on, and by induction
+the whole target trajectory is feasible (see
 [Validity in every formulation, by induction](@ref)).
 
-## Further reading
+## The Bolivian system
 
-- Molzahn & Hiskens, *A survey of relaxations and approximations of the
-  power flow equations*, Foundations and Trends in Electric Energy
-  Systems (2019) — where and why conic relaxations of AC power flow are
-  (in)exact.
-- Pereira & Pinto, *Multi-stage stochastic optimization applied to energy
-  planning*, Mathematical Programming 52 (1991) — the origin of SDDP, in
-  exactly this application domain.
+The instance is the Bolivian interconnected system: 28 buses, 31 branches and 34
+generators, of which 11 are hydro units arranged in three cascades. The network is
+meshed, but its three loops close only through lower-voltage lines in the central
+mining region, and the transfers from the hydro plants in the north-west and the
+gas plants in the east to the loads follow essentially radial corridors.
+
+```@raw html
+<img src="../../assets/bolivia_map.svg" alt="The Bolivian interconnected system" width="100%"/>
+```
+
+Two of the cascade links carry both turbined and spilled water downstream; on the
+third, only the turbined water of the system's one large seasonal reservoir
+reaches a run-of-river plant immediately below it. Every unit of water released at
+the head of that cascade is therefore converted twice, and its marginal value includes both production factors. Inflows are strongly seasonal and spatially
+correlated across the basins; they are modelled as stage-wise independent, with
+equiprobable joint realizations per week built from the historical record, and
+they are the only source of uncertainty. Demand follows a deterministic profile whose peak falls in the dry season, so
+that the comparison concerns only the valuation of water.
+
+```@raw html
+<img src="../../assets/bolivia_inflow.svg" alt="Seasonal inflow" width="100%"/>
+```
+
+Policies are trained and simulated over 126 weeks and scored over the first 96, so
+that the additional weeks remove the incentive to empty the reservoirs at the end
+of the reported horizon. The reservoirs start empty, and unserved load is priced
+at 6000 per per-unit (100 MW) of power and stage. The case files, their hashes and the
+invariants derived from them are recorded in a manifest that both engines verify
+before building a model.

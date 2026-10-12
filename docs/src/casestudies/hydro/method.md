@@ -4,158 +4,135 @@
 CurrentModule = DecisionRules
 ```
 
-Both methods solve the same planning problem and differ in exactly one respect:
-how they decide what stored water is worth. Everything else — the network, the
-demand, the inflow scenarios, the cost of shedding load, the horizon, the solver
-tolerances, and the requirement that the reported dispatch satisfy the true AC
-equations — is held identical, so the measured difference is attributable to the
-method rather than to the setup.
+Every method for the planning problem must, in one way or another, decide what
+stored water is worth. Two families do so in opposite ways. Value-function
+methods approximate the cost-to-go and derive the decisions from it; SDDP is the
+established member of this family and the standard method for hydrothermal
+planning. Policy methods restrict the form of the decision and optimize its
+parameters; TS-DDR belongs to this family. The case study compares them on the
+same problem, with everything except the way water is valued held identical, so
+that a difference in cost is a difference between the methods.
 
-## SDDP: build the value function, but convexify to do it
+## SDDP: a value function built on a convex network
 
-Stochastic dual dynamic programming approximates the future cost of leaving
-water behind by an outer envelope of cutting planes, refined by sweeping forward
-and backward through the horizon. It is the standard method for this problem and
-it converges to a genuine lower bound on the cost.
+SDDP approximates the expected cost-to-go of each stage by the maximum of a set of
+affine functions of the state, its cuts. A forward pass simulates the policy along
+sampled inflows and records the reservoir volumes it visits; a backward pass
+re-solves each stage at those volumes for every inflow realization and adds a cut
+built from the multipliers of the water balance. The value of water is the slope
+of the cuts, and the first-stage value under the cuts is a lower bound on the
+optimal cost that rises as cuts accumulate.
 
-The bound is only valid if each stage problem is **convex in the incoming
-state**, which AC power flow is not. The universal practical compromise, used
-here, is to run the backward pass — the one that generates cuts — on a
-second-order-cone relaxation of the network, and to simulate the resulting policy
-forward on the true AC model.
+The construction rests on convexity. When the stage problem is convex, its
+cost-to-go is convex in the state and a cut built from the multipliers supports it
+from below. Under the AC equations the cost-to-go is nonconvex, and the
+multipliers of a locally optimal solution define a linearization that need not
+lie below it. Cuts that remain valid for nonconvex stages exist, but they require
+solving nonconvex subproblems to global optimality at every backward step. In
+practice SDDP is therefore trained on a convex model of the network, and its
+cuts are used to operate the real one. The variant used as the baseline here runs
+the two passes on different models: the backward pass, which builds the cuts, on
+a convex model, and the forward pass, which decides the states at which the cuts
+are built, on the AC equations. The cuts are then built at the states visited under AC operation, which yields a
+stronger policy than training entirely on the convex model and deploying the
+result.
 
-That compromise has a price, and naming it is the point of comparing at all. The
-value of water is computed against a network that is easier to deliver power
-across than the real one. Where the relaxation is loose — meshed corridors,
-binding voltage limits, load far from generation — delivery is underpriced, and
-storage decisions inherit the mispricing exactly where they matter most.
+Two convex models are used. The second-order-cone relaxation keeps losses and
+reactive power in a relaxed form and is nearly exact on essentially radial
+networks such as this one, which makes SDDP with conic cuts a strong benchmark on this system. The DC approximation drops losses,
+reactive power and voltages altogether. In both cases water is valued on a network model less constrained than the
+physical one, and the cost of the
+resulting policy is known only by simulating it under the AC equations. Cut
+generation is the stock algorithm of SDDP.jl, with no modification that would
+change which multipliers become cuts.
 
-Nothing else about the baseline is tuned in TS-DDR's favour or against it: cut
-generation is stock SDDP, with no regularisation ladder and no retry-until-optimal
-loop that would change which duals become cuts.
+## TS-DDR: a policy trained against the true network
 
-## TS-DDR: skip the value function, read the price off the solver
-
-TS-DDR trains a policy that emits a **target** reservoir level for each stage.
-The stage problem is then solved with the outgoing storage pinned to that target
-by a hard equality — no slack, no penalty term. Two things follow.
-
-First, the dual of that equality is precisely ``\partial Q_t / \partial \hat v_t``:
-the marginal value of water, delivered by the solver as a by-product of solving
-the stage. There is no value function to construct, and therefore nothing to
-convexify. Training and evaluation both use the **true AC model** end to end.
-
-Second, hard equalities are only well posed if every target the policy emits is
-actually attainable in one stage. That is what the reachable policy guarantees:
-a network output is mapped into the one-stage reachable interval of each
-reservoir, and then clamped down the cascade so a downstream unit can never be
-told to hold water that the unit above it did not release. The reachable
-interval itself is a property of the water balance and is derived in
-[The problem](@ref "One-stage reachable sets"); what matters for training is that
-its endpoints depend on the state, and that the derivative has to go through
-them. That is the next section.
+TS-DDR does not build a cost-to-go. A recurrent network reads the inflows observed
+so far and the previous target and emits, at every stage, a target volume for each
+reservoir inside its one-stage reachable interval (see
+[The problem](@ref "One-stage reachable sets")). For a sampled inflow trajectory,
+the targets of all stages are imposed as equalities in one deterministic problem
+over the horizon, solved on the AC equations, and the multiplier
+``\lambda_{r,t}`` of each target equality is the sensitivity of the cost of that
+trajectory to the target. These multipliers are prices for water obtained from the AC model as a
+by-product of the solve. They are pulled back through the
+policy by automatic differentiation, and the policy is updated by stochastic
+gradient descent over sampled trajectories. No convex model of the network enters
+training or evaluation.
 
 ## The gradient must flow through the reachable map
 
-Strict mode makes the stage a projection: the policy emits a target
-``\hat v_t`` and the stage problem is solved with ``v_t = \hat v_t`` enforced as
-an equality. The multiplier ``\lambda_t`` of that equality is exactly
-``\partial Q_t / \partial \hat v_t`` — the marginal value of water, delivered by
-the solver at no extra cost. TS-DDR's actor gradient is then
+The gradient of the trajectory cost with respect to the policy parameters is
 
 ```math
-\nabla_\theta \; \sum_t \bigl\langle \lambda_t,\; \hat v_t(\theta) \bigr\rangle ,
+\nabla_\theta \sum_t \bigl\langle \lambda_t,\; \hat v_t(\theta) \bigr\rangle ,
 ```
 
-so everything hinges on differentiating the map ``\theta \mapsto \hat v_t``
-**completely**. That map is not just the network and a sigmoid: it is
+and it is only as good as the derivative of the map ``\theta \mapsto \hat v_t``.
+That map is not the network followed by a sigmoid. It is
 
 ```math
-\hat v_{r,t}
-  \;=\; \ell_r(v_{t-1}, w_t) \;+\;
-        \bigl(u_r(v_{t-1}, w_t) - \ell_r(v_{t-1}, w_t)\bigr)\,\sigma(z_r),
+\hat v_{r,t} = \ell_r(v_{t-1}, w_t) + \bigl(u_r(v_{t-1}, w_t) - \ell_r(v_{t-1}, w_t)\bigr)\,\sigma(z_r),
 ```
 
-followed by the cascade clamp. The bounds carry the state, so
-``\partial \hat v_t / \partial v_{t-1}`` is nonzero *through them* even when the
-network output ``z`` is held fixed — and since ``v_{t-1}`` is itself the previous
-stage's target, this term is precisely what couples the stages.
+followed by the cascade limit, and the bounds ``\ell_r`` and ``u_r`` depend on
+the incoming volume, which is the previous stage's target. The derivative of a
+target with respect to the previous one therefore passes through the bounds even
+when the network output is held fixed, and this term is what carries the effect
+of an early target to the later stages. Treating the bounds as constants is a natural simplification, because they
+resemble a projection, but it is incorrect: the truncated gradient still lowers
+the training loss, yet it points in a different direction, and the error grows
+with the horizon. The complete derivative adds little cost, and it should be verified against
+finite differences before any long training run. The check perturbs one target at a time, keeps every perturbation
+inside the piecewise-affine region of the map so that a kink is never crossed,
+and confirms that the derivative is taken of the same map the forward pass
+evaluates.
 
-This is worth spelling out because getting it wrong is silent. Declaring the
-bounds non-differentiable still produces a gradient, still trains, and still
-reduces the loss; it simply descends a different direction. Measured on this
-case over the full horizon:
+## Two further baselines
 
-| | truncated | complete |
-|---|---|---|
-| ``\cos(\nabla_{\text{AD}}, \nabla_{\text{FD}})`` | 0.93 | **1.000000** |
-| ``\|\nabla_{\text{AD}}\| / \|\nabla_{\text{FD}}\|`` | 0.059 | **1.000000** |
-| ``\|\nabla\|`` at the same point | 28,991 | **491,674** |
-
-The truncated gradient is a 17-times-too-short vector pointing 48 degrees off.
-The practical consequence was not a failure to train but a *wrong conclusion
-about the method*: with a gradient carrying 6% of the magnitude, raising the
-learning rate could not help, and a learning-rate sweep duly reported "learning
-rate is not the lever". On the repaired gradient the ordering inverts and the
-learning rate becomes the dominant lever. **Verify the complete actor gradient
-against finite differences before spending a campaign on hyperparameters.**
-
-Two properties make the finite-difference check trustworthy here. The map is
-piecewise affine in ``z``, so a difference taken across a kink is meaningless;
-the check therefore measures the distance to the nearest kink and asserts that
-the perturbation stays inside it. And the forward map must be *unchanged* by the
-repair — a gradient fix that moves the policy's output is a different policy, so
-the forward value is pinned bit-for-bit before the derivative is compared.
+Two baselines isolate the parts of TS-DDR. The two-stage linear decision rule
+restricts the policy to an affine function of the observed inflows; here it is
+trained with the same duality scheme, the same schedule and the same reachable
+map as TS-DDR, so that the comparison isolates the functional form of the policy.
+Four model-free reinforcement-learning algorithms, REINFORCE, PPO, TD3 and SAC,
+act in an environment that wraps the same strict stage problems and the same
+reachable map, observe the incoming volumes, the current inflow and the stage,
+and are trained on the sampled stage costs. The only difference from TS-DDR is
+the learning signal: returns estimated from samples instead of multipliers. The
+value of water released in one week materializes many weeks later, and a return-based estimator must learn this credit assignment from noisy
+samples, whereas the multiplier
+of a target is the local effect of that target on the cost of the whole
+trajectory.
 
 ## Training, and why it is staged
 
-The policy is trained from a random initialisation. Training runs in **phases**,
-each a separate process that restarts from the policy the previous phase
-selected. A restart is the point, not an artefact: the optimiser state, the
-learning-rate schedule and its warm-up all begin again.
-
-The phases move two knobs in opposite directions:
-
-| phase | sampling per gradient step | learning rate | role |
-|---|---|---|---|
-| 1 | low | high | bulk descent — a noisy, cheap gradient is enough to make fast progress |
-| 2 | low | high | continued descent from a better initialisation |
-| 3 | raised | dropped | convergence — a precise gradient and a small step |
-
-The rule behind this is worth stating because it generalises: a **small sample
-gives a noisy but cheap gradient**, which is what bulk descent wants; a **large
-sample gives a precise one**, which is what final convergence wants. Pairing a
-large sample with a small learning rate from the start is the flat quadrant — it
-buys precision the optimiser cannot yet use and makes almost no progress.
-
-The schedule is declared as configuration and executed by a driver, so the
-published run is reproduced by running the declared schedule rather than by
+The policy is trained from a random initialization in phases. Each phase is a
+separate process that restarts from the policy the previous phase selected, with
+a fresh optimizer state and a fresh learning-rate schedule. The phases move two
+quantities in opposite directions. A small number of sampled trajectories per
+update gives a cheap and noisy gradient, which is what fast early descent needs,
+and a high learning rate lets that descent make progress. A larger sample gives
+the precise gradient that the last part of the descent needs, and a lower
+learning rate keeps the policy from overshooting it. Combining a large sample with a small learning rate from the start yields a
+precise gradient that the optimizer cannot yet exploit, and progress is slow. The schedule is declared as configuration and executed by a
+driver, so a run is reproduced by executing the schedule rather than by
 following a narrative.
 
 ## Selection, and why this is not overfitting
 
-Learned policies invite a fair suspicion: that the reported number is the best of
-many attempts on the data it was chosen with. Three properties of this study are
-designed to answer it.
-
-**Checkpoints are selected on a small fixed panel, never on the training loss.**
-The panel is a handful of scenarios with common random numbers, evaluated over
-the reported horizon. Two requirements are enforced in code rather than by
-convention: the evaluation must be **complete** — a mean over a scenario that
-failed to solve is a mean over a different denominator, and no tolerance makes
-that comparable — and it must show **no load shedding**.
-
-**The published claim is measured on a different, much larger protocol** — 500
-paired scenarios that no checkpoint was ever selected against. The selection
-panel turns out to have been directionally right and slightly optimistic about
-the level, which is what a small screening set should be expected to be, and is
-why the claim does not rest on it.
-
-**The discarded work is reported.** One additional phase was attempted and
-produced no selectable policy; it is excluded from the lineage and its cost is
-included in the honest accounting of how long the result took. A time-to-policy
-figure that quietly omits the attempts that failed is not a time-to-policy
-figure.
+Because a learned policy is chosen among many checkpoints, its reported cost
+could be biased toward the scenarios used for the choice. Three rules prevent
+this. Checkpoints are
+selected on a small fixed panel of inflow scenarios over the reported horizon,
+never on the training loss, and an evaluation counts only if every scenario
+solved and no load was shed, because a mean over a failed scenario is a mean over
+a different denominator. The reported comparison is measured on a different and
+much larger protocol of 500 paired scenarios that no checkpoint is ever selected
+against; a small panel can be expected to rank policies correctly while being
+optimistic about their level, which is why no claim rests on it. And a phase that
+produces no selectable policy is excluded from the lineage, but its cost counts
+when stating how long the policy took to train.
 
 ## What is held identical
 
@@ -171,10 +148,9 @@ figure.
 | branch limits | apparent power, both ends | apparent power, both ends |
 | horizon simulated and reported | same | same |
 | evaluation scenarios | the shared paired protocol | the same scenarios |
-| **model the dispatch must satisfy** | **true AC** | **true AC** |
-| | | |
-| model used to *value water* | convex relaxation | true AC |
+| model the dispatch must satisfy | true AC | true AC |
+| model used to value water | convex relaxation or approximation | true AC |
 | how the future enters | cutting planes | a learned target |
 
-The line in the middle is the whole experiment. Above it, the two are the same
-problem; below it, they are two different answers to what water is worth.
+Above the last two rows the two methods solve the same problem; the last two rows
+are the two different answers to what water is worth.

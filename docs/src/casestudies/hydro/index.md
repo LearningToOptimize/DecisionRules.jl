@@ -4,64 +4,51 @@
 CurrentModule = DecisionRules
 ```
 
-A hydrothermal power system is operated by deciding, every week for years, how
-much water to release and how much fuel to burn. Water is free but finite; fuel
-is expensive but available. The whole problem is the price of water — a price
-that no market quotes and that has to be inferred from what the water will be
-worth later, elsewhere on the network, under inflows nobody has seen yet.
+This case study applies TS-DDR to the long-term hydrothermal dispatch of the
+Bolivian interconnected system, with every stage subject to the AC power-flow
+equations, and compares it with stochastic dual dynamic programming, with
+two-stage linear decision rules, and with four model-free reinforcement-learning
+algorithms. All policies are trained on the same model and evaluated on a common
+set of paired inflow scenarios. The case, the JuMP and ExaModels engines, the
+training schedules, the baselines and the evaluation protocol are distributed with
+the examples of this package and of DecisionRulesExa.jl.
 
-This case study puts two ways of inferring that price against each other on a
-real system, under the full nonconvex AC power flow, on identical inflow
-scenarios.
+## Motivation
 
-## The question
+Long-term hydrothermal scheduling determines, at weekly stages over a horizon of
+several years, the releases of the hydro plants and the dispatch of the thermal
+units that minimize the expected operating cost under uncertain inflows. Hydro
+generation has no direct cost; its economic value is the opportunity cost of the
+stored water, the expected thermal cost it displaces in later stages. The problem
+is the one for which SDDP was developed, and SDDP remains the method used in the
+operational planning of large hydro-dominated systems. Its cuts are valid lower approximations of the
+cost-to-go only when the stage problems are convex. The AC power-flow equations
+are not, so in practice the cost-to-go is computed on a convex relaxation or
+approximation of the network while decisions are taken on the physical one. The
+resulting mismatch between planning and operation appears as unexpected
+reservoir depletion and price spikes, and the convex model that yields the best
+policy is not known before each candidate has been trained and simulated.
 
-**Stochastic dual dynamic programming** is the standard answer, and a very good
-one. It builds an explicit value function from cutting planes. But cuts are only
-valid if the stage problem is convex, and AC power flow is not — so in practice
-the value of water is computed against a *relaxed* network and then applied to
-the real one.
+The Bolivian system is chosen so that this mismatch is small. Its transfers
+follow essentially radial corridors, and on radial networks the second-order-cone
+relaxation of the power-flow equations is known to be accurate. SDDP with conic cuts is therefore a strong
+benchmark on this system, and the case study measures how closely a policy trained
+against the AC equations, with no convex model in its training, approaches it. The
+linear decision rule is trained with the same gradient, schedule and feasibility
+map as TS-DDR and isolates the role of the functional form of the policy; the
+reinforcement-learning agents act on the same stage problems and isolate the role
+of the dual gradient as the learning signal.
 
-**TS-DDR** needs no such relaxation. It trains a policy that outputs a target
-reservoir level for each stage; the stage problem projects that target onto the
-true AC feasible set, and the multiplier of the target constraint *is* the
-marginal value of water, handed over by the solver at no extra cost. There is no
-value function to build and nothing to convexify.
+## Organization
 
-So: **can a policy learned this way operate a real system as well as a converged
-SDDP policy?**
-
-## The answer
-
-Trained from random initialisation in about eleven GPU-hours, and evaluated
-against SDDP on 500 shared inflow scenarios under true AC physics:
-
-| | operating cost |
-|---|---|
-| SDDP | **313,546** |
-| TS-DDR, from scratch | **314,023** |
-
-A difference of **+0.152%** — statistically unambiguous, practically small, and
-in SDDP's favour. Not a tie, and not a win: the [Results](@ref "Results: TS-DDR versus SDDP") page says so in
-those words and refuses the three obvious overstatements.
-
-The interesting part is not the number but the mechanism. The learned policy
-**under-hedges**: it carries less water than SDDP, runs cheaper for most of the
-horizon, and pays the difference back in the closing weeks when it arrives short.
-That is visible stage by stage, in storage, in thermal dispatch, and in the
-marginal price of energy — which is what makes the result diagnosable rather
-than merely reported.
-
-## How to read this case study
-
-| page | what it covers |
-|---|---|
-| [The problem](@ref "The long-term hydrothermal planning problem") | the planning problem itself: reservoir dynamics, cascades, AC network physics, and why the value of water is both locational and temporal |
-| [Valuing water: two approaches](@ref) | how SDDP and TS-DDR each arrive at a price for water, what each assumes, and what is held identical so the comparison is about the methods |
-| [Results](@ref "Results: TS-DDR versus SDDP") | the measured comparison, its statistics, the physical mechanism behind the difference, and an honest reading |
-| [Walkthrough](@ref "Walkthrough") | a runnable, few-minute version on CPU: build the stage problems, construct the policy, roll out, read the value of water, take some gradient steps |
-
-Everything needed to reproduce the published numbers — the case, both trained
-policies, the evaluation protocol and the figures — ships with
-`examples/HydroPowerModels` in this package and its companion,
-DecisionRulesExa.jl. Their READMEs carry the commands.
+[The problem](@ref "The long-term hydrothermal planning problem") states the
+reservoir dynamics, the AC network model, the planning problem and the stage
+problem solved by a target-state policy, and describes the Bolivian instance.
+[Valuing water: two approaches](@ref) presents SDDP with inconsistent
+formulations and TS-DDR, the two further baselines, the training schedule and the
+selection protocol, and lists what is held identical across methods.
+[Reproducing the study](@ref) describes how the policies are trained and
+evaluated with the distributed code, and the [Walkthrough](@ref "Walkthrough")
+builds the stage problems, the policy and a few gradient steps on a short horizon
+on the CPU. The entry point to the code is the
+[examples README](https://github.com/LearningToOptimize/DecisionRules.jl/tree/main/examples).

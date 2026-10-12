@@ -36,6 +36,7 @@ makedocs(;
             "Uncertainty sampling" => "sampling.md",
             "Gradient fallback" => "gradient_fallback.md",
             "GPU acceleration" => "gpu_acceleration.md",
+            "Reading the code" => "guide/reading_the_code.md",
             "API reference" => "api.md",
         ],
         "Part III — Case Studies" => [
@@ -44,7 +45,7 @@ makedocs(;
                 "Overview" => "casestudies/hydro/index.md",
                 "The problem" => "casestudies/hydro/problem.md",
                 "Valuing water: two approaches" => "casestudies/hydro/method.md",
-                "Results" => "casestudies/hydro/results.md",
+                "Reproducing the study" => "casestudies/hydro/reproducing.md",
                 "Walkthrough" => "casestudies/hydro/walkthrough.md",
             ],
             "Rocket control" => "examples/rocket.md",

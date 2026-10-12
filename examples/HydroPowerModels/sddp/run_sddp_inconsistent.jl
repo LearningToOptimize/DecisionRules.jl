@@ -24,7 +24,7 @@ using Dates
 # first use; importing it unconditionally would make merely REPRODUCING the
 # published numbers depend on that build succeeding. `DR_SDDP_WANDB=false` skips
 # it entirely.
-const ENABLE_WANDB = lowercase(get(ENV, "DR_SDDP_WANDB", "true")) in ("true", "1", "yes")
+const ENABLE_WANDB = lowercase(get(ENV, "DR_SDDP_WANDB", "false")) in ("true", "1", "yes")
 ENABLE_WANDB && @eval using Wandb
 using CSV, DataFrames
 

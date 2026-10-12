@@ -4,10 +4,22 @@
 CurrentModule = DecisionRules
 ```
 
-This chapter develops the TS-DDR (Two-Stage Deep Decision Rules) training
-algorithm — the core of DecisionRules.jl. For the full derivation, see
-[arXiv:2405.14973](https://arxiv.org/abs/2405.14973); for the general
-problem class and where decision rules sit among solution methods, see
+Methods for multistage problems approximate either the value function or the
+policy. Value-function methods such as SDDP need convex stage problems for their
+cuts to be valid; policy methods restrict the form of the decision and optimize
+its parameters, and need neither convexity nor stage-wise independence of the
+uncertainty. Two-stage linear decision rules are the classical member of the
+second family: the state follows an affine function of the observed history, and
+training the rule is a two-stage stochastic program whose first-stage decision is
+the rule itself. Two-stage generalized decision rules keep that structure and let
+the rule be any parametric map, and two-stage deep decision rules (TS-DDR)
+instantiate it with a deep recurrent network. What makes the generalization
+practical is how it is trained: the second stage is a deterministic problem in
+which the targets emitted by the policy enter only as right-hand sides, so the
+gradient of its cost with respect to the targets is given by duality, without
+differentiating through the solver. This chapter develops that training scheme;
+the derivations are in [arXiv:2405.14973](https://arxiv.org/abs/2405.14973), and
+the problem class and the classical solution families are in
 [Multistage stochastic optimization](@ref).
 
 ## Problem setting

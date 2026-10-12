@@ -8,14 +8,13 @@ This walkthrough builds the Bolivian hydrothermal planning problem, constructs
 the feasibility-guaranteeing policy that strict TS-DDR needs, and takes a few
 gradient steps — on CPU, in a few minutes, on a horizon short enough to watch.
 
-It is deliberately *not* the published run. That took eleven GPU-hours over 126
-stages. The point here is that every piece of it is visible in a script you can
-execute, and that the pieces are the ones the result depends on. Where this
+It is deliberately not the full-scale run, which trains for hours on a GPU over
+126 stages. The point here is that every piece of it is visible in a script you
+can execute, and that the pieces are the ones the full run depends on. Where this
 simplifies, it says so.
 
-The case, the numbers and the honest reading of the comparison are in
-[Results](@ref "Results: TS-DDR versus SDDP"); the mathematics is in
-[The long-term hydrothermal planning problem](@ref).
+The mathematics is in [The long-term hydrothermal planning problem](@ref); how to
+train and evaluate at full scale is [Reproducing the study](@ref).
 
 ## Setup
 
@@ -207,12 +206,9 @@ quantities, and only the last one selects a policy.
 
 ## Where to go from here
 
-The published run is the same construction at full scale — a longer horizon,
-a training schedule of several phases, and a GPU. How each method arrives at a
-price for water is [Valuing water: two approaches](@ref); what the comparison
-measured, and what it does and does not say, is [Results](@ref "Results: TS-DDR versus SDDP").
-
-To actually run it, the example READMEs of `DecisionRules.jl` and
-`DecisionRulesExa.jl` carry the commands, from verifying the case through to
-regenerating the figures.
+The full-scale run is the same construction with a longer horizon, a training
+schedule of several phases, and a GPU. How each method arrives at a price for
+water is [Valuing water: two approaches](@ref); how to train, evaluate and compare
+at full scale is [Reproducing the study](@ref), and the example READMEs of
+`DecisionRules.jl` and `DecisionRulesExa.jl` carry the commands.
 

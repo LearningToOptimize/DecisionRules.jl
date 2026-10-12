@@ -126,7 +126,7 @@ function run_train()
         run_name = "rl-$(algo)-bolivia-strict-K06048-$(Dates.format(now(), "yyyymmdd-HHMMSS"))"
     end
     lg = nothing
-    if get(ENV, "DR_ENABLE_WANDB", "true") == "true"
+    if get(ENV, "DR_ENABLE_WANDB", "false") == "true"
         try
             # Loaded at run time, so the module is fetched from Main by name: a literal
             # `Wandb.` here would be resolved when this function was compiled, before
