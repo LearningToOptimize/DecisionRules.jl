@@ -138,21 +138,6 @@ The key requirements are:
 3. **Return** a struct with fields `.core`, `.model`, `.horizon`, and
    `.target_con_range`.
 
-The `HydroPowerModels` example in DecisionRulesExa.jl demonstrates this
-pattern for a full AC-OPF problem with reservoir dynamics:
-
-```julia
-# In examples/HydroPowerModels/hydro_power_exa.jl
-prob = build_hydro_de(
-    data;
-    num_stages     = 96,
-    backend        = CUDABackend(),
-    formulation    = :ac_polar,
-    deficit_cost   = 1e5,
-    target_penalty = :auto,
-)
-```
-
 ## Parallel GPU solves
 
 When training samples are independent, multiple NLP instances can be
@@ -236,18 +221,150 @@ target-deficit penalty, and target-violation share.
 | Stage-wise decomposition | — | JuMP only |
 | Multiple shooting | — | JuMP only |
 
-## Full example: HydroPowerModels
+## Embedded deterministic equivalent
 
-The `examples/HydroPowerModels/` directory in DecisionRulesExa.jl contains
-a complete AC-OPF hydrothermal scheduling example for the Bolivia test case
-— the same problem solved by DecisionRules.jl in the
-[Hydropower Scheduling](@ref) tutorial. It demonstrates:
+The standard `DeterministicEquivalentProblem` treats the policy's target
+trajectory as an external parameter: the training loop generates
+``\hat{x}_{1:T}`` outside the NLP and passes it in via `set_targets!`.
+This is **open-loop** — the policy does not see the realized states
+from the coupled solve.
 
-- Parsing PowerModels.jl network data and hydro reservoir parameters
-- Building a multi-stage deterministic-equivalent NLP in ExaModels
-  (DC or AC polar OPF formulations)
-- L1 + L2 penalty on target slack (δ⁺/δ⁻ splitting for smooth NLP)
-- GPU training with parallel MadNLP solves
-- Warm-start caching to prevent cascade solver failures
-- Penalty and sample-count annealing schedules
-- W&B metric logging
+`EmbeddedDeterministicEquivalentProblem` embeds the policy *inside*
+the NLP via a `VectorNonlinearOracle`.  The NLP constraint becomes:
+
+```math
+\pi_\theta(w_t,\, x_{t-1}^*) - x_t - \delta_t = 0 \quad \forall t
+```
+
+where ``x_{t-1}^*`` is the solver's realized state.  This is
+**closed-loop**: the policy sees realized states from the coupled solve,
+and the duals ``\lambda_t`` reflect the joint (policy + physics) system.
+
+```julia
+prob = build_embedded_deterministic_equivalent(
+    policy;
+    horizon       = T,
+    nx            = nx,
+    nu            = nu,
+    nw            = nw,
+    dynamics_eq   = my_dynamics,
+    stage_cost    = my_cost,
+    backend       = CUDABackend(),
+)
+
+train_tsddr_embedded(
+    policy, x0, prob, sampler;
+    num_batches         = 500,
+    num_train_per_batch = 4,
+    optimizer           = Flux.Adam(1f-3),
+    madnlp_kwargs       = (print_level = MadNLP.ERROR, tol = 1e-6),
+)
+```
+
+The oracle closures capture the policy **by reference** — updating Flux
+parameters between solves automatically changes the NLP without
+rebuilding it.  Use `invalidate_policy_cache!` if your oracle caches
+policy-dependent intermediates.
+
+### Strict reachable targets
+
+When the policy is guaranteed to produce feasible targets (e.g., via a
+reachable-set mapping), the slack variables ``\delta_t`` can be removed
+entirely. This is strict mode: target constraints are hard equalities, the duals
+are pure shadow prices, and there is no target penalty to tune.
+
+There are two strict deterministic-equivalent paths.
+
+**Embedded strict DE** evaluates the policy inside the NLP against realized
+state decision variables.
+
+Its constraint is simply ``x_t = \pi_\theta(w_t, x_{t-1}^*)``. Because the
+policy receives the realized previous state, a reachable-set map can guarantee
+that the next strict equality is dynamically feasible.
+
+**Regular strict DE** keeps the policy outside the NLP but rolls out targets
+from the known initial state:
+
+```math
+\hat{x}_0 = x_0,\qquad
+\hat{x}_t = \pi_\theta(w_t, \hat{x}_{t-1}).
+```
+
+If the policy returns ``\hat{x}_t \in R(\hat{x}_{t-1}, w_t)`` at every stage,
+then the entire strict DE target trajectory is feasible by induction. The solve
+then enforces ``x_t = \hat{x}_t`` for every stage, so the realized state path is
+exactly the reachable target path.
+
+For battery storage, the charge/discharge and energy bounds give a cheap
+one-stage battery-dynamic interval. It is not the complete reachable set of an
+AC-OPF: a target can still conflict with generation, branch, voltage, or
+reactive-power limits. The
+[battery-storage specification](@ref "Stochastic battery-storage AC optimal power flow")
+therefore requires true-ACP zero-shedding tests before strict mode becomes the
+production default.
+
+## Sequential rollout evaluation
+
+`train_tsddr` solves the full deterministic equivalent in one shot. For
+deployment diagnostics, DecisionRulesExa.jl provides `RolloutEvaluation`, which
+solves a one-stage ExaModels problem sequentially over a materialized scenario:
+
+```julia
+eval = RolloutEvaluation(
+    stage_problem,
+    x0,
+    eval_scenarios;
+    horizon             = T,
+    n_uncertainty        = nw,
+    set_stage_parameters! = my_setter!,
+    realized_state       = my_state_reader,
+    policy_state         = :realized,
+)
+```
+
+This mirrors deployment semantics: the policy can be evaluated with the
+realized previous state (`policy_state = :realized`) or with its previous target
+(`policy_state = :target`) to match regular-DE target-generation semantics.
+
+## Critic control variate
+
+`train_tsddr` optionally trains a scalar critic ``C(w, \hat{x})`` that
+provides a learned control variate for the dual gradient signal.  The
+critic does not replace the NLP solve — dual multipliers remain the
+primary actor gradient.  The critic reduces gradient variance by
+subtracting a correlated baseline.
+
+```julia
+critic = Chain(Dense(input_dim => 128, tanh), Dense(128 => 128, tanh), Dense(128 => 1))
+
+cv = ScalarCriticControlVariate(critic;
+    featurizer          = default_critic_featurizer,
+    value_loss_weight   = 1.0,
+    gradient_loss_weight = 0.0,
+)
+
+critic_target = RolloutCriticTarget(stage_problem;
+    horizon            = T,
+    n_uncertainty      = nw,
+    set_stage_parameters! = my_setter!,
+    realized_state     = my_state_reader,
+    policy_state       = :target,
+)
+
+train_tsddr(policy, x0, prob, prob.p_x0, prob.p_target, prob.p_w, sampler;
+    control_variate              = cv,
+    critic_training_target       = critic_target,
+    actor_gradient_mode          = :control_variate,
+    critic_cv_weight             = 1.0,
+    critic_optimizer             = Flux.Adam(1f-3),
+)
+```
+
+Two actor modes are supported:
+
+- `:control_variate` — subtracts ``\nabla_{\hat{x}} C`` from the dual
+  signal and adds it back as a differentiable surrogate.  Unbiased when
+  the critic is exact; reduces variance otherwise.
+- `:surrogate` — blends dual and critic actor gradients via explicit
+  weights (`dual_actor_weight`, `critic_actor_weight`).  Useful when raw
+  duals are noisy, but no longer strictly unbiased.

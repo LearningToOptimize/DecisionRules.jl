@@ -55,3 +55,12 @@ plan/
 *_cuts.json
 settings.json
 *.sh
+*-backup
+*.cuts.json.stale_stronggrid
+*strong.json
+.claude/settings.local.json
+# W&B run directories and local backups of environment files
+wandb/
+*.bak_*
+# Archived SDDP cuts kept beside the canonical file (published separately)
+*.cuts.*.json

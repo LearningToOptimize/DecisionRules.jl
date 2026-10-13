@@ -4,27 +4,64 @@
 CurrentModule = DecisionRules
 ```
 
-DecisionRules.jl trains parametric decision rules through multi-stage optimization,
-implementing the **Two-Stage Deep Decision Rules (TS-DDR)** framework from
-[arXiv:2405.14973](https://arxiv.org/abs/2405.14973).
+DecisionRules.jl is a Julia package for training parametric decision rules for
+multistage stochastic programs in which every stage is an optimization model,
+such as an optimal power flow or a model-predictive control problem. It
+implements two-stage generalized decision rules (TS-GDR) and their deep
+instantiation, two-stage deep decision rules (TS-DDR), introduced in
+[arXiv:2405.14973](https://arxiv.org/abs/2405.14973). A policy, from an affine
+rule to a deep recurrent network built with Flux.jl, maps the observed history of
+the uncertainty to a target for the state at the end of every stage; an
+optimization problem enforces the targets against the stage models; and the
+multipliers of the target constraints provide the gradient with which the policy
+is trained by stochastic gradient descent.
 
-## How it works
+The user describes the problem as one JuMP model per stage, marks the incoming
+state, the targets and the uncertainty as parameters, and supplies a sampler of
+uncertainty trajectories. The package provides three training formulations: the
+deterministic equivalent, in which one problem over the whole horizon is solved
+per sampled trajectory; the stage-wise rollout, in which stages are solved in
+sequence and the gradient is propagated through the realized states with
+DiffOpt.jl; and the windowed decomposition, which solves one problem per window
+and chains windows through their end states. Targets are enforced either through
+a penalized slack, which applies to any model, or, when the states reachable in
+one stage are known in closed form, as hard equalities on targets that the
+policy is constructed to keep reachable. It also provides recurrent and
+state-conditioned policy architectures, dual-gradient extraction for
+mixed-integer stage models with an optional score-function correction, and
+rollout evaluation with checkpoint selection on fixed scenarios. The companion
+package [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl)
+trains the same policies with the deterministic-equivalent formulation on GPUs,
+using ExaModels.jl and MadNLP.jl.
 
-In multi-stage stochastic control, the feasible action at each stage comes from solving
-a constrained optimization problem (OPF, MPC, hydrothermal dispatch, …). Rather than
-outputting actions directly, the neural-network policy outputs **target states**.
-An optimization subproblem then projects these targets onto the feasible set defined by
-dynamics and constraints. Lagrange duals and implicit differentiation (via
-[DiffOpt.jl](https://github.com/jump-dev/DiffOpt.jl)) provide the gradient signal to
-update the policy end-to-end.
+## The documentation
 
-Three training formulations are supported:
+**Part I, Theory**, states the
+[multistage stochastic optimization problem](@ref "Multistage stochastic optimization")
+and the solution families it admits, develops
+[the TS-DDR framework](@ref "The TS-DDR framework") and its strict formulation,
+presents [stochastic dual dynamic programming](@ref "Stochastic dual dynamic programming")
+as used by the baselines, including its variant for nonconvex stage problems, and
+discusses [extensions](@ref "Extensions: mixed gradients, critics, and risk") to
+integer decisions, control variates and risk measures.
 
-| Formulation | Horizon coupling | Gradient source |
-|:---|:---|:---|
-| **Deterministic Equivalent** | Full horizon, one large NLP | Duals on the coupled problem |
-| **Stage-wise (single shooting)** | Sequential rollout | Duals + DiffOpt per stage |
-| **Multiple Shooting** | Windowed sub-horizons | DiffOpt per window, continuity penalties |
+**Part II, Package guide**, covers [getting started](@ref "Getting started"),
+[uncertainty sampling formats](@ref "Uncertainty Sampling"),
+[gradient fallback](@ref "Gradient Fallback"),
+[GPU acceleration](@ref "GPU Acceleration with DecisionRulesExa.jl"), a guide to
+[reading the code](@ref "Reading the code") of both packages and their examples,
+and the [API Reference](@ref).
+
+**Part III, Case studies**, documents
+[long-term hydrothermal planning](@ref "Long-term hydrothermal planning") on the
+Bolivian system,
+[stochastic battery-storage AC optimal power flow](@ref "Stochastic battery-storage AC optimal power flow"),
+[rocket control](@ref "Rocket Control") and
+[stochastic lot-sizing](@ref "Stochastic Lot-Sizing with Fixed Ordering Costs").
+The code that reproduces the case studies is in the `examples` directory of this
+package and of DecisionRulesExa.jl; its
+[README](https://github.com/LearningToOptimize/DecisionRules.jl/tree/main/examples)
+is the entry point.
 
 ## Installation
 
@@ -33,32 +70,8 @@ using Pkg
 Pkg.add("DecisionRules")
 ```
 
-## Quick start
-
-```julia
-using DecisionRules, JuMP, DiffOpt, Flux, Ipopt
-
-# Build per-stage subproblems in JuMP (DiffOpt-enabled)
-# subproblems, state_params_in, state_params_out, uncertainty_samples, initial_state = ...
-
-# Define a policy: maps [uncertainty; state] → target state
-policy = Chain(
-    Dense(policy_input_dim(num_uncertainties, num_states), 64, relu),
-    Dense(64, num_states),
-)
-
-# Train via stage-wise decomposition
-train_multistage(
-    policy, initial_state, subproblems,
-    state_params_in, state_params_out, uncertainty_samples;
-    num_batches=100, optimizer=Flux.Adam(1e-3),
-)
-```
-
-See the [Algorithm](@ref) page for the mathematical formulation, the
-[Uncertainty Sampling](@ref) guide for how to prepare your scenario data, the
-[GPU Acceleration with DecisionRulesExa.jl](@ref) page for GPU-accelerated training,
-and the examples for complete worked problems.
+[Getting started](@ref) covers solver requirements, a first example, and the
+choice among the training formulations.
 
 ## Citation
 

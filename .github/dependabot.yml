@@ -11,3 +11,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # The v5→v7 bump silently broke coverage uploads ("Missing Head Commit"
+      # on PRs). Keep codecov-action pinned until a deliberate, verified
+      # migration — see the comment in .github/workflows/CI.yml.
+      - dependency-name: "codecov/codecov-action"
+        update-types: ["version-update:semver-major"]

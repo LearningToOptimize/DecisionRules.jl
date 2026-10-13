@@ -21,7 +21,15 @@ using CUDSS_jll
 
 const SCRIPT_DIR = dirname(@__FILE__)
 const CASE_DIR = joinpath(SCRIPT_DIR, "bolivia")
-const EXA_CASE_DIR = "/storage/home/hcoda1/9/arosemberg3/scratch/DecisionRulesExaGPU.jl/examples/HydroPowerModels/bolivia"
+# Case directory of the ExaModels engine, used only to cross-check that both
+# engines read the SAME case bytes. `DR_EXA_CASE_DIR` names it; the default
+# assumes the two packages sit side by side. Never an absolute machine path.
+const EXA_CASE_DIR = get(
+    ENV,
+    "DR_EXA_CASE_DIR",
+    normpath(joinpath(SCRIPT_DIR, "..", "..", "..", "DecisionRulesExa.jl",
+                      "examples", "HydroPowerModels", "bolivia")),
+)
 
 include(joinpath(SCRIPT_DIR, "load_hydropowermodels.jl"))
 
@@ -34,7 +42,7 @@ const TARGET_FRAC = 0.6      # constant target = TARGET_FRAC × max_volume
 
 @info "Building HydroPowerModels ($FORMULATION, T=$NUM_STAGES)..."
 
-sub, state_in, state_out, uncert, initial_state, max_volume = build_hydropowermodels(
+sub, state_in, state_out, uncert, initial_state, max_volume, _ = build_hydropowermodels(
     CASE_DIR, FORMULATION * ".mof.json"; num_stages=NUM_STAGES, penalty_l2=:auto
 )
 nHyd = length(initial_state)

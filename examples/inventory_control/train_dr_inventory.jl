@@ -115,6 +115,23 @@ struct InventoryTrainingVariant
     penalty::Float64
     policy_builder::Function
     penalty_schedule_fn::Function
+    # Strict mode: hard target equalities (no deficit, no penalty). Requires a
+    # reachable policy — see InventoryReachablePolicy and strict_variants().
+    strict::Bool
+end
+
+# Backward-compatible 11-argument constructor: every historical call site
+# predates strict mode, so it defaults to the penalty formulation.
+function InventoryTrainingVariant(
+    tag, integer, num_batches, train_per_batch, learning_rate, warmup_batches,
+    training_integer_strategy, score_function, penalty, policy_builder,
+    penalty_schedule_fn,
+)
+    return InventoryTrainingVariant(
+        tag, integer, num_batches, train_per_batch, learning_rate, warmup_batches,
+        training_integer_strategy, score_function, penalty, policy_builder,
+        penalty_schedule_fn, false,
+    )
 end
 
 function InventoryTrainingVariant(
@@ -169,6 +186,20 @@ function penalty_schedule_for(variant::InventoryTrainingVariant)
 end
 
 """
+    no_penalty_schedule(variant::InventoryTrainingVariant) -> Nothing
+
+Return `nothing`: strict-mode models have no deficit variables, so there is
+no penalty to schedule (`train_multistage` accepts
+`penalty_schedule = nothing`).
+
+# Examples
+```julia
+schedule = no_penalty_schedule(variant)   # nothing
+```
+"""
+no_penalty_schedule(::InventoryTrainingVariant) = nothing
+
+"""
     method_label(variant::InventoryTrainingVariant) -> String
 
 Return the table label for one TS-DDR variant.
@@ -183,6 +214,10 @@ label = method_label(variant)
 """
 function method_label(variant::InventoryTrainingVariant)
     tag = variant.tag
+
+    # --- Strict variants (reachable policy, no penalty) ---
+    tag == "strict" && return "TS-DDR Strict (Reachable)"
+    tag == "strict_integer" && return "TS-DDR Strict (Reachable+Int)"
 
     # --- Relaxed tuned variants ---
     tag == "relaxed_lstm" && return "TS-DDR Relaxed (LSTM)"
@@ -403,7 +438,27 @@ det_eq, state_in, state_out, sampler, initial_state =
 ```
 """
 function build_training_problem(variant::InventoryTrainingVariant)
-    # Training uses a deterministic equivalent so target-dual gradients are coupled.
+    if variant.strict
+        # Strict variants train STAGE-WISE (closed loop). In this problem the
+        # target (order-up-to position s_mid) and the carried state
+        # (post-demand inventory s_out = s_mid − d) are different quantities,
+        # so the deterministic equivalent's target-feedback recursion would
+        # hand the reachable policy s_mid where it expects s_out — computing
+        # the reachable interval from the wrong state and breaking the strict
+        # feasibility guarantee. Stage-wise training feeds realized states,
+        # for which the interval [s, s + Q_max] is exact. (Contrast with the
+        # hydro case, where target and carried state are the same reservoir
+        # volume and the strict regular DE is safe by induction.)
+        return build_inventory_subproblems(;
+            num_scenarios = N_TRAIN_SCENARIOS,
+            seed = 42,
+            integer = variant.integer,
+            strict = true,
+        )
+    end
+
+    # Penalty variants use a deterministic equivalent so target-dual gradients
+    # are coupled across stages.
     return build_inventory_det_equivalent(;
         num_scenarios = N_TRAIN_SCENARIOS,
         penalty = variant.penalty,
@@ -433,6 +488,7 @@ function build_evaluation_problem(variant::InventoryTrainingVariant)
         penalty = variant.penalty,
         seed = 99,
         integer = variant.integer,
+        strict = variant.strict,
     )
 end
 
@@ -485,6 +541,37 @@ function estimate_initial_loss(
     )
 end
 
+# Stage-wise method (strict variants train on subproblems with realized-state
+# feedback): rolls the policy in closed loop, matching the training semantics.
+function estimate_initial_loss(
+    policy,
+    subproblems::Vector{JuMP.Model},
+    state_params_in,
+    state_params_out,
+    uncertainty_sampler,
+    initial_state,
+    variant::InventoryTrainingVariant,
+)
+    # Use a small fixed sample only to seed SaveBest with a finite baseline.
+    Random.seed!(111)
+
+    return mean(
+        let uncertainty_sample = sample(uncertainty_sampler)
+            # Closed-loop rollout: each stage sees the realized state.
+            Flux.reset!(policy)
+            simulate_multistage(
+                subproblems,
+                state_params_in,
+                state_params_out,
+                initial_state,
+                uncertainty_sample,
+                policy;
+                integer_strategy = variant.training_integer_strategy,
+            )
+        end for _ in 1:12
+    )
+end
+
 """
     train_variant!(policy, variant, det_eq, state_params_in, state_params_out,
                    uncertainty_sampler, initial_state, model_path, curve_path;
@@ -528,7 +615,12 @@ train_variant!(policy, variant, det_eq, spi, spo, sampler, x0,
 function train_variant!(
     policy,
     variant::InventoryTrainingVariant,
-    det_eq::JuMP.Model,
+    # Penalty variants train on the deterministic equivalent (JuMP.Model);
+    # strict variants train stage-wise (Vector{JuMP.Model}, realized-state
+    # feedback) because the target (order-up-to position s_mid) and the
+    # carried state (post-demand inventory s_out) are different quantities —
+    # target feedback would hand the reachable policy the wrong state.
+    det_eq::Union{JuMP.Model,Vector{JuMP.Model}},
     state_params_in,
     state_params_out,
     uncertainty_sampler,
@@ -577,6 +669,12 @@ function train_variant!(
     # Fix optimizer randomness for repeatability.
     Random.seed!(2024)
 
+    # The score-function keyword exists only on the deterministic-equivalent
+    # overload of train_multistage; the stage-wise overload (strict variants)
+    # must not receive it.
+    score_function_kwargs = det_eq isa JuMP.Model ?
+        (score_function = variant.score_function,) : NamedTuple()
+
     elapsed_seconds = @elapsed train_multistage(
         policy,
         initial_state,
@@ -589,7 +687,7 @@ function train_variant!(
         optimizer = Flux.Adam(variant.learning_rate),
         integer_strategy = variant.training_integer_strategy,
         penalty_schedule = variant.penalty_schedule_fn(variant),
-        score_function = variant.score_function,
+        score_function_kwargs...,
         record = (sample_log, iteration, current_policy) -> begin
             loss = isempty(sample_log.objectives_no_deficit) ?
                 NaN :
@@ -1084,6 +1182,45 @@ function inventory_training_variants()
         ),
         # Variant B: LSTM with tuned score function
         lstm_score_function_variant(),
+        # --- Strict variants (hard target equalities, no penalty tuning) ---
+        # The reachable policy guarantees ŝ ∈ [s, s + Q_max] exactly, so the
+        # strict equality s_mid == ŝ is always feasible and its dual is the
+        # pure shadow price — no penalty hyperparameter, no annealing.
+        InventoryTrainingVariant(
+            "strict",
+            false,
+            800,
+            10,
+            1.0e-3,
+            120,
+            NoIntegerStrategy(),
+            nothing,
+            INVENTORY_PENALTY,          # unused in strict mode
+            () -> build_reachable_inventory_policy(; seed = 2024),
+            no_penalty_schedule,
+            true,
+        ),
+        # Strict + binary setup: FixedDiscreteIntegerStrategy reads exact LP
+        # shadow prices at the fixed integer assignment. The K·z jump at
+        # ŝ = s (order/no-order switch) is invisible to that local dual; a
+        # mixed score-function gradient can be layered on later using
+        # PENALTY-mode rollout models (ScoreFunctionConfig owns its own
+        # subproblems), since strict rollouts would reject perturbed targets
+        # that leave the reachable interval.
+        InventoryTrainingVariant(
+            "strict_integer",
+            true,
+            800,
+            10,
+            8.0e-4,
+            120,
+            FixedDiscreteIntegerStrategy(),
+            nothing,
+            INVENTORY_PENALTY,          # unused in strict mode
+            () -> build_reachable_inventory_policy(; seed = 2024),
+            no_penalty_schedule,
+            true,
+        ),
     ]
 end
 
