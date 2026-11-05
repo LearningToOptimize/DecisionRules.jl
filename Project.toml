@@ -21,7 +21,7 @@ Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
 CUDA = "5, 6"
-CUDSS = "0.7, 0.8"
+CUDSS = "0.7, 0.8, 1.0"
 ChainRules = "1.72.6"
 ChainRulesCore = "1.25.2"
 DiffOpt = "0.5.6, 0.6"
