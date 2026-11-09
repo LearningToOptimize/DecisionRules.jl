@@ -31,7 +31,7 @@ Pre-generated learning curves are saved as:
 Requires Distributed workers (uses `@everywhere`).  Launch with:
 
 ```bash
-julia -p 4 examples/RL/hydropowermodels_rl.jl
+julia --project=examples/Experimental/RL -p 4 examples/Experimental/RL/hydropowermodels_rl.jl
 ```
 
 ## Dependencies

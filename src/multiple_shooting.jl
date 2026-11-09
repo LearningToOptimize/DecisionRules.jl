@@ -780,6 +780,22 @@ end
  Window data structure + setup
 =============================================================================#
 
+"""
+    WindowData
+
+One multiple-shooting window: the JuMP model of stages `stage_range` solved
+together, and handles to its parameters.
+
+# Fields
+- `model::JuMP.Model`: the window's optimization model.
+- `state_in_params`: parameters fixing the state entering the window, ``x_{t_0-1}``.
+- `state_out_params`: for each stage of the window, the pairs
+  `(target_param, realized_var)` linking the policy target ``\\hat x_t`` to the
+  realized state ``x_t``; the parameter duals of `target_param` are the policy
+  gradient signal.
+- `uncertainty_params`: for each stage of the window, the parameters holding ``w_t``.
+- `stage_range::UnitRange{Int}`: the global stages ``t_0, \\dots, t_1`` this window covers.
+"""
 struct WindowData
     model::JuMP.Model
     state_in_params::Vector{Any}                         # window-start state parameters (MOI.Parameter vars)
