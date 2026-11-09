@@ -33,8 +33,19 @@ model = Model(HiGHS.Optimizer)
 @constraint(model, con, x >= 2 * p)
 @objective(model, Min, 3 * x + p)
 optimize!(model)
-dual_p = compute_parameter_dual(model, p)  # Should be -2 * dual(con) + 1
+dual_p = compute_parameter_dual(model, p)  # = 2 * dual(con) + 1  (constraint x - 2p >= 0 has coef -2 on p, contribution -coef*dual)
+# Hand-check: at the optimum x* = 2p the objective is 7p, so d(obj)/dp = 7 = 2*3 + 1 with dual(con) = 3.
 ```
+
+# Limitations
+Only affine, quadratic, and vector-affine constraint functions are inspected: if the
+parameter appears in any other constraint function type (e.g. a nonlinear
+`ScalarNonlinearFunction` constraint), that contribution is skipped with a one-time
+warning and is NOT captured in the returned sensitivity.
+
+The constraint-dual formula is validated for `MIN_SENSE` objectives; for `MAX_SENSE`
+models JuMP's dual sign conventions differ and this function's constraint contribution
+has not been validated.
 """
 function compute_parameter_dual(model::JuMP.Model, param::JuMP.VariableRef)
     if !JuMP.is_parameter(param)
@@ -73,6 +84,20 @@ function _get_dual_from_constraints(model::JuMP.Model, param::JuMP.VariableRef)
             dual_contribution += _get_dual_from_vector_affine_constraints(
                 model, param, F, S
             )
+            # Variable-in-set constraints (variable bounds, MOI.Parameter definitions)
+            # carry no parameter coefficient to extract: the parameter's own definition
+            # constraint contributes nothing here, and a parameter cannot appear inside
+            # another variable's bound constraint. Skip them silently.
+        elseif F <: JuMP.VariableRef
+            # Intentionally no contribution.
+        else
+            # Any other constraint function type (e.g. ScalarNonlinearFunction) is not
+            # inspected, so if the parameter appears there its sensitivity contribution
+            # is silently zero. Warn once so the gradient gap is visible, but do not
+            # error: constraints of these types often do not involve parameters at all.
+            @warn "compute_parameter_dual: constraints of type ($F, $S) are not " *
+                  "inspected; parameter sensitivities from such constraints are not " *
+                  "captured." maxlog = 1
         end
     end
 
@@ -94,15 +119,11 @@ function _get_dual_from_affine_constraints(model::JuMP.Model, param::JuMP.Variab
         # Check if parameter appears in this constraint
         coef = _get_parameter_coefficient(func, param)
         if !iszero(coef)
-            try
-                con_dual = JuMP.dual(con)
-                # The dual contribution is -coefficient * constraint_dual
-                # This follows from the Lagrangian: L = f(x) + λ*(g(x) - p*coef - b)
-                # ∂L/∂p = -λ * coef
-                dual_contribution -= coef * con_dual
-            catch
-                # If dual is not available, skip this constraint
-            end
+            con_dual = JuMP.dual(con)
+            # The dual contribution is -coefficient * constraint_dual.
+            # This follows from the Lagrangian: L = f(x) + λ*(g(x) - p*coef - b)
+            # ∂L/∂p = -λ * coef.
+            dual_contribution -= coef * con_dual
         end
     end
 
@@ -132,12 +153,8 @@ function _get_dual_from_quadratic_constraints(model::JuMP.Model, param::JuMP.Var
         total_coef = coef + quad_coef
 
         if !iszero(total_coef)
-            try
-                con_dual = JuMP.dual(con)
-                dual_contribution -= total_coef * con_dual
-            catch
-                # If dual is not available, skip this constraint
-            end
+            con_dual = JuMP.dual(con)
+            dual_contribution -= total_coef * con_dual
         end
     end
 
@@ -158,17 +175,12 @@ function _get_dual_from_vector_affine_constraints(
         con_obj = JuMP.constraint_object(con)
         func = con_obj.func  # Vector of AffExpr
 
-        try
+        coefs = [_get_parameter_coefficient(expr, param) for expr in func]
+        if any(!iszero, coefs)
             con_dual = JuMP.dual(con)  # Vector of duals
-
-            for (i, expr) in enumerate(func)
-                coef = _get_parameter_coefficient(expr, param)
-                if !iszero(coef)
-                    dual_contribution -= coef * con_dual[i]
-                end
+            for (coef, dual_entry) in zip(coefs, con_dual)
+                dual_contribution -= coef * dual_entry
             end
-        catch
-            # If dual is not available, skip this constraint
         end
     end
 

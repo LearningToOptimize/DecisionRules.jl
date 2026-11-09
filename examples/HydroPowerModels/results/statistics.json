@@ -1,0 +1,238 @@
+{
+  "statistics": {
+    "n_scenarios": 500,
+    "tsddr": {
+      "mean": 314023.6178991833,
+      "sd": 5998.371093278646
+    },
+    "sddp": {
+      "mean": 313546.0899814266,
+      "sd": 5925.4220618959325
+    },
+    "paired_difference": {
+      "mean": 477.52791775669147,
+      "sd": 363.42261283014085,
+      "se": 16.252753336975644,
+      "t": 29.381355137550567,
+      "ci95_cost": [
+        445.5961332755354,
+        509.4597022378475
+      ],
+      "ci95_pct": [
+        0.14211503428473019,
+        0.16248319418303897
+      ],
+      "relative_gap_pct": 0.1522991142338846
+    },
+    "wins_losses_ties": {
+      "tsddr_wins": 29,
+      "tsddr_losses": 471,
+      "ties": 0
+    },
+    "difference_quantiles": {
+      "p0": -1657.11450045096,
+      "p5": -129.9830595868377,
+      "p25": 360.77945845185604,
+      "p50": 498.1808755902457,
+      "p75": 655.3950516526093,
+      "p95": 947.2079611674147,
+      "p100": 1465.8719146864605
+    },
+    "worst_for_tsddr": [
+      {
+        "scenario": 189,
+        "difference": 1465.8719146864605,
+        "pct": 0.46553342832598243
+      },
+      {
+        "scenario": 254,
+        "difference": 1409.9438183908933,
+        "pct": 0.4570442287862192
+      },
+      {
+        "scenario": 366,
+        "difference": 1272.5140079116682,
+        "pct": 0.4124114385177244
+      },
+      {
+        "scenario": 269,
+        "difference": 1216.1438632631907,
+        "pct": 0.39334584149921364
+      },
+      {
+        "scenario": 154,
+        "difference": 1184.2453745946405,
+        "pct": 0.38784779280374415
+      }
+    ],
+    "best_for_tsddr": [
+      {
+        "scenario": 322,
+        "difference": -1657.11450045096,
+        "pct": -0.5477930517832351
+      },
+      {
+        "scenario": 323,
+        "difference": -1583.8105190423084,
+        "pct": -0.5176213068596144
+      },
+      {
+        "scenario": 409,
+        "difference": -1336.4004396636155,
+        "pct": -0.43883687061197746
+      },
+      {
+        "scenario": 125,
+        "difference": -1209.5911590777687,
+        "pct": -0.39808991831924806
+      },
+      {
+        "scenario": 191,
+        "difference": -1080.5316618173965,
+        "pct": -0.3543638665831061
+      }
+    ],
+    "ten_column_check": {
+      "tsddr_panel_mean_in_500": 313751.5548636604,
+      "tsddr_panel_reference": 313751.55485,
+      "tsddr_panel_abs_diff": 1.3660406693816185e-05,
+      "sddp_panel_mean_in_500": 313331.5640418305,
+      "sddp_panel_reference": 313331.56404,
+      "sddp_panel_abs_diff": 1.8304563127458096e-06,
+      "panel_paired_difference": 419.9908218299388,
+      "panel_gap_pct": 0.1340403808707472,
+      "full_gap_pct": 0.1522991142338846,
+      "direction_representative": true
+    },
+    "solve_and_retry": {
+      "tsddr_solved_first_attempt": 498,
+      "tsddr_solved_on_retry": 2,
+      "tsddr_retry_scenarios": [
+        174,
+        369
+      ],
+      "tsddr_all_solved": 500,
+      "sddp_all_solved": 500
+    },
+    "load_shedding": {
+      "tsddr_total_pu": -1.342339332850907,
+      "tsddr_max_bus_stage_pu": -9.986889685697293e-07,
+      "tsddr_scenarios_above_tol": 0,
+      "sddp_total_pu": -0.011777147909951049,
+      "sddp_max_bus_stage_pu": -8.636197073593447e-09,
+      "sddp_scenarios_above_tol": 0,
+      "tolerance_pu": 1e-06
+    }
+  },
+  "stagewise_at_reported_stages": [
+    {
+      "stage": 1,
+      "cum_cost_difference": -40.04996530098548,
+      "tsddr_thermal_MW": 204.29771609919916,
+      "sddp_thermal_MW": 207.2608805475295,
+      "tsddr_hydro_MW": 285.08792718727364,
+      "sddp_hydro_MW": 283.57363871469744,
+      "tsddr_outflow": 51.692054741254516,
+      "sddp_outflow": 50.94909904106046,
+      "tsddr_spill": 6.167786045036055,
+      "sddp_spill": 6.145322018719535,
+      "tsddr_storage": 11.190650877500884,
+      "sddp_storage": 11.57552688513707,
+      "tsddr_cost_gen": 3092.8029742613435,
+      "sddp_cost_gen": 3132.6866182201784,
+      "tsddr_reservoir2": 6.837547402858734,
+      "sddp_reservoir2": 7.521491300440377
+    },
+    {
+      "stage": 12,
+      "cum_cost_difference": -576.5362495347238,
+      "tsddr_thermal_MW": 208.5214671507899,
+      "sddp_thermal_MW": 211.5628963879422,
+      "tsddr_hydro_MW": 279.94730043418565,
+      "sddp_hydro_MW": 277.37859687715434,
+      "tsddr_outflow": 50.10303436596119,
+      "sddp_outflow": 49.54785016039068,
+      "tsddr_spill": 1.3279974288625183,
+      "sddp_spill": 1.257343553191559,
+      "tsddr_storage": 127.76804535322404,
+      "sddp_storage": 131.86874060938038,
+      "tsddr_cost_gen": 3155.291432554409,
+      "sddp_cost_gen": 3200.2830730787173,
+      "tsddr_reservoir2": 102.47207635498047,
+      "sddp_reservoir2": 104.04050778217848
+    },
+    {
+      "stage": 48,
+      "cum_cost_difference": -859.7714653506465,
+      "tsddr_thermal_MW": 209.79350578483326,
+      "sddp_thermal_MW": 212.66267347209882,
+      "tsddr_hydro_MW": 277.59674521972903,
+      "sddp_hydro_MW": 274.8033926207215,
+      "tsddr_outflow": 49.4322074441544,
+      "sddp_outflow": 48.621280373789496,
+      "tsddr_spill": 0.28534781830273015,
+      "sddp_spill": 0.26779515902684276,
+      "tsddr_storage": 3.1070826823431617,
+      "sddp_storage": 8.722544813009966,
+      "tsddr_cost_gen": 3174.615844651683,
+      "sddp_cost_gen": 3217.2598328376885,
+      "tsddr_reservoir2": 2.558086918890476,
+      "sddp_reservoir2": 5.789908706664637
+    },
+    {
+      "stage": 62,
+      "cum_cost_difference": -1688.5006177943958,
+      "tsddr_thermal_MW": 201.8605866971662,
+      "sddp_thermal_MW": 208.3645429757912,
+      "tsddr_hydro_MW": 286.2728764441136,
+      "sddp_hydro_MW": 279.6238813150079,
+      "tsddr_outflow": 51.021672589030445,
+      "sddp_outflow": 49.595181998080555,
+      "tsddr_spill": 1.2016411693751103,
+      "sddp_spill": 1.1039514253909046,
+      "tsddr_storage": 139.0943122653477,
+      "sddp_storage": 149.90363754468396,
+      "tsddr_cost_gen": 3061.015213115031,
+      "sddp_cost_gen": 3153.282927963118,
+      "tsddr_reservoir2": 110.46901580810547,
+      "sddp_reservoir2": 115.65898162739586
+    },
+    {
+      "stage": 90,
+      "cum_cost_difference": -1.7280534516271437,
+      "tsddr_thermal_MW": 214.1447991558952,
+      "sddp_thermal_MW": 212.29003853423058,
+      "tsddr_hydro_MW": 272.8952650387885,
+      "sddp_hydro_MW": 274.7866000753065,
+      "tsddr_outflow": 48.30150134838584,
+      "sddp_outflow": 48.493615901185926,
+      "tsddr_spill": 0.22633468625691391,
+      "sddp_spill": 0.19691187804887905,
+      "tsddr_storage": 4.502946114490515,
+      "sddp_storage": 6.83535468813608,
+      "tsddr_cost_gen": 3240.7255262076137,
+      "sddp_cost_gen": 3211.6383958712813,
+      "tsddr_reservoir2": 3.3230299972891806,
+      "sddp_reservoir2": 5.326980226302594
+    },
+    {
+      "stage": 96,
+      "cum_cost_difference": 477.52791775669147,
+      "tsddr_thermal_MW": 211.77914976801958,
+      "sddp_thermal_MW": 195.26403718436774,
+      "tsddr_hydro_MW": 275.68412007012813,
+      "sddp_hydro_MW": 292.62325175677074,
+      "tsddr_outflow": 49.2292116305868,
+      "sddp_outflow": 51.770335949679875,
+      "tsddr_spill": 0.35130498984654046,
+      "sddp_spill": 0.31171347268552235,
+      "tsddr_storage": 0.4074755772385115,
+      "sddp_storage": 2.0720856543639283,
+      "tsddr_cost_gen": 3211.4770384034487,
+      "sddp_cost_gen": 2969.0593596834974,
+      "tsddr_reservoir2": 0.17949001667363337,
+      "sddp_reservoir2": 0.35051766084313296
+    }
+  ],
+  "n_scenarios_in_stagewise": 500
+}

@@ -19,12 +19,13 @@ jobs:
     permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
       actions: write
       contents: read
+      id-token: write # OIDC token for tokenless Codecov uploads (see codecov step)
     strategy:
       fail-fast: false
       matrix:
         version:
           - '1.10'
-          # - 'nightly'
+          - '1.12'
         os:
           - ubuntu-latest
         arch:
@@ -39,8 +40,22 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v7
+      # Pinned to v5: the dependabot bump to v7 (2026-06-25) silently broke
+      # uploads — Codecov has no commit newer than 2026-06-15, which is what
+      # produces "Missing Head Commit" on PRs. v5 is the last version verified
+      # to upload from this workflow. Before re-bumping, migrate deliberately
+      # (e.g. OIDC: `use_oidc: true` + `id-token: write` permission) and
+      # confirm a commit appears on Codecov.
+      # Authentication uses OIDC (`use_oidc` + the job's `id-token: write`
+      # permission) because the CODECOV_TOKEN secret is not set in this repo
+      # ("Token length: 0" in CI) and tokenless uploads are rejected on
+      # protected branches. OIDC requires the Codecov GitHub App to be
+      # installed for the organization; if uploads fail with an OIDC error,
+      # either install the app or set the CODECOV_TOKEN secret and replace
+      # `use_oidc` with `token: ${{ secrets.CODECOV_TOKEN }}`.
+      - uses: codecov/codecov-action@v5
         with:
           files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          use_oidc: true
+          # Fail loudly: a silent upload failure hid this breakage for weeks.
+          fail_ci_if_error: true

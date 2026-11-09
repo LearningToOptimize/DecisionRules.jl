@@ -1,0 +1,223 @@
+# Renewable/storage variants of a frozen battery case.
+#
+# A declarative recipe, read by `renewable_variant_recipe` in
+# renewable_variant.jl. Every choice that determines a variant is written here
+# or named here by rule; the code only evaluates the rules. The base case this
+# is applied to is NOT described here: the variant is a transformation, and the
+# same recipe applied to a different host yields that host's variant.
+#
+# Notation. `pu` is per unit on the network's own baseMVA; `pu.h` is per-unit
+# power sustained for one hour. Generator cost polynomials are the host's own,
+# in the per-unit basis PowerModels stores them in, so a coefficient c1 has
+# units of currency per pu.h and c1/100 is currency per MWh on a 100 MVA base.
+
+schema         = "battery_storage_opf/renewable_variants/1"
+recipe_version = 2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regions
+#
+# Each region is the bus set of one existing ZONE of the host. Zones are used
+# because they are already in the data, are already connected, and carry no
+# claim of their own: the ROLES below are assigned by this recipe, not
+# discovered in the case. Nothing in a PGLib file says a zone is sunny.
+# ─────────────────────────────────────────────────────────────────────────────
+[regions.L]
+zones = [3]
+role  = "concentrated demand, receiving-side storage, costly thermal backup"
+[regions.W1]
+zones = [7]
+role  = "predominantly overnight wind, local demand, source-side storage"
+[regions.W2]
+zones = [5]
+role  = "differently timed wind, uncertain evening recovery"
+[regions.S]
+zones = [9]
+role  = "concentrated solar, low local demand, colocated storage"
+[regions.R]
+zones = [1, 2, 4, 6, 8, 10, 11]
+role  = "rest of system, roles unchanged"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generation transition
+#
+# A DECLARED SCENARIO — a set of retirements the variant assumes have happened —
+# not a claim that these are the system's cheapest plants and not a dispatch
+# result. The measure is the unit's average variable cost at rated output,
+#
+#     avc = (c2*pmax^2 + c1*pmax) / pmax / 100      [currency per MWh]
+#
+# which is what a retirement decision looks at. Sorting by the LINEAR
+# coefficient alone is not a cost ordering: a unit may carry c1 = 0 and a
+# quadratic term large enough to put its marginal cost at rated output in the
+# tens of currency units per MWh.
+#
+# Retired units are DELETED from the variant network rather than given zero
+# availability. `apply_stage_availability!` scales pmin, pmax, qmin and qmax and
+# does not touch the cost polynomial, so a zero-availability unit with a nonzero
+# constant term keeps charging that term while generating nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+[transition]
+measure               = "average_variable_cost_at_pmax"
+threshold_usd_per_mwh = 2.00
+# Kept regardless of the rule, and for stated ADEQUACY reasons, not economic
+# ones: the first is the host's reference bus, which keeps local active and
+# reactive generation; the second keeps the retained nameplate above peak demand.
+# Named here rather than folded into the rule so that the rule stays one line.
+keep_reference_bus_unit = true
+keep_extra_gen_indices  = [156]
+
+# What becomes of a retired unit.
+#
+#   "delete"                removes it from the network outright.
+#   "synchronous_condenser" keeps it in service with pmin = pmax = 0, its
+#                           reactive limits untouched, and no cost of any order.
+#
+# A retirement does two separable things: it removes ACTIVE capacity, which is
+# the mechanism a case like this is built on, and it removes REACTIVE
+# capability, which is not. Deleting the machine does both at once. Converting
+# it to a condenser does only the first, which is also what a utility does with
+# a unit retired inside a load pocket, because the pocket still has to hold its
+# voltage after the fuel stops.
+retired_disposition     = "synchronous_condenser"
+
+# Units the rule would retire but which are RESTORED intact — original active
+# bounds, original cost curve, original reactive limits — because the no-storage
+# control must serve demand without recourse and, measured, it could not.
+#
+# These are not exceptions of convenience and they are not free. Both carry a
+# positive minimum output, so they run whenever the case is solved at all and
+# can displace renewable energy at the margin; both are cheap, so their energy
+# competes with storage. Restoring them also returns their constant cost to the
+# objective, enlarging the total-cost denominator. Every one of those effects is
+# measured rather than assumed.
+restore_gen_indices     = [63, 103]
+
+# Geographic exemption. Every in-service generator whose bus lies in one of these
+# ZONES is excluded from the retirement transformation entirely and keeps its
+# original active bounds, reactive bounds and complete cost polynomial.
+#
+# This is a statement about a PLACE, not a list of units: it says the transition
+# does not touch that part of the system, and it stays true if the host's
+# generator indices change. Zone 4 is exempted because the no-storage control
+# could not serve two of its buses once its own units were converted, and zone 4
+# is no part of the S/W1/W2/L mechanism this case is built to exercise — it
+# receives no renewable build and carries none of the intended story.
+exempt_zones            = [4]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Renewable build
+#
+# Reactive capability is a MODELLING ASSUMPTION declared here, not a property of
+# solar or wind: real inverters can be specified to hold reactive capability at
+# zero irradiance. `qmax_fraction` sets the rating and the availability
+# multiplier scales it with the active limits, so a unit at zero availability
+# supplies no reactive power. Every comparator of a variant carries the same
+# assumption, including the no-storage control.
+# ─────────────────────────────────────────────────────────────────────────────
+[renewables]
+# Weighted by the host's ORIGINAL in-service generators, before the
+# transition deletes any of them, so a retired plant's interconnection point
+# still receives its share and the rule stays defined for a region that retires
+# every unit it has.
+placement_rule = "proportional_to_regional_gen_pmax"
+qmax_fraction  = 0.33
+pmin_pu        = 0.0
+cost           = [0.0, 0.0, 0.0]
+installed_pu   = { S = 55.0, W1 = 38.0, W2 = 30.0 }
+
+# Availability multipliers, one entry per stage. A name of the form
+# `<region>_<template>` overrides the plain `<region>` entry for that template.
+[renewables.availability]
+S  = [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.10, 0.35, 0.62, 0.82, 0.95, 0.97,
+      0.93, 0.86, 0.62, 0.34, 0.08, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00]
+W1 = [0.85, 0.85, 0.85, 0.85, 0.22, 0.22, 0.45, 0.45, 0.45, 0.45, 0.15, 0.15,
+      0.15, 0.15, 0.10, 0.10, 0.10, 0.15, 0.15, 0.15, 0.72, 0.80, 0.84, 0.80]
+W2_reliable = [0.15, 0.15, 0.15, 0.15, 0.10, 0.10, 0.15, 0.15, 0.15, 0.15, 0.80, 0.80,
+               0.80, 0.80, 0.10, 0.10, 0.10, 0.65, 0.65, 0.65, 0.35, 0.35, 0.35, 0.35]
+W2_delayed  = [0.15, 0.15, 0.15, 0.15, 0.10, 0.10, 0.15, 0.15, 0.15, 0.15, 0.80, 0.80,
+               0.80, 0.80, 0.10, 0.10, 0.10, 0.05, 0.05, 0.05, 0.35, 0.35, 0.35, 0.35]
+
+[templates]
+names   = ["reliable", "delayed"]
+nominal = "reliable"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Storage
+#
+# The fleet is RESIZED by region, never relocated: the unit count and the buses
+# are the base case's. Total power and total energy are preserved to the base
+# case's own values, so no comparison between the base case and a variant is
+# confounded by fleet size. `power_pu` and `energy_puh` are targets per region;
+# the builder scales every battery of a region by that region's two factors, and
+# the region named in `balance` absorbs the exact arithmetic remainder.
+# ─────────────────────────────────────────────────────────────────────────────
+[storage]
+preserve_totals = true
+balance         = "R"
+[storage.region.L]
+power_pu = 4.50
+energy_puh = 27.00
+reason = "receiving side: power-rich for the evening ramp"
+[storage.region.W1]
+power_pu = 3.30
+energy_puh = 26.40
+reason = "source side: absorbs the overnight surplus its corridors cannot export"
+[storage.region.S]
+power_pu = 2.50
+energy_puh = 25.00
+reason = "source side: energy-rich, absorbs the midday surplus its corridors cannot export"
+[storage.region.W2]
+power_pu = 1.20
+energy_puh = 9.60
+reason = "transfer region, unchanged in character"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional renewable colocation (placement variant)
+#
+# Moves the SOURCE regions' batteries onto the renewable injection buses inside
+# their own region. Nothing else changes: the unit count, each unit's power and
+# energy rating, its efficiencies, its throughput cost, its initial inventory and
+# its terminal requirement are all carried across untouched, and the batteries of
+# L and R are not moved at all. Only the `bus` field changes, so the NETWORK is
+# byte-identical between the two placements and a battery-disabled model cannot
+# tell them apart.
+#
+# The assignment is deterministic and capacity-based, fixed here before any solve:
+#
+#   * within a region, take its batteries in order of descending energy rating,
+#     ties broken by battery index;
+#   * take that region's renewable injection buses, and assign each battery to
+#     the bus that MINIMISES (already-assigned battery energy + this battery's
+#     energy) / (renewable capacity installed at that bus), ties broken by the
+#     lower bus identifier.
+#
+# The ratio is what makes it capacity-based: storage accumulates at a bus in
+# proportion to the renewable capacity injecting there, rather than by count or
+# by arbitrary order.
+# ─────────────────────────────────────────────────────────────────────────────
+[storage.colocate]
+regions = ["S", "W1", "W2"]
+rule    = "greedy_energy_per_installed_capacity"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Boundary convention
+#
+# Opt-in. A case built without this section keeps whatever initial energy its
+# base case declared and imposes no terminal requirement, which is the
+# behaviour of every case frozen before this recipe existed.
+# ─────────────────────────────────────────────────────────────────────────────
+[boundary]
+initial_fraction_of_usable = 0.25
+terminal_at_least_initial  = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Demand
+#
+# The first variants are deterministic in demand: the base case's temporal
+# profile is kept and its finite support is collapsed to one atom of multiplier
+# 1 at every stage. Randomising demand or renewables is a LATER recipe version,
+# and this field is what a reader checks to see which one they have.
+# ─────────────────────────────────────────────────────────────────────────────
+[demand]
+mode = "deterministic_profile"
