@@ -22,15 +22,18 @@
 }
 /* Phone layout: show the "-compact" variant of a diagram instead of the wide one. */
 .dr-fig img[src*="-compact"] {
-  display: none;
+  display: none !important;
   max-width: 360px;
 }
 @media (max-width: 640px) {
   .dr-fig.has-compact img:not([src*="-compact"]) {
-    display: none;
+    display: none !important;
   }
   .dr-fig.has-compact img[src*="-compact"] {
-    display: block;
+    display: block !important;
+  }
+  .dr-fig img {
+    padding: 6px;
   }
 }
 .dr-fig figcaption {
@@ -43,6 +46,8 @@
 }
 .dr-fig figcaption b {
   opacity: 1;
+  font-style: normal;
+  font-weight: 700;
 }
 /* Dark themes: keep the white paper, replace the border by a subtle ring. */
 html.theme--documenter-dark .dr-fig img,
