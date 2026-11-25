@@ -1,27 +1,30 @@
+<div align="center">
+
+# DecisionRules.jl
+
+<p><sub><b>MULTISTAGE POLICIES · STATE TARGETS · DUAL GRADIENTS</b></sub></p>
+
 [![Build Status](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/LearningToOptimize/DecisionRules.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/LearningToOptimize/DecisionRules.jl/graph/badge.svg)](https://app.codecov.io/gh/LearningToOptimize/DecisionRules.jl)
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://LearningToOptimize.github.io/DecisionRules.jl/dev/)
 
-# DecisionRules.jl
+</div>
 
-DecisionRules.jl is a Julia package for training parametric decision rules for multistage stochastic programs in which every stage is an optimization model, such as an optimal power flow or a model-predictive control problem. It implements two-stage generalized decision rules (TS-GDR) and their deep instantiation, two-stage deep decision rules (TS-DDR), introduced in [arXiv:2405.14973](https://arxiv.org/abs/2405.14973). A policy, from an affine rule to a deep recurrent network, maps the observed uncertainty to a target for the state at the end of every stage; an optimization problem enforces the targets against the stage models; and the multipliers of the target constraints provide the gradient with which the policy is trained. The stage models are written in JuMP, and the companion package [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) trains the same policies on GPUs.
+<p align="center">
+  <picture>
+    <source media="(max-width: 640px)" srcset="docs/src/assets/diagrams/tsddr-compact.svg">
+    <img src="docs/src/assets/diagrams/tsddr.svg" width="760" alt="TS-DDR training. A sampled uncertainty omega drives per-stage policies pi_t that emit a state target x-hat_t for every stage. One deterministic-equivalent problem over the whole horizon minimizes the stage costs plus a penalty on the slack delta_t, subject to the dynamics, the constraints h, and the target constraints x_t + delta_t = x-hat_t, whose multiplier is lambda. By duality lambda is the gradient of the optimal value Q with respect to the targets, and automatic differentiation multiplies it by the policy Jacobian to update theta.">
+  </picture>
+</p>
+<p align="center"><i>Policies emit a state target for every stage, one deterministic-equivalent problem realizes them, duality prices them, and automatic differentiation carries the price back to the policy weights (redrawn from Fig. 1 of <a href="https://arxiv.org/abs/2405.14973">arXiv:2405.14973</a>).</i></p>
 
-![TS-GDR / deterministic-equivalent workflow](diagram_tsddr.png)
-
-## Workflow
-
-In TS-GDR the policy does not output a control action. It outputs targets, typically for the state at the end of every stage, and an optimization model enforces them through target constraints: with a penalized slack in the general formulation, or as hard equalities in the strict formulation when the policy can be restricted to targets reachable in one stage. For a sampled uncertainty trajectory $w_{1:T}$, a training step is:
-
-1. sample $w_{1:T}$
-2. predict targets $\hat x_{1:T} = \pi(\cdot;\theta)$
-3. solve an optimization problem that projects targets onto the feasible set (dynamics + constraints)
-4. differentiate to update $\theta$ using dual information and/or implicit sensitivities (via DiffOpt)
-
-DecisionRules.jl implements this workflow in three flavors:
-
-- **Deterministic equivalent (direct transcription)**: one coupled optimization over the full horizon.
-- **Stage-wise decomposition (single shooting)**: one optimization per stage in a sequential rollout.
-- **Windowed decomposition (multiple shooting)**: one coupled optimization per window, chained by the realized end-state.
+A policy for a constrained multistage system must return actions that satisfy the operating model at every stage.
+DecisionRules.jl trains policies whose outputs are state targets, realized by an optimization over the operating
+model written in JuMP, with gradients read from the multipliers of the target constraints instead of differentiated
+through solver iterations. It implements two-stage generalized decision rules (TS-GDR) and their deep instantiation,
+two-stage deep decision rules (TS-DDR), introduced in [arXiv:2405.14973](https://arxiv.org/abs/2405.14973); the
+companion package [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) trains the same
+policies on GPUs.
 
 ## Installation
 
@@ -32,22 +35,26 @@ Pkg.add("DecisionRules")
 
 ## What you need to provide
 
-DecisionRules.jl is intentionally “model-first”: you describe your problem in JuMP (DiffOpt-enabled for all but the deterministic equivalent approach), then the package handles simulation and training.
+The package is model-first: you describe the problem in JuMP (DiffOpt-enabled for every formulation except the
+deterministic equivalent), and the package handles simulation and training.
 
-For any multi-stage model you will need:
+| Input | What it is |
+|:--|:--|
+| `subproblems::Vector{JuMP.Model}` | one JuMP model per stage (DiffOpt-enabled) |
+| `state_params_in[t]` | parameter variables for the incoming state of stage `t` |
+| `state_params_out[t]` | `(target_param, realized_state_var)` pairs of stage `t`: the parameter the policy sets, and the decision variable whose value becomes the realized state |
+| `uncertainty_sampler` | returns per-stage samples in the format used by `DecisionRules.sample(...)` |
+| policy | a differentiable model (Flux.jl or compatible); input size = uncertainty components per stage + initial-state size, output size = target-state size |
 
-- `subproblems::Vector{JuMP.Model}`: one JuMP model per stage (DiffOpt-enabled).
-- `state_params_in[t]`: a vector of **parameter variables** for the incoming state at stage `t`.
-- `state_params_out[t]`: a vector of `(target_param, realized_state_var)` tuples at stage `t`.
-  The `target_param` is the **parameter variable** that the policy sets; the `realized_state_var` is the JuMP decision variable whose value becomes the realized state.
-- an `uncertainty_sampler` that returns per-stage samples in the format used by `DecisionRules.sample(...)`.
-- Differentiable policies built with Flux.jl or similar compatible libraries. Input size is the number of uncertainty components per stage plus the size of the initial state; output size is the size of the target state at each stage.
+Working patterns are in [`examples/`](examples/).
 
-Working patterns are provided in `examples/`.
+## Quick start: the deterministic equivalent
 
-## Deterministic equivalent (TS-DDR / direct transcription)
-
-This corresponds to solving one coupled optimization over all stages (the deterministic equivalent of a sampled trajectory). You build the deterministic-equivalent JuMP model with `DecisionRules.deterministic_equivalent!` and then train with the deterministic-equivalent overload of `train_multistage`.
+A training step samples an uncertainty trajectory $w_{1:T}$, predicts the targets $\hat x_{1:T} = \pi(\cdot;\theta)$,
+solves an optimization problem that enforces them against the stage models (with a penalized slack, or as hard
+equalities in strict mode), and updates $\theta$ with the multipliers of the target constraints. The deterministic
+equivalent, the formulation in the figure above, couples all stages in one problem: build it with
+`DecisionRules.deterministic_equivalent!` and train with the matching overload of `train_multistage`.
 
 ```julia
 using DecisionRules, JuMP, DiffOpt, Flux
@@ -91,11 +98,19 @@ DecisionRules.train_multistage(
 )
 ```
 
-This mode typically gives the most faithful gradient signal (full coupling across the horizon), but it requires solving the largest inner problem per sample.
+This mode gives the most faithful gradient signal (full coupling across the horizon), at the price of the largest
+inner problem per sample.
 
-## Stage-wise decomposition (single shooting)
+## Three ways to couple the horizon
 
-Single shooting solves one optimization per stage and rolls forward using the realized state returned by the solver. The policy can be **closed-loop** because it receives the realized state $x_{t-1}$ when predicting the next target $\hat x_t$.
+| Formulation | Solved per sampled trajectory | Gradient from |
+|:--|:--|:--|
+| Deterministic equivalent (direct transcription) | one problem over the whole horizon | multipliers of the target constraints |
+| Stage-wise decomposition (single shooting) | one problem per stage, in sequence | multipliers + DiffOpt sensitivities along the rollout |
+| Windowed decomposition (multiple shooting) | one problem per window of `window_size` stages, chained by the realized end state | multipliers within a window, sensitivities across windows |
+
+**Stage-wise (single shooting).** Each stage is solved in sequence from the realized state returned by the solver, so
+the policy is closed-loop: it receives the realized state $x_{t-1}$ when it predicts $\hat x_t$.
 
 ```julia
 using DecisionRules, Flux
@@ -119,11 +134,9 @@ DecisionRules.train_multistage(
 )
 ```
 
-Internally, gradients are obtained by combining (i) dual information for target parameters and (ii) solution sensitivities computed through **DiffOpt** along the rollout.
-
-## Windowed decomposition (multiple shooting)
-
-Multiple shooting partitions the horizon into windows of length `window_size`. Each window solves a deterministic equivalent over its stages, then passes the realized end state to the next window. This can stabilize learning over long horizons compared to pure single shooting, while remaining cheaper than a full-horizon deterministic equivalent.
+**Windowed (multiple shooting).** Each window solves a deterministic equivalent over its stages and passes the
+realized end state to the next one. This can stabilize learning over long horizons compared with single shooting,
+while staying cheaper than a full-horizon deterministic equivalent.
 
 ```julia
 using DecisionRules, Flux, DiffOpt
@@ -161,9 +174,14 @@ DecisionRules.train_multiple_shooting(
 
 ## Evaluation: stage-wise rollout and target-violation share
 
-Evaluating a trained policy only through the deterministic equivalent can overstate its quality: the coupled solve re-optimizes all stages jointly and absorbs targets that are not followable stage by stage through the slack penalty — exactly what deployment cannot do. The stage-wise rollout is the deployment semantics of a target-trajectory policy, so report it as the headline metric, together with a target-violation measure.
+Evaluating a policy only through the deterministic equivalent can overstate its quality: the coupled solve
+re-optimizes all stages jointly and absorbs, through the slack penalty, targets that cannot be followed stage by
+stage, which deployment cannot do. The stage-wise rollout is the deployment semantics of a target-trajectory policy,
+so report it as the headline metric together with a target-violation measure.
 
-The training loops record metrics through a per-sample `SampleLog` cache and a per-batch `record(sample_log, iter, model)` callback. `RolloutEvaluation` is a ready-made helper that evaluates the policy stage-wise on a fixed held-out scenario set; call it from within `record`:
+The training loops record metrics through a per-sample `SampleLog` cache and a per-batch
+`record(sample_log, iter, model)` callback. `RolloutEvaluation` evaluates the policy stage-wise on a fixed held-out
+scenario set; call it from `record`:
 
 ```julia
 using DecisionRules, Random
@@ -187,21 +205,20 @@ train_multistage(policy, initial_state, det, state_params_in, state_params_out, 
     end)
 ```
 
-`policy_state` selects which state is fed back to the policy between stage solves:
+| `policy_state` | Fed back to the policy between stage solves | Use it for |
+|:--|:--|:--|
+| `:realized` (default) | the previous realized optimizer state | the closed-loop, deployment rollout |
+| `:target` | the previous target state | comparing with a deterministic-equivalent training loss, which calls the policy on the same target history; log `:realized` separately as the deployment diagnostic |
 
-- `:realized` feeds the previous realized optimizer state to the policy. This is the
-  closed-loop/deployment rollout and is the default.
-- `:target` feeds the previous target/predicted state to the policy, matching the
-  deterministic-equivalent target-generation path while still solving the stage
-  subproblems sequentially.
+Each evaluation reports the rollout objective **excluding** the target-slack penalty (the operational cost) and the
+**target-violation share**, the realized slack penalty divided by the full objective. Policy comparisons are
+trustworthy only when the share is small (≤ ~0.05); a larger share means the targets cannot be followed stage by
+stage and the reported cost is not what deployment would realize. When training drives the share to ~0, the
+deterministic-equivalent and rollout views are expected to coincide; the rollout metric detects when they don't.
 
-Use `policy_state=:target` when comparing against a deterministic-equivalent
-training loss, because both metrics then call the policy on the same target-state
-history. Log `:realized` separately as the harder deployment diagnostic.
-
-Each evaluation reports (a) the rollout objective **excluding** the target-slack penalty term (the operational cost) and (b) the **target-violation share** — the realized slack penalty divided by the full objective. Policy comparisons are only trustworthy when the violation share is small (≤ ~0.05): a larger share means the policy's targets are not followable stage by stage and the reported cost is not what deployment would realize. When training drives the violation share to ~0, the deterministic-equivalent and rollout views are expected to coincide; the rollout metric is the guard that detects when they don't.
-
-Per-sample debugging hooks can be attached with `SampleLog(on_sample=(s, models, log) -> ...)`; the training loop calls the hook after each sample's solve with the live JuMP model(s). The previous `record_loss=(iter, model, loss, tag) -> ...` keyword keeps working as a deprecated adapter.
+Per-sample debugging hooks attach with `SampleLog(on_sample=(s, models, log) -> ...)`, called after each sample's
+solve with the live JuMP model(s). The previous `record_loss=(iter, model, loss, tag) -> ...` keyword keeps working
+as a deprecated adapter.
 
 ## Strict mode and reachable policies
 
@@ -235,12 +252,12 @@ trajectory is rolled out from the true initial state using a reachable policy:
 \hat{x}_t \in R(\hat{x}_{t-1}, w_t).
 ```
 
-By induction, all targets are feasible, and the strict equalities force the
-realized trajectory to match that reachable path. See
+Every target is then reachable from the state the policy conditioned on, and the
+strict equalities make the realized trajectory follow that reachable path. See
 [`examples/HydroPowerModels`](examples/HydroPowerModels) and the
 DecisionRulesExa.jl companion for the GPU strict regular-DE implementation.
 
-The reachable map ``R(\hat x_{t-1}, w_t)`` depends on the state, and that
+The reachable map $R(\hat x_{t-1}, w_t)$ depends on the state, and that
 dependence **must be differentiated**. Treating the interval endpoints as
 constants still trains and still lowers the loss while descending a materially
 different direction — on the hydro case, a gradient carrying 6% of the true
@@ -256,15 +273,14 @@ The policy helpers separate two architectural choices:
 
 ## GPU acceleration with DecisionRulesExa.jl
 
-For large-scale problems where the inner NLP solve is the bottleneck (e.g., AC-OPF with hundreds of buses), [DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) provides a GPU-accelerated backend that replaces JuMP with [ExaModels.jl](https://github.com/exanauts/ExaModels.jl) and solves with [MadNLP.jl](https://github.com/MadNLP/MadNLP.jl) + CUDSS on GPU.
-
-DecisionRulesExa.jl implements the same TS-DDR algorithm (deterministic-equivalent mode) with the same envelope-theorem gradient computation but formulates the NLP in ExaModels' SIMD-compatible modeling layer. This enables:
-
-- **GPU-native interior-point solves** via MadNLP + CUDSS
-- **Parallel GPU solves** for multiple training samples per gradient step
-- **Runtime parameter updates** via `ExaModels.set_parameter!` (no model reconstruction)
-
-See the [GPU Acceleration](https://LearningToOptimize.github.io/DecisionRules.jl/dev/gpu_acceleration/) page in the documentation for a tutorial on getting started with DecisionRulesExa.jl.
+When the inner NLP solve is the bottleneck (e.g., AC-OPF with hundreds of buses),
+[DecisionRulesExa.jl](https://github.com/LearningToOptimize/DecisionRulesExa.jl) runs the same TS-DDR algorithm
+(deterministic-equivalent mode, same envelope-theorem gradient) with
+[ExaModels.jl](https://github.com/exanauts/ExaModels.jl) and [MadNLP.jl](https://github.com/MadNLP/MadNLP.jl) + CUDSS:
+GPU-native interior-point solves, parallel GPU solves for the samples of a gradient step, and runtime parameter
+updates with `ExaModels.set_parameter!` instead of model reconstruction. The
+[GPU acceleration](https://LearningToOptimize.github.io/DecisionRules.jl/dev/gpu_acceleration/) page of the
+documentation is the tutorial.
 
 ## Examples and tests
 
