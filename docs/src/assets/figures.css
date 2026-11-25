@@ -5,6 +5,11 @@
   max-width: 760px;
   text-align: center;
 }
+/* Documenter's .content figure adds 2em side margins; the frame centres itself. */
+.content figure.dr-fig {
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
 .dr-fig p {
   margin: 0;
 }
