@@ -22,6 +22,7 @@ makedocs(;
         prettyurls=get(ENV, "CI", nothing) == "true",
         canonical="https://LearningToOptimize.github.io/DecisionRules.jl",
         size_threshold=300 * 1024,
+        assets=["assets/figures.css"],
     ),
     pages=[
         "Home" => "index.md",

@@ -82,6 +82,16 @@ function theorem when needed (e.g., for state-transition sensitivities).
 
 ## Three training formulations
 
+The figures on this page use the notation of the paper. ``x_t`` (bold in the
+stage-wise figures) is the state and ``y_t`` the remaining decisions (the ``u_t``
+above); ``f`` is the stage cost ``c_t``; the transition ``\mathcal T`` and the
+constraints ``h`` together define ``\mathcal X_t``; ``\delta_t`` is the slack of
+the target constraint, penalized by ``C_\delta`` (written ``\lambda`` in the
+formulas on this page); and ``Q(w, \hat x)`` is the optimal value of the
+problem the targets enter. In the figures ``\lambda`` always denotes the
+multiplier of the target constraint, and ``\boldsymbol\zeta_t`` is the recurrent
+memory of the policy. Inputs drawn in red enter the problems as parameters.
+
 ### Deterministic equivalent
 
 All stages are coupled into a single NLP for a sampled trajectory ``w_{1:T}``:
@@ -89,6 +99,17 @@ All stages are coupled into a single NLP for a sampled trajectory ``w_{1:T}``:
 ```math
 \min_{x, u} \; \sum_{t=1}^T c_t(x_t, u_t) + \lambda \| x_t - \hat{x}_t \|
 \quad \text{s.t.} \quad \text{dynamics + constraints for all } t
+```
+
+```@raw html
+<figure class="dr-fig has-compact">
+```
+![TS-DDR training. A sampled uncertainty omega drives per-stage policies pi_t that emit a state target x-hat_t for every stage. One deterministic-equivalent problem over the whole horizon minimizes the stage costs plus a penalty on the slack delta_t, subject to the dynamics, the constraints h, and the target constraints x_t + delta_t = x-hat_t, whose multiplier is lambda. By duality lambda is the gradient of the optimal value Q with respect to the targets, and automatic differentiation multiplies it by the policy Jacobian to update theta.](assets/diagrams/tsddr.svg)
+
+![The same diagram in a narrow layout.](assets/diagrams/tsddr-compact.svg)
+```@raw html
+<figcaption><b>One problem over the horizon, priced by duality.</b> For a sampled scenario the per-stage policies $\pi_t$ emit every target $\hat x_t$; one deterministic-equivalent problem realizes them, with $w_t$ and the targets (red) as parameters and a penalized slack $\delta_t$ on each target constraint. The multiplier of that constraint is $\lambda = \nabla_{\hat x} Q(w,\hat x)$, and automatic differentiation chains it with $\nabla_\theta \pi$ to give the gradient with respect to the policy weights. Redrawn from Fig. 1 of <a href="https://arxiv.org/abs/2405.14973">arXiv:2405.14973</a>.</figcaption>
+</figure>
 ```
 
 The policy generates targets in a single forward pass, and the coupled solve determines
@@ -110,6 +131,17 @@ for t = 1, ..., T:
 
 Gradients combine dual information for targets with DiffOpt sensitivities along the
 rollout chain.
+
+```@raw html
+<figure class="dr-fig has-compact">
+```
+![Two consecutive stages of the stage-wise rollout with penalized targets. Each stage problem implements its target up to a penalized discrepancy delta_t and passes its realized state to the next stage problem and to the next copy of the policy. Under each stage problem are its target multiplier and its solution sensitivities; a dashed chain of derivatives runs backward from each stage to the previous one.](assets/diagrams/decision-rules--causal-stages.svg)
+
+![The same diagram in a narrow layout.](assets/diagrams/decision-rules--causal-stages-compact.svg)
+```@raw html
+<figcaption><b>Decomposed by stages, the penalized problem is solved in sequence.</b> Stage $t$ receives the realized state $\mathbf x^\star_{t-1}$, implements its target up to the penalized discrepancy $\boldsymbol\delta_t$, and hands $\mathbf x^\star_t$ to the next stage and to the rule. The gradient of a target adds to its multiplier $\bar{\boldsymbol\lambda}_t$ its effect on the later stages, which the dashed chain $dV^{\mathbf w}_{t+1}/d\mathbf x^\star_t$ carries backward along the path through the solution sensitivities of each stage problem (purple), computed with DiffOpt. In the narrow layout, $F^\delta_t=f(\mathbf x_t,\mathbf y_t)+C^\delta_t\lVert\boldsymbol\delta_t\rVert$ abbreviates the penalized stage cost.</figcaption>
+</figure>
+```
 
 **Pros**: closed-loop policy (sees realized states); smaller per-stage solves.
 **Cons**: sequential; gradient signal weakens over long horizons.
@@ -180,6 +212,17 @@ There are no deficit variables, no penalty term, and no penalty to tune. The
 dual ``\lambda_t`` is the **pure shadow price** ``\partial Q_t / \partial
 \hat{x}_t`` — the marginal value of changing the target, uncontaminated by
 any regularization.
+
+```@raw html
+<figure class="dr-fig has-compact">
+```
+![Strict targets over a horizon. A recurrent policy with shared weights theta emits each target and memory from the realized uncertainty and the previous target and memory. Stage problem t fixes its incoming state to the previous target and its outgoing state to the current target, so the stage problems are solved independently. The multiplier of the incoming-state constraint of stage t+1 and of the outgoing-state constraint of stage t add up to lambda_t, and the sum of lambda_t times the policy Jacobian is the gradient with respect to theta.](assets/diagrams/decision-rules--parallel-stages.svg)
+
+![The same diagram in a narrow layout.](assets/diagrams/decision-rules--parallel-stages-compact.svg)
+```@raw html
+<figcaption><b>Strict targets separate the problem into stage problems solved in parallel.</b> Adjacent targets and the current realization define each stage problem $q_t$, and no stage problem receives anything from another. Each target is priced twice, as the outgoing state of its stage ($\bar{\boldsymbol\lambda}_t$) and as the incoming state of the next stage ($\boldsymbol\mu_{t+1}$), and the sums form the gradient with respect to the shared weights. Each copy of the policy includes the map into the reachable set described below.</figcaption>
+</figure>
+```
 
 ### The condition: target reachability
 
